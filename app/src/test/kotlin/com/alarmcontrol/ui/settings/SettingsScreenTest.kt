@@ -1,0 +1,217 @@
+package com.alarmcontrol.ui.settings
+
+import android.app.Application
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
+import com.alarmcontrol.ui.NotificationAccessUiState
+import com.alarmcontrol.ui.theme.AlarmControlTheme
+import org.junit.Assert.assertTrue
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+import org.robolectric.annotation.GraphicsMode
+
+@RunWith(RobolectricTestRunner::class)
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
+@Config(application = Application::class, sdk = [34])
+class SettingsScreenTest {
+    @get:Rule
+    val composeRule = createComposeRule()
+
+    @Test
+    fun `local LLM controls render from presentation state`() {
+        setScreen(
+            SettingsUiState(llmModelStatus = LlmModelUiStatus.READY),
+            destination = SettingsDestination.LOCAL_AI,
+        )
+
+        composeRule.onNodeWithText("Use local LLM ad analysis").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Model status: ready").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Choose local model").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun `local LLM switch hoists its change`() {
+        var enabled = false
+        setScreen(
+            state = SettingsUiState(llmAnalysisEnabled = false),
+            destination = SettingsDestination.LOCAL_AI,
+            onLlmAnalysisChange = { enabled = it },
+        )
+
+        composeRule
+            .onNodeWithContentDescription("Use local LLM ad analysis")
+            .performScrollTo()
+            .performClick()
+
+        assertTrue(enabled)
+    }
+
+    @Test
+    fun `local model copy progress is visible`() {
+        setScreen(
+            SettingsUiState(
+                llmModelStatus = LlmModelUiStatus.INSTALLING,
+                llmModelCopiedBytes = 50,
+                llmModelTotalBytes = 100,
+            ),
+            destination = SettingsDestination.LOCAL_AI,
+        )
+
+        composeRule.onNodeWithText("50%", substring = true).performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun `invalid model status is actionable and does not expose raw exceptions`() {
+        setScreen(
+            SettingsUiState(
+                llmModelStatus = LlmModelUiStatus.UNAVAILABLE,
+                llmModelError = LlmModelErrorUi.INVALID,
+            ),
+            destination = SettingsDestination.LOCAL_AI,
+        )
+
+        composeRule
+            .onNodeWithText("incompatible or invalid model", substring = true)
+            .performScrollTo()
+            .assertIsDisplayed()
+    }
+
+    @Test
+    fun `app health shows missing access and exposes local system settings actions`() {
+        var accessOpened = false
+        var batteryOpened = false
+        setScreen(
+            state =
+                SettingsUiState(
+                    notificationAccessGranted = false,
+                    notificationAccessState = NotificationAccessUiState.DENIED,
+                ),
+            onOpenNotificationAccess = { accessOpened = true },
+            onOpenBatterySettings = { batteryOpened = true },
+        )
+
+        composeRule.onNodeWithText("Notification access: action needed").assertIsDisplayed()
+        composeRule.onNodeWithText("Open settings").performClick()
+        composeRule.onNodeWithText("Review battery settings").performClick()
+
+        assertTrue(accessOpened)
+        assertTrue(batteryOpened)
+    }
+
+    @Test
+    fun `restore preview shows validated counts and hoists merge selection`() {
+        var selection: RestoreSelectionUi? = null
+        setScreen(
+            state =
+                SettingsUiState(
+                    backupPreview =
+                        BackupPreviewUi(
+                            encrypted = true,
+                            rules = 4,
+                            profiles = 2,
+                            dailyInsights = 30,
+                            hasSettings = true,
+                            categoryFeedback = 3,
+                            adFeedbackVotes = 5,
+                        ),
+                ),
+            onRestoreSelectionChange = { selection = it },
+            destination = SettingsDestination.BACKUP,
+        )
+
+        composeRule.onNodeWithText("Review restore").assertIsDisplayed()
+        composeRule.onNodeWithText("4 rules · 2 profiles · 30 days of history").assertIsDisplayed()
+        composeRule.onNodeWithText("Replace selected").performClick()
+        assertTrue(selection?.replaceExisting == true)
+    }
+
+    @Test
+    fun `automation token and local audit are visible only after opt in`() {
+        var copied = ""
+        setScreen(
+            state =
+                SettingsUiState(
+                    externalAutomationEnabled = true,
+                    externalAutomationToken = "device-token-123",
+                    automationAudit =
+                        listOf(
+                            AutomationAuditUi(
+                                id = "1",
+                                source = AutomationSourceUi.EXTERNAL,
+                                operation = AutomationOperationUi.DISABLE,
+                                outcome = AutomationOutcomeUi.UNAUTHORIZED,
+                                changedCount = 0,
+                                requestedAtMillis = System.currentTimeMillis(),
+                            ),
+                        ),
+                ),
+            onCopyAutomationToken = { copied = it },
+            destination = SettingsDestination.AUTOMATION,
+        )
+
+        composeRule.onNodeWithText("device-token-123").assertDoesNotExist()
+        composeRule.onNodeWithText("Show").performScrollTo().performClick()
+        composeRule.onNodeWithText("device-token-123").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Copy").performScrollTo().performClick()
+        assertTrue(copied == "device-token-123")
+        composeRule.onNodeWithText("Wrong token", substring = true).performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun `overview hoists dynamic color and detail navigation`() {
+        var dynamicColor = false
+        var destination: SettingsDestination? = null
+        setScreen(
+            state = SettingsUiState(dynamicColorEnabled = false),
+            onDynamicColorChange = { dynamicColor = it },
+            onNavigate = { destination = it },
+        )
+
+        composeRule.onNodeWithContentDescription("Use dynamic color").performClick()
+        composeRule.onNodeWithText("Automation").performScrollTo().performClick()
+
+        assertTrue(dynamicColor)
+        assertTrue(destination == SettingsDestination.AUTOMATION)
+    }
+
+    private fun setScreen(
+        state: SettingsUiState,
+        destination: SettingsDestination = SettingsDestination.OVERVIEW,
+        onLlmAnalysisChange: (Boolean) -> Unit = {},
+        onOpenNotificationAccess: () -> Unit = {},
+        onOpenBatterySettings: () -> Unit = {},
+        onRestoreSelectionChange: (RestoreSelectionUi) -> Unit = {},
+        onCopyAutomationToken: (String) -> Unit = {},
+        onDynamicColorChange: (Boolean) -> Unit = {},
+        onNavigate: (SettingsDestination) -> Unit = {},
+    ) {
+        composeRule.setContent {
+            AlarmControlTheme(dynamicColor = false) {
+                SettingsScreen(
+                    state = state,
+                    destination = destination,
+                    onNavigate = onNavigate,
+                    onFilteringChange = {},
+                    onExternalAutomationChange = {},
+                    onLlmAnalysisChange = onLlmAnalysisChange,
+                    onImportLlmModel = {},
+                    onExport = { _, _, _ -> },
+                    onImport = { _, _ -> },
+                    onUserMessageShown = {},
+                    onOpenNotificationAccess = onOpenNotificationAccess,
+                    onOpenBatterySettings = onOpenBatterySettings,
+                    onRestoreSelectionChange = onRestoreSelectionChange,
+                    onCopyAutomationToken = onCopyAutomationToken,
+                    onDynamicColorChange = onDynamicColorChange,
+                )
+            }
+        }
+    }
+}

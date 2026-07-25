@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+      OFFLINE-FIRST (CLAUDE.md §3): the INTERNET permission is intentionally absent and must
+      stay absent. Its absence is the hard guarantee that no notification data can leave the
+      device. Do not add android.permission.INTERNET to this or any module manifest.
+    -->
+
+    <application
+        android:name=".AlarmControlApplication"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:localeConfig="@xml/locales_config"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.AlarmControl">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          The notification listener. `android:permission` requires the binder to hold
+          BIND_NOTIFICATION_LISTENER_SERVICE, which only the system holds — so although the service
+          is exported (the system binds it from another process), no third-party app can reach it.
+          The user must still grant access in Settings > Notification access.
+        -->
+        <service
+            android:name=".service.NotificationFilterService"
+            android:exported="true"
+            android:label="@string/notification_listener_label"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <!--
+          WorkManager uses on-demand init via Hilt (AlarmControlApplication is a Configuration.Provider
+          supplying the HiltWorkerFactory), so the default startup initializer is removed. Periodic
+          insights run entirely on-device — no INTERNET (CLAUDE.md §1/§3).
+        -->
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data
+                android:name="androidx.work.WorkManagerInitializer"
+                tools:node="remove" />
+        </provider>
+    </application>
+</manifest>

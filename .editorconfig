@@ -1,0 +1,7 @@
+root = true
+
+[*.{kt,kts}]
+max_line_length = 120
+insert_final_newline = true
+# Jetpack Compose @Composable functions are PascalCase by convention; exempt them from camelCase.
+ktlint_function_naming_ignore_when_annotated_with = Composable

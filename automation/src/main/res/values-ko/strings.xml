@@ -1,0 +1,8 @@
+<resources>
+    <string name="qs_tile_label">AlarmControl 필터링</string>
+    <string name="shortcut_enable_filtering_short">필터링 켜기</string>
+    <string name="shortcut_enable_filtering_long">알림 필터링 켜기</string>
+    <string name="shortcut_pause_filtering_short">필터링 일시 중지</string>
+    <string name="shortcut_pause_filtering_long">알림 필터링 일시 중지</string>
+    <string name="shortcut_toggle_profile_long">%1$s 프로필 전환</string>
+</resources>

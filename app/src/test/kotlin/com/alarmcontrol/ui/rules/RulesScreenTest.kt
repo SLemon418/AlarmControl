@@ -1,0 +1,368 @@
+package com.alarmcontrol.ui.rules
+
+import android.app.Application
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTextInput
+import com.alarmcontrol.core.filtering.Condition
+import com.alarmcontrol.core.filtering.RateScope
+import com.alarmcontrol.core.filtering.RuleExecutionMode
+import com.alarmcontrol.ui.NotificationAccessUiState
+import com.alarmcontrol.ui.UiText
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+import org.robolectric.annotation.GraphicsMode
+
+/**
+ * Local JVM Compose UI test (Robolectric) — runs via `./gradlew :app:testDebugUnitTest`, no emulator
+ * needed. Verifies the automation hint's visibility on [RulesScreen] is driven purely by
+ * [RulesUiState.showAutomationHint].
+ *
+ * Pinned to a plain [Application] so Robolectric does not initialize the Hilt app (the screen is
+ * stateless — state is passed in directly), and to SDK 34 (Robolectric 4.11.1's max) since the app
+ * targets 36.
+ */
+@RunWith(RobolectricTestRunner::class)
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
+@Config(application = Application::class, sdk = [34])
+class RulesScreenTest {
+    @get:Rule
+    val composeRule = createComposeRule()
+
+    private val hintText =
+        "To control rules via Samsung Routines or Tasker, enable external automation in Settings."
+
+    @Test
+    fun showsHint_whenShowAutomationHintIsTrue() {
+        setRulesScreen(showHint = true)
+
+        composeRule.onNodeWithText(hintText).assertIsDisplayed()
+    }
+
+    @Test
+    fun hidesHint_whenShowAutomationHintIsFalse() {
+        setRulesScreen(showHint = false)
+
+        composeRule.onNodeWithText(hintText).assertDoesNotExist()
+    }
+
+    @Test
+    fun showsNotificationAccessBanner_whenAccessNotGranted() {
+        var grantClicked = false
+        composeRule.setContent {
+            RulesScreen(
+                state =
+                    RulesUiState(
+                        isLoading = false,
+                        notificationAccessGranted = false,
+                        notificationAccessState = NotificationAccessUiState.DENIED,
+                    ),
+                onAddRule = {},
+                onEditRule = {},
+                onToggleRule = { _, _ -> },
+                onDeleteRule = {},
+                onUserMessageShown = {},
+                onGrantAccess = { grantClicked = true },
+            )
+        }
+
+        composeRule.onNodeWithText("Notification access needed").assertIsDisplayed()
+        composeRule.onNodeWithText("Open settings").performClick()
+        assertTrue(grantClicked)
+    }
+
+    @Test
+    fun hidesNotificationAccessBanner_whenGranted() {
+        setRulesScreen(showHint = false) // default state has notificationAccessGranted = true
+
+        composeRule.onNodeWithText("Notification access needed").assertDoesNotExist()
+    }
+
+    @Test
+    fun deletingRuleShowsHowManyProfilesWillBeAffected() {
+        var confirmed = false
+        composeRule.setContent {
+            RulesScreen(
+                state =
+                    RulesUiState(
+                        isLoading = false,
+                        notificationAccessState = NotificationAccessUiState.GRANTED,
+                        pendingDelete =
+                            RuleDeleteConfirmationUi(
+                                ruleId = "1",
+                                ruleName = "Focus",
+                                profileCount = 2,
+                            ),
+                    ),
+                onAddRule = {},
+                onEditRule = {},
+                onToggleRule = { _, _ -> },
+                onDeleteRule = {},
+                onConfirmDeleteRule = { confirmed = true },
+                onUserMessageShown = {},
+            )
+        }
+
+        composeRule.onNodeWithText("“Focus” is used by 2 profiles", substring = true).assertIsDisplayed()
+        composeRule.onNodeWithText("Delete").performClick()
+        assertTrue(confirmed)
+    }
+
+    @Test
+    fun templatePickerHoistsTheSelectedTemplate() {
+        var selected: RuleTemplate? = null
+        composeRule.setContent {
+            RulesScreen(
+                state = RulesUiState(isLoading = false),
+                onAddRule = {},
+                onEditRule = {},
+                onToggleRule = { _, _ -> },
+                onDeleteRule = {},
+                onUserMessageShown = {},
+                onUseTemplate = { selected = it },
+            )
+        }
+
+        composeRule
+            .onNodeWithText("Always keep alarm notifications")
+            .performScrollTo()
+            .performClick()
+
+        assertEquals(RuleTemplate.KEEP_ALARMS, selected)
+    }
+
+    private fun setRulesScreen(showHint: Boolean) {
+        composeRule.setContent {
+            RulesScreen(
+                state =
+                    RulesUiState(
+                        isLoading = false,
+                        showAutomationHint = showHint,
+                        notificationAccessGranted = true,
+                        notificationAccessState = NotificationAccessUiState.GRANTED,
+                    ),
+                onAddRule = {},
+                onEditRule = {},
+                onToggleRule = { _, _ -> },
+                onDeleteRule = {},
+                onUserMessageShown = {},
+            )
+        }
+    }
+
+    @Test
+    fun ruleEditor_showsTheConditionBuilder() {
+        setRuleEditor(mutableStateOf(RuleEditorState(editorMode = RuleEditorMode.ADVANCED)))
+
+        composeRule.onNodeWithText("New rule").assertIsDisplayed()
+        composeRule.onNodeWithText("Name").assertIsDisplayed()
+        composeRule.onNodeWithText("Conditions").assertIsDisplayed()
+        composeRule.onNodeWithText("Match all").assertIsDisplayed()
+        composeRule.onNodeWithText("+ Condition").assertIsDisplayed()
+        composeRule.onNodeWithText("Save").assertIsDisplayed()
+    }
+
+    @Test
+    fun ruleEditor_addingAConditionShowsALeafEditor() {
+        val editorState = mutableStateOf(RuleEditorState(editorMode = RuleEditorMode.ADVANCED))
+        setRuleEditor(editorState)
+
+        // No leaf yet; adding one reveals its kind selector ("Package").
+        composeRule.onNodeWithText("Package").assertDoesNotExist()
+        composeRule.onNodeWithText("+ Condition").performClick()
+        composeRule.onNodeWithText("Package").assertIsDisplayed()
+    }
+
+    @Test
+    fun ruleEditor_typingNameThenSaving_invokesSave() {
+        // Hoist the editor state so typing round-trips through onEditorChange like the real ViewModel.
+        val editorState =
+            mutableStateOf(
+                RuleEditorState(
+                    root = Condition.PackageEquals("com.example").toEditableRoot(),
+                    editorMode = RuleEditorMode.ADVANCED,
+                ),
+            )
+        var saved = false
+        setRuleEditor(editorState, onSave = { saved = true })
+
+        composeRule.onNodeWithText("Name").performTextInput("Mute promos")
+        composeRule.onNodeWithText("Mute promos").assertIsDisplayed()
+
+        composeRule.onNodeWithText("Save").performClick()
+        assertTrue(saved)
+    }
+
+    @Test
+    fun ruleEditor_blankConditionShowsValidationHint() {
+        val editorState = mutableStateOf(RuleEditorState(editorMode = RuleEditorMode.ADVANCED))
+        setRuleEditor(editorState)
+
+        // A freshly added condition is blank, so the soft validation hint appears.
+        composeRule.onNodeWithText("+ Condition").performClick()
+        composeRule.onNodeWithText("Enter a value").assertIsDisplayed()
+        composeRule.onNodeWithText("Save").assertIsNotEnabled()
+    }
+
+    @Test
+    fun ruleEditor_showsReorderHandlesWithMultipleConditions() {
+        val first = newLeafNode().copy(value = "first")
+        val second = newLeafNode().copy(value = "second")
+        val root = GroupNode(nextNodeKey(), anyOf = false, children = listOf(first, second))
+        val editorState =
+            mutableStateOf(RuleEditorState(root = root, editorMode = RuleEditorMode.ADVANCED))
+        setRuleEditor(editorState)
+
+        composeRule.onAllNodesWithTag(CONDITION_MOVE_UP_TEST_TAG, useUnmergedTree = true).assertCountEquals(1)
+        composeRule.onAllNodesWithTag(CONDITION_MOVE_UP_ENABLED_TEST_TAG, useUnmergedTree = true).assertCountEquals(1)
+        composeRule
+            .onNodeWithTag(CONDITION_MOVE_UP_ENABLED_TEST_TAG, useUnmergedTree = true)
+            .performScrollTo()
+            .performClick()
+        composeRule.waitForIdle()
+        val values =
+            editorState.value.root.children
+                .map { (it as LeafNode).value }
+        assertEquals(listOf("second", "first"), values)
+    }
+
+    @Test
+    fun ruleEditor_rendersFrequencyScopePresetsAndValidation() {
+        val root =
+            GroupNode(
+                nextNodeKey(),
+                anyOf = false,
+                children = listOf(RateNode(nextNodeKey(), RateScope.CHANNEL, "5", "10")),
+            )
+        setRuleEditor(
+            mutableStateOf(
+                RuleEditorState(root = root, editorMode = RuleEditorMode.ADVANCED),
+            ),
+        )
+
+        composeRule.onNodeWithText("App + channel").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("5 min").assertIsDisplayed()
+        composeRule.onNodeWithText("Window (1–1440 min)").assertExists()
+        composeRule.onNodeWithText("Posts (2–1000)").assertExists()
+    }
+
+    @Test
+    fun ruleEditor_switchesToMonitorModeAndShowsNonBlockingWarning() {
+        val editorState =
+            mutableStateOf(
+                RuleEditorState(
+                    name = "Monitor promotions",
+                    root = Condition.PackageEquals("com.example").toEditableRoot(),
+                    warnings = listOf(UiText.Dynamic("Structural warning")),
+                    editorMode = RuleEditorMode.ADVANCED,
+                ),
+            )
+        setRuleEditor(editorState)
+
+        composeRule.onNodeWithText("Monitor").performScrollTo().performClick()
+        assertEquals(RuleExecutionMode.MONITOR, editorState.value?.executionMode)
+        composeRule
+            .onNodeWithText("Monitor rules predict and record an action", substring = true)
+            .performScrollTo()
+            .assertIsDisplayed()
+        composeRule.onNodeWithText("Structural warning").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Save").assertIsEnabled()
+    }
+
+    @Test
+    fun ruleEditor_requestsConfirmationBeforeDiscardingChanges() {
+        val editorState =
+            mutableStateOf(
+                RuleEditorState(
+                    name = "Focus",
+                    root = Condition.PackageEquals("com.example").toEditableRoot(),
+                    hasUnsavedChanges = true,
+                    showDiscardConfirmation = true,
+                ),
+            )
+        var discarded = false
+        setRuleEditor(editorState, onConfirmDiscard = { discarded = true })
+
+        composeRule.onNodeWithText("Discard changes?").assertIsDisplayed()
+        composeRule.onNodeWithText("Discard").performClick()
+
+        assertTrue(discarded)
+    }
+
+    @Test
+    fun guidedEditorSearchesObservedSourcesWithoutManualPackageGuessing() {
+        val editorState = mutableStateOf(RuleEditorState())
+        composeRule.setContent {
+            RuleEditorScreen(
+                state = editorState.value,
+                availableSources =
+                    listOf(
+                        RuleSourceUi(
+                            key = "com.shop:offers",
+                            packageName = "com.shop",
+                            appName = "Shop",
+                            channelId = "offers",
+                            channelName = "Offers",
+                            eventCount = 12,
+                        ),
+                    ),
+                onChange = { editorState.value = it },
+                onSimulate = {},
+                onSave = {},
+                onRequestClose = {},
+                onConfirmDiscard = {},
+                onCancelDiscard = {},
+            )
+        }
+
+        composeRule.onNodeWithText("Choose a recent app or channel").performClick()
+        composeRule.onNodeWithText("Search app or channel").performTextInput("offer")
+        composeRule.onNodeWithText("Shop").performClick()
+
+        assertEquals("com.shop", editorState.value.guidedPackageName)
+        assertEquals("offers", editorState.value.guidedChannelId)
+        assertEquals(GuidedRuleScope.CHANNEL, editorState.value.guidedScope)
+    }
+
+    @Test
+    fun guidedManualPackageShowsSoftValidation() {
+        val editorState = mutableStateOf(RuleEditorState())
+        setRuleEditor(editorState)
+
+        composeRule.onNodeWithText("Android package name").performTextInput("not a package")
+        composeRule.onNodeWithText("Enter a package such as com.example.app").assertIsDisplayed()
+        composeRule.onNodeWithText("Save").assertIsNotEnabled()
+    }
+
+    private fun setRuleEditor(
+        state: androidx.compose.runtime.MutableState<RuleEditorState>,
+        onSave: () -> Unit = {},
+        onConfirmDiscard: () -> Unit = {},
+    ) {
+        composeRule.setContent {
+            RuleEditorScreen(
+                state = state.value,
+                onChange = { state.value = it },
+                onSimulate = {},
+                onSave = onSave,
+                onRequestClose = {},
+                onConfirmDiscard = onConfirmDiscard,
+                onCancelDiscard = {},
+            )
+        }
+    }
+}

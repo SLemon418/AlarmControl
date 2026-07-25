@@ -1,0 +1,56 @@
+# Project detekt rules, layered on top of detekt's defaults (buildUponDefaultConfig = true).
+# Build-time quality gate only — never shipped (CLAUDE.md §3). Tuned to be strict on correctness
+# while staying Compose/Android-aware so it doesn't fight idiomatic UI and DI code.
+
+complexity:
+  LongMethod:
+    # Composable screens and StateFlow `combine` blocks are legitimately long but flat.
+    threshold: 90
+  LongParameterList:
+    functionThreshold: 8
+    constructorThreshold: 9
+    ignoreAnnotated: ['Composable', 'Inject']
+    excludes: ['**/test/**', '**/androidTest/**']
+  TooManyFunctions:
+    thresholdInFiles: 25
+    thresholdInClasses: 20
+    thresholdInInterfaces: 20
+    thresholdInObjects: 20
+    thresholdInEnums: 20
+    ignoreAnnotatedFunctions: ['Composable']
+  CyclomaticComplexMethod:
+    threshold: 20
+  CognitiveComplexMethod:
+    threshold: 20
+
+style:
+  MagicNumber:
+    ignoreNumbers: ['-1', '0', '1', '2', '100']
+    ignorePropertyDeclaration: true
+    ignoreCompanionObjectPropertyDeclaration: true
+    ignoreAnnotation: true
+    ignoreNamedArgument: true
+    ignoreEnums: true
+    excludes: ['**/test/**', '**/androidTest/**']
+  ReturnCount:
+    max: 5
+    excludeGuardClauses: true
+  MaxLineLength:
+    maxLineLength: 120
+    excludes: ['**/test/**', '**/androidTest/**']
+  UnusedPrivateMember:
+    ignoreAnnotated: ['Preview']
+
+naming:
+  FunctionNaming:
+    ignoreAnnotated: ['Composable']
+  MatchingDeclarationName:
+    # Test-support files legitimately group several helpers under one descriptive file name.
+    excludes: ['**/test/**', '**/androidTest/**']
+
+comments:
+  # KDoc on every public symbol is encouraged but not forced; the codebase documents the non-obvious.
+  UndocumentedPublicFunction:
+    active: false
+  UndocumentedPublicClass:
+    active: false

@@ -1,0 +1,8 @@
+# Offline, build-time-only toolchain for producing the bundled notification classifier.
+# This is NOT an app dependency: it never ships in the APK and the app declares no INTERNET
+# permission (CLAUDE.md §1/§3). Downloading these wheels happens on the dev machine, the same
+# way Gradle resolves build dependencies — it has nothing to do with the app's runtime.
+#
+# On Apple Silicon use the plain `tensorflow` wheel (it is CPU-only; `tensorflow-cpu` is not
+# published for macOS/arm64). numpy ships transitively with TensorFlow.
+tensorflow==2.21.0

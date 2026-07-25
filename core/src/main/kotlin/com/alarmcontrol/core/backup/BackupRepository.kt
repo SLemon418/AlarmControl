@@ -1,0 +1,37 @@
+package com.alarmcontrol.core.backup
+
+import com.alarmcontrol.core.result.DataResult
+
+/**
+ * Exports and restores local rules, profiles, and daily-history data (CLAUDE.md §3). The interface
+ * lives in `:core`; the `:data` implementation serializes a structured string and reads/writes Room.
+ * The `:app` caller handles file I/O through the Storage Access Framework, keeping this contract
+ * free of Android storage types and fully unit-testable.
+ */
+interface BackupRepository {
+    /**
+     * Serializes rules and history. A non-empty [passphrase] wraps the JSON in a local AES-GCM
+     * envelope; `null` keeps backward-compatible structured JSON.
+     */
+    suspend fun export(
+        passphrase: CharArray? = null,
+        includeLearningFeedback: Boolean = false,
+    ): String
+
+    /** Decrypts, parses, and validates a backup without mutating any local state. */
+    suspend fun preview(
+        serialized: String,
+        passphrase: CharArray? = null,
+    ): DataResult<BackupPreview>
+
+    /**
+     * Parses [serialized] and restores it atomically: rules are replaced wholesale with fresh local
+     * ids, historical references are remapped, and each day's rollup is upserted. Malformed input fails as
+     * [DataResult.Failure] rather than throwing.
+     */
+    suspend fun restore(
+        serialized: String,
+        passphrase: CharArray? = null,
+        options: RestoreOptions = RestoreOptions(mode = RestoreMode.REPLACE),
+    ): DataResult<BackupSummary>
+}

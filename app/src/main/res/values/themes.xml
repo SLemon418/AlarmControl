@@ -1,0 +1,4 @@
+<resources>
+    <!-- Launch/window theme only; all in-app colors come from the Compose Material 3 theme. -->
+    <style name="Theme.AlarmControl" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

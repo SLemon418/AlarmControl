@@ -1,0 +1,48 @@
+package com.alarmcontrol.data.repository
+
+import com.alarmcontrol.core.profile.FilteringProfile
+import com.alarmcontrol.core.profile.MAX_PROFILE_NAME_CHARS
+import com.alarmcontrol.core.profile.ProfileRepository
+import com.alarmcontrol.data.db.dao.ProfileDao
+import com.alarmcontrol.data.mapper.toDomain
+import com.alarmcontrol.data.mapper.toEntity
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
+import javax.inject.Inject
+
+class ProfileRepositoryImpl
+    @Inject
+    constructor(
+        private val profileDao: ProfileDao,
+    ) : ProfileRepository {
+        override fun observeProfiles(): Flow<List<FilteringProfile>> =
+            profileDao.observeProfiles().map { rows -> rows.map { it.toDomain() } }
+
+        override suspend fun save(profile: FilteringProfile): String {
+            val name = profile.name.trim()
+            require(name.isNotBlank()) { "Profile name is required" }
+            require(name.length <= MAX_PROFILE_NAME_CHARS) { "Profile name is too long" }
+            val id =
+                if (profile.id.isBlank()) {
+                    0
+                } else {
+                    requireNotNull(profile.id.toLongOrNull()?.takeIf { it > 0 }) { "Invalid profile id" }
+                }
+            require(profileDao.countByNameExcluding(name, id.toLong()) == 0) {
+                "A profile with this name already exists"
+            }
+            val ruleIds =
+                profile.ruleIds.mapTo(mutableSetOf()) { ruleId ->
+                    requireNotNull(ruleId.toLongOrNull()?.takeIf { it > 0 }) { "Invalid rule id" }
+                }
+            val now = System.currentTimeMillis()
+            return profileDao.store(profile.copy(name = name).toEntity(id, now), ruleIds).toString()
+        }
+
+        override suspend fun delete(profileId: String) {
+            profileId.toLongOrNull()?.let { profileDao.deleteById(it) }
+        }
+
+        override suspend fun countUsingRule(ruleId: String): Int =
+            ruleId.toLongOrNull()?.let { profileDao.countUsingRule(it) } ?: 0
+    }

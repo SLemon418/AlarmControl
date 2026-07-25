@@ -1,0 +1,23 @@
+*.iml
+.gradle
+/.kotlin/
+/local.properties
+/.idea
+.DS_Store
+**/build/
+/captures
+/.managed-avd/
+.externalNativeBuild
+.cxx
+local.properties
+
+# ML training pipeline (build-time dev tool; not shipped). The generated assets
+# under :ml/src/main/assets ARE committed — only the local toolchain is ignored.
+ml/training/.venv/
+__pycache__/
+*.pyc
+
+# Release signing material is supplied through environment variables and never committed.
+*.jks
+*.keystore
+keystore.properties

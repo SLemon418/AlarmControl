@@ -1,0 +1,8 @@
+<resources>
+    <string name="qs_tile_label">AlarmControl filtering</string>
+    <string name="shortcut_enable_filtering_short">Enable filtering</string>
+    <string name="shortcut_enable_filtering_long">Enable notification filtering</string>
+    <string name="shortcut_pause_filtering_short">Pause filtering</string>
+    <string name="shortcut_pause_filtering_long">Pause notification filtering</string>
+    <string name="shortcut_toggle_profile_long">Toggle %1$s profile</string>
+</resources>

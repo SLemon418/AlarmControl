@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      Automation entry point (CLAUDE.md §7). Exported so Samsung Modes & Routines (via Good Lock
+      RoutinePlus) can toggle filtering by broadcasting a documented action (see AutomationContract).
+
+      Deliberately NOT permission-guarded: RoutinePlus/Tasker run as their own apps and cannot hold a
+      custom permission, so a sender-permission would block the very automation this enables. The
+      receiver only changes the local filtering gate or one named profile — no data access, no
+      network (HARD RULE §1 untouched). It is guarded by the explicit in-app opt-in, a per-install
+      token, rate limiting, and a content-free local audit. No INTERNET permission is declared here.
+    -->
+    <application>
+        <receiver
+            android:name=".ProfileToggleReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.alarmcontrol.automation.action.ENABLE_PROFILE" />
+                <action android:name="com.alarmcontrol.automation.action.DISABLE_PROFILE" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+          Quick Settings tile for the filtering master switch (§7). BIND_QUICK_SETTINGS_TILE is held
+          only by the system, so only the system binds it. This is a first-party action and is not
+          gated by the external-automation opt-in. No INTERNET permission is declared here.
+        -->
+        <service
+            android:name=".MasterSwitchTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_qs_filter"
+            android:label="@string/qs_tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <!--
+          Invisible trampoline launched by the dynamic launcher shortcuts (§7). Not exported — the
+          system launcher starts it via the ShortcutManager. It toggles filtering, then finishes.
+        -->
+        <activity
+            android:name=".ProfileShortcutActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+    </application>
+</manifest>
