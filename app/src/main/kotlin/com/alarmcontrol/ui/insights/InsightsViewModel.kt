@@ -42,8 +42,8 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
-import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -53,6 +53,7 @@ import java.time.format.DateTimeParseException
 import javax.inject.Inject
 
 @OptIn(ExperimentalCoroutinesApi::class, FlowPreview::class)
+@Suppress("TooManyFunctions")
 @HiltViewModel
 class InsightsViewModel
     @Inject
@@ -88,7 +89,7 @@ class InsightsViewModel
         private val analysisRange =
             MutableStateFlow(InsightsDateRange(initialAnalysisEnd - DEFAULT_ANALYSIS_DAYS + 1, initialAnalysisEnd))
 
-        private val startOfDayMillis = MutableStateFlow(clock.todayStartMillis())
+        private val todayWindow = MutableStateFlow(clock.todayWindow())
 
         private val rules =
             ruleRepository
@@ -96,97 +97,129 @@ class InsightsViewModel
                 .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), emptyList())
 
         private val metrics: Flow<InsightsMetrics> =
-            startOfDayMillis.flatMapLatest { start ->
-                eventRepository.observeActionBreakdownSince(start).map { breakdown ->
-                    InsightsMetrics(
-                        cancelled = breakdown.cancelled,
-                        snoozed = breakdown.snoozed,
-                        loggedOnly = breakdown.loggedOnly,
-                        kept = breakdown.kept,
-                    )
-                }
+            todayWindow.flatMapLatest { window ->
+                eventRepository
+                    .observeActionBreakdownForDay(window.epochDay, window.startMillis)
+                    .map { breakdown ->
+                        InsightsMetrics(
+                            cancelled = breakdown.cancelled,
+                            snoozed = breakdown.snoozed,
+                            loggedOnly = breakdown.loggedOnly,
+                            kept = breakdown.kept,
+                        )
+                    }
             }
 
         private val content: Flow<DataResult<Content>> =
-            combine(
-                eventRepository.observeRecent(RECENT_LIMIT),
-                metrics,
-                feedbackRepository.observeEventCorrections(),
-                adFeedbackRepository.observeByEvent(),
-                rules,
-            ) { events, metrics, corrected, adObservations, currentRules ->
-                val ruleNames = currentRules.associate { it.id to it.name }
-                Content(
-                    events =
-                        events.map {
-                            it
-                                .toListItem(
-                                    correctedCategory = corrected[it.id],
-                                    identity = appIdentityResolver.resolve(it.packageName),
-                                    ruleNames = ruleNames,
-                                ).copy(adObservation = adObservations[it.id]?.toUiModel())
-                        },
-                    metrics = metrics,
-                )
-            }.flowOn(dispatcher)
-                .asDataResult()
+            selectedTab
+                .flatMapLatest { tab ->
+                    if (tab != InsightsTab.OVERVIEW) {
+                        flowOf(DataResult.Success(Content(emptyList(), InsightsMetrics())))
+                    } else {
+                        combine(
+                            eventRepository.observeRecent(RECENT_LIMIT),
+                            metrics,
+                            feedbackRepository.observeEventCorrections(),
+                            adFeedbackRepository.observeByEvent(),
+                            rules,
+                        ) { events, metrics, corrected, adObservations, currentRules ->
+                            val ruleNames = currentRules.associate { it.id to it.name }
+                            Content(
+                                events =
+                                    events.map {
+                                        it
+                                            .toListItem(
+                                                correctedCategory = corrected[it.id],
+                                                identity = appIdentityResolver.resolve(it.packageName),
+                                                ruleNames = ruleNames,
+                                            ).copy(adObservation = adObservations[it.id]?.toUiModel())
+                                    },
+                                metrics = metrics,
+                            )
+                        }.asDataResult()
+                    }
+                }.flowOn(dispatcher)
 
         // Resolve each rollup's rule ids to names from the live rules, so the cards show "Mute promos"
         // instead of "Rule #1"; ids missing from the current set fall back gracefully (deleted rules).
         private val dailyInsights: Flow<List<DailyInsightUi>> =
-            combine(
-                dailyInsightRepository.observeRecent(DAILY_LIMIT),
-                rules,
-            ) { days, rules ->
-                val ruleNames = rules.associate { it.id to it.name }
-                val mapped = days.map { it.toUiModel(ruleNames, appIdentityResolver) }
-                mapped.mapIndexed { index, day ->
-                    day.copy(
-                        mutedDelta =
-                            mapped.getOrNull(index + 1)?.let { previous ->
-                                day.mutedCount - previous.mutedCount
-                            },
-                    )
+            selectedTab.flatMapLatest { tab ->
+                if (tab != InsightsTab.OVERVIEW) {
+                    flowOf(emptyList())
+                } else {
+                    combine(
+                        dailyInsightRepository.observeRecent(DAILY_LIMIT),
+                        rules,
+                    ) { days, rules ->
+                        val ruleNames = rules.associate { it.id to it.name }
+                        val mapped = days.map { it.toUiModel(ruleNames, appIdentityResolver) }
+                        mapped.mapIndexed { index, day ->
+                            day.copy(
+                                mutedDelta =
+                                    mapped.getOrNull(index + 1)?.let { previous ->
+                                        day.mutedCount - previous.mutedCount
+                                    },
+                            )
+                        }
+                    }
                 }
             }
 
         private val summaryUi: Flow<InsightsSummaryUi?> =
-            insightsSummaryRepository.summary
-                .map { it?.toUiModel(appIdentityResolver) }
-                .flowOn(dispatcher)
+            selectedTab
+                .flatMapLatest { tab ->
+                    if (tab == InsightsTab.OVERVIEW) {
+                        insightsSummaryRepository.summary.map { it?.toUiModel(appIdentityResolver) }
+                    } else {
+                        flowOf(null)
+                    }
+                }.flowOn(dispatcher)
 
         private val suggestions: Flow<List<RuleSuggestionUi>> =
-            ruleSuggestionRepository
-                .observeSuggestions(clock.millis() - SUGGESTION_WINDOW_MILLIS)
-                .map { rows ->
-                    rows.map { suggestion ->
-                        suggestion.toUiModel(
-                            appIdentityResolver.resolve(suggestion.packageName()).label,
-                        )
+            selectedTab
+                .flatMapLatest { tab ->
+                    if (tab != InsightsTab.OVERVIEW) {
+                        flowOf(emptyList())
+                    } else {
+                        ruleSuggestionRepository
+                            .observeSuggestions(clock.millis() - SUGGESTION_WINDOW_MILLIS)
+                            .map { rows ->
+                                rows.map { suggestion ->
+                                    suggestion.toUiModel(
+                                        appIdentityResolver.resolve(suggestion.packageName()).label,
+                                    )
+                                }
+                            }
                     }
                 }.flowOn(dispatcher)
 
         private val availableRange =
-            insightsAnalyticsRepository
-                .observeAvailableRange()
-                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), null)
+            selectedTab
+                .flatMapLatest { tab ->
+                    if (tab == InsightsTab.ANALYSIS) {
+                        insightsAnalyticsRepository.observeAvailableRange()
+                    } else {
+                        flowOf(null)
+                    }
+                }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), null)
 
         private val analysis: Flow<InsightsAnalysisUi> =
-            selectedTab.flatMapLatest { tab ->
-                if (tab != InsightsTab.ANALYSIS) {
-                    flowOf(InsightsAnalysisUi())
-                } else {
-                    combine(
-                        analysisRange.flatMapLatest(insightsAnalyticsRepository::observe),
-                        rules,
-                    ) { analytics, currentRules ->
-                        analytics.toUiModel(
-                            ruleNames = currentRules.associate { it.id to it.name },
-                            appIdentityResolver = appIdentityResolver,
-                        )
+            selectedTab
+                .flatMapLatest { tab ->
+                    if (tab != InsightsTab.ANALYSIS) {
+                        flowOf(InsightsAnalysisUi())
+                    } else {
+                        combine(
+                            analysisRange.flatMapLatest(insightsAnalyticsRepository::observe),
+                            rules,
+                        ) { analytics, currentRules ->
+                            analytics.toUiModel(
+                                ruleNames = currentRules.associate { it.id to it.name },
+                                appIdentityResolver = appIdentityResolver,
+                            )
+                        }
                     }
-                }
-            }.flowOn(dispatcher)
+                }.flowOn(dispatcher)
 
         init {
             viewModelScope.launch {
@@ -206,7 +239,10 @@ class InsightsViewModel
 
         private val historyQuery: Flow<NotificationHistoryQuery> =
             combine(
-                activityQuery.debounce(HISTORY_QUERY_DEBOUNCE_MILLIS).distinctUntilChanged(),
+                activityQuery
+                    .debounce { query ->
+                        if (query.isEmpty()) 0L else HISTORY_QUERY_DEBOUNCE_MILLIS
+                    }.distinctUntilChanged(),
                 historyActionFilter,
                 historyPackageName,
                 historyChannelId,
@@ -225,53 +261,55 @@ class InsightsViewModel
             }
 
         private val historyRecords: Flow<HistoryRecords> =
-            selectedTab.flatMapLatest { tab ->
-                if (tab != InsightsTab.RECORDS) {
-                    flowOf(HistoryRecords(emptyList(), 0))
-                } else {
-                    combine(
-                        historyQuery.flatMapLatest(notificationHistoryRepository::observeHistory),
-                        feedbackRepository.observeEventCorrections(),
-                        adFeedbackRepository.observeByEvent(),
-                        rules,
-                    ) { page, corrected, adObservations, currentRules ->
-                        val ruleNames = currentRules.associate { it.id to it.name }
-                        HistoryRecords(
-                            events =
-                                page.items.map { event ->
-                                    event
-                                        .toListItem(
-                                            correctedCategory = corrected[event.id],
-                                            identity = appIdentityResolver.resolve(event.packageName),
-                                            ruleNames = ruleNames,
-                                        ).copy(adObservation = adObservations[event.id]?.toUiModel())
-                                },
-                            totalCount = page.totalCount,
-                        )
+            selectedTab
+                .flatMapLatest { tab ->
+                    if (tab != InsightsTab.RECORDS) {
+                        flowOf(HistoryRecords(emptyList(), 0))
+                    } else {
+                        combine(
+                            historyQuery.flatMapLatest(notificationHistoryRepository::observeHistory),
+                            feedbackRepository.observeEventCorrections(),
+                            adFeedbackRepository.observeByEvent(),
+                            rules,
+                        ) { page, corrected, adObservations, currentRules ->
+                            val ruleNames = currentRules.associate { it.id to it.name }
+                            HistoryRecords(
+                                events =
+                                    page.items.map { event ->
+                                        event
+                                            .toListItem(
+                                                correctedCategory = corrected[event.id],
+                                                identity = appIdentityResolver.resolve(event.packageName),
+                                                ruleNames = ruleNames,
+                                            ).copy(adObservation = adObservations[event.id]?.toUiModel())
+                                    },
+                                totalCount = page.totalCount,
+                            )
+                        }
                     }
-                }
-            }.flowOn(dispatcher)
+                }.flowOn(dispatcher)
 
         private val historySources: Flow<List<HistorySourceUi>> =
-            selectedTab.flatMapLatest { tab ->
-                if (tab != InsightsTab.RECORDS) {
-                    flowOf(emptyList())
-                } else {
-                    notificationHistoryRepository
-                        .observeSources(HISTORY_SOURCE_LIMIT)
-                        .map { sources ->
-                            sources.map {
-                                HistorySourceUi(
-                                    packageName = it.packageName,
-                                    appName = appIdentityResolver.resolve(it.packageName).label,
-                                    channelId = it.channelId,
-                                    channelName = it.channelName,
-                                    eventCount = it.eventCount,
-                                )
+            selectedTab
+                .flatMapLatest { tab ->
+                    if (tab != InsightsTab.RECORDS) {
+                        flowOf(emptyList())
+                    } else {
+                        notificationHistoryRepository
+                            .observeSources(HISTORY_SOURCE_LIMIT)
+                            .map { sources ->
+                                sources.map {
+                                    HistorySourceUi(
+                                        packageName = it.packageName,
+                                        appName = appIdentityResolver.resolve(it.packageName).label,
+                                        channelId = it.channelId,
+                                        channelName = it.channelName,
+                                        eventCount = it.eventCount,
+                                    )
+                                }
                             }
-                        }
-                }
-            }.flowOn(dispatcher)
+                    }
+                }.flowOn(dispatcher)
 
         private val historyCoverage: Flow<NotificationHistoryCoverageUi?> =
             selectedTab.flatMapLatest { tab ->
@@ -594,7 +632,7 @@ class InsightsViewModel
 
         /** Re-subscribes today's SQL counters when the screen resumes after a date boundary. */
         fun refreshDayBoundary() {
-            startOfDayMillis.value = clock.todayStartMillis()
+            todayWindow.value = clock.todayWindow()
         }
 
         fun onUserMessageShown() {
@@ -695,12 +733,18 @@ class InsightsViewModel
         }
     }
 
-private fun Clock.todayStartMillis(): Long =
-    LocalDate
-        .now(this)
-        .atStartOfDay(zone)
-        .toInstant()
-        .toEpochMilli()
+private fun Clock.todayWindow(): TodayWindow {
+    val date = LocalDate.now(this)
+    return TodayWindow(
+        epochDay = date.toEpochDay(),
+        startMillis = date.atStartOfDay(zone).toInstant().toEpochMilli(),
+    )
+}
+
+private data class TodayWindow(
+    val epochDay: Long,
+    val startMillis: Long,
+)
 
 private fun HistoryActionFilterUi.toHistoryFilter(): HistoryActionFilter =
     when (this) {

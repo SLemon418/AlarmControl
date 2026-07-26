@@ -160,6 +160,18 @@ class SettingsRepositoryImpl
             dataStore.edit { prefs -> prefs[CONTENT_EXCLUDED_PACKAGES] = packageNames }
         }
 
+        override suspend fun claimInsightsBootstrap(appVersion: Int): Boolean {
+            require(appVersion >= 0) { "App version is invalid" }
+            var claimed = false
+            dataStore.edit { prefs ->
+                if (prefs[INSIGHTS_BOOTSTRAP_VERSION] != appVersion) {
+                    prefs[INSIGHTS_BOOTSTRAP_VERSION] = appVersion
+                    claimed = true
+                }
+            }
+            return claimed
+        }
+
         override suspend fun snapshot(): SettingsSnapshot {
             val prefs =
                 dataStore.data
@@ -214,6 +226,7 @@ class SettingsRepositoryImpl
             val NOTIFICATION_CONTENT_STORAGE_ENABLED =
                 booleanPreferencesKey("notification_content_storage_enabled")
             val CONTENT_EXCLUDED_PACKAGES = stringSetPreferencesKey("content_excluded_packages")
+            val INSIGHTS_BOOTSTRAP_VERSION = intPreferencesKey("insights_bootstrap_version")
             val RETENTION_RANGE = 1..3_650
             const val AUTOMATION_TOKEN_BYTES = 32
             const val MAX_EXCLUDED_PACKAGES = 200

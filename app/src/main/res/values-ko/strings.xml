@@ -22,13 +22,16 @@
     <string name="profiles_active">활성</string>
     <string name="profiles_partial">일부 활성</string>
     <string name="profiles_inactive">비활성</string>
+    <string name="profiles_duplicate_name">중복 이름입니다. 이름 기반 자동화를 사용하기 전에 이름을 바꾸세요.</string>
     <plurals name="profiles_rule_count">
         <item quantity="other">규칙 %1$d개</item>
     </plurals>
     <string name="validation_profile_name">프로필 이름을 입력하세요</string>
+    <string name="validation_profile_duplicate">다른 프로필과 겹치지 않는 이름을 사용하세요</string>
     <string name="validation_name_too_long">%1$d자 이하로 입력하세요</string>
     <string name="validation_profile_rule">규칙을 하나 이상 선택하세요</string>
     <string name="message_profile_required">이름을 입력하고 규칙을 하나 이상 선택하세요</string>
+    <string name="message_profile_duplicate">같은 이름의 프로필이 이미 있습니다</string>
     <string name="message_profiles_load_failed">필터링 프로필을 불러오지 못했습니다</string>
 
     <string name="settings_title">설정</string>
@@ -452,6 +455,9 @@
     <string name="rule_warning_negation">경고: 같은 조건과 그 부정이 함께 들어 있습니다.</string>
     <string name="rule_warning_double_not">경고: 이중 부정은 불필요합니다.</string>
     <string name="rule_warning_redundant_group">경고: 자식 하나뿐인 그룹은 불필요합니다.</string>
+    <plurals name="rule_warning_count">
+        <item quantity="other">규칙 경고 %1$d개</item>
+    </plurals>
     <string name="template_keep_conversations">전화·대화 보호</string>
     <string name="template_keep_conversations_summary">전화 카테고리 또는 Android 대화 알림을 항상 유지합니다.</string>
     <string name="template_keep_foreground">진행 중 서비스 보호</string>

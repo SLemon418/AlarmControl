@@ -16,12 +16,12 @@ import com.alarmcontrol.data.db.model.StoredRuleAction
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
-import java.time.Clock
-import java.time.Instant
-import java.time.ZoneOffset
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.Clock
+import java.time.Instant
+import java.time.ZoneOffset
 
 class NotificationEventRepositoryImplTest {
     private val dao = FakeNotificationEventDao()
@@ -38,13 +38,16 @@ class NotificationEventRepositoryImplTest {
         action: RuleAction = RuleAction.Cancel,
         matchedRuleId: String? = "42",
         recordedAtMillis: Long = 2_000L,
+        postedAtMillis: Long = recordedAtMillis,
         packageName: String = "com.example.clock",
         mlCategory: String? = null,
+        postedEpochDay: Long? = null,
     ) = NotificationEvent(
         packageName = packageName,
         mlCategory = mlCategory,
         category = "alarm",
-        postedAtMillis = 1_000L,
+        postedAtMillis = postedAtMillis,
+        postedEpochDay = postedEpochDay,
         action = action,
         matchedRuleId = matchedRuleId,
         recordedAtMillis = recordedAtMillis,
@@ -275,6 +278,36 @@ class NotificationEventRepositoryImplTest {
                 assertEquals(ActionBreakdown(cancelled = 1, snoozed = 1, loggedOnly = 1), awaitItem())
                 cancelAndIgnoreRemainingEvents()
             }
+        }
+
+    @Test
+    fun `daily action breakdown prefers posted day and falls back for legacy rows`() =
+        runTest {
+            repository.record(
+                event(
+                    action = RuleAction.Cancel,
+                    recordedAtMillis = 500,
+                    postedEpochDay = 5,
+                ),
+            )
+            repository.record(
+                event(
+                    action = RuleAction.Snooze(60_000),
+                    recordedAtMillis = 2_000,
+                    postedEpochDay = 4,
+                ),
+            )
+            repository.record(
+                event(
+                    action = RuleAction.Keep,
+                    recordedAtMillis = 2_100,
+                ),
+            )
+
+            assertEquals(
+                ActionBreakdown(cancelled = 1, kept = 1),
+                repository.observeActionBreakdownForDay(epochDay = 5, legacyStartMillis = 1_000).first(),
+            )
         }
 
     @Test

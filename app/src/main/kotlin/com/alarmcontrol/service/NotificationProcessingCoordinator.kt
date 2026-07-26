@@ -107,12 +107,8 @@ internal class NotificationProcessingCoordinator(
     ): Boolean =
         synchronized(lock) {
             entries[key]
-                ?.takeIf {
-                    generationSource.get() == generation &&
-                        it.tokenId == tokenId &&
-                        it.generation == generation &&
-                        !it.claimed
-                }?.also { it.running = true } != null
+                ?.takeIf { it.canCommit(tokenId, generation) }
+                ?.also { it.running = true } != null
         }
 
     private fun commit(
@@ -124,12 +120,7 @@ internal class NotificationProcessingCoordinator(
         val claimed =
             synchronized(lock) {
                 val entry = entries[key]
-                if (
-                    generationSource.get() != generation ||
-                    entry?.tokenId != tokenId ||
-                    entry.generation != generation ||
-                    entry.claimed
-                ) {
+                if (entry?.canCommit(tokenId, generation) != true) {
                     false
                 } else {
                     entry.claimed = true
@@ -160,6 +151,14 @@ internal class NotificationProcessingCoordinator(
                 entries.remove(key)
             }
         }
+    }
+
+    private fun WorkEntry.canCommit(
+        tokenId: Long,
+        generation: Long,
+    ): Boolean {
+        if (generationSource.get() != generation) return false
+        return this.tokenId == tokenId && this.generation == generation && !claimed
     }
 
     private data class WorkEntry(

@@ -10,6 +10,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextInput
 import com.alarmcontrol.R
@@ -440,7 +441,11 @@ class InsightsScreenTest {
         list.performScrollToNode(hasText("Monitor predictions: 4 would cancel · 2 would snooze"))
         composeRule.onNodeWithText("Monitor predictions: 4 would cancel · 2 would snooze").assertIsDisplayed()
         list.performScrollToNode(hasText("Shop · offers · 6"))
-        composeRule.onNodeWithText("Shop · offers · 6").performScrollTo().assertIsDisplayed().performClick()
+        composeRule
+            .onNodeWithText("Shop · offers · 6")
+            .performScrollTo()
+            .assertIsDisplayed()
+            .performClick()
         assertEquals("com.shop" to "offers", opened)
     }
 

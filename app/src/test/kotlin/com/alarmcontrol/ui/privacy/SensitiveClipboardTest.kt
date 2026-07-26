@@ -31,7 +31,9 @@ class SensitiveClipboardTest {
             copySensitiveText(clipboard, "Token", "secret-token", this, clearDelayMillis = 1_000)
 
             assertTrue(
-                clipboard.primaryClip!!.description.extras!!.getBoolean(ClipDescription.EXTRA_IS_SENSITIVE),
+                clipboard.primaryClip!!
+                    .description.extras!!
+                    .getBoolean(ClipDescription.EXTRA_IS_SENSITIVE),
             )
             advanceTimeBy(1_001)
 
@@ -50,6 +52,12 @@ class SensitiveClipboardTest {
 
             advanceTimeBy(1_001)
 
-            assertEquals("keep me", clipboard.primaryClip!!.getItemAt(0).text.toString())
+            assertEquals(
+                "keep me",
+                clipboard.primaryClip!!
+                    .getItemAt(0)
+                    .text
+                    .toString(),
+            )
         }
 }

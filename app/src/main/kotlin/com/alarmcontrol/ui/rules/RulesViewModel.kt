@@ -27,6 +27,7 @@ import com.alarmcontrol.ui.app.AppIdentityResolver
 import com.alarmcontrol.ui.uiText
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -39,7 +40,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
-@OptIn(FlowPreview::class)
+@OptIn(ExperimentalCoroutinesApi::class, FlowPreview::class)
+@Suppress("TooManyFunctions")
 @HiltViewModel
 class RulesViewModel
     @Inject
@@ -138,13 +140,13 @@ class RulesViewModel
                 pendingDelete,
                 ruleAnalysis,
             ) { values ->
-                val content = values[0] as RuleContent
-                val editorState = values[1] as RuleEditorState?
-                val message = values[2] as UiText?
-                val settings = values[3] as RuleSettings
-                val accessState = values[4] as NotificationAccessUiState
-                val deleteConfirmation = values[5] as RuleDeleteConfirmationUi?
-                val analysis = values[6] as RuleAnalysisPresentation
+                val content = values[CONTENT_INDEX] as RuleContent
+                val editorState = values[EDITOR_INDEX] as RuleEditorState?
+                val message = values[MESSAGE_INDEX] as UiText?
+                val settings = values[SETTINGS_INDEX] as RuleSettings
+                val accessState = values[ACCESS_INDEX] as NotificationAccessUiState
+                val deleteConfirmation = values[DELETE_INDEX] as RuleDeleteConfirmationUi?
+                val analysis = values[ANALYSIS_INDEX] as RuleAnalysisPresentation
                 val result = content.result
                 val rules = (result as? DataResult.Success)?.data.orEmpty()
                 val warningsByRule =
@@ -475,6 +477,13 @@ class RulesViewModel
             const val DRAFT_RULE_ID = "__draft__"
             const val SIMULATION_RULE_NAME = "Simulation"
             const val ANALYSIS_DEBOUNCE_MILLIS = 200L
+            const val CONTENT_INDEX = 0
+            const val EDITOR_INDEX = 1
+            const val MESSAGE_INDEX = 2
+            const val SETTINGS_INDEX = 3
+            const val ACCESS_INDEX = 4
+            const val DELETE_INDEX = 5
+            const val ANALYSIS_INDEX = 6
         }
 
         private data class RuleSettings(

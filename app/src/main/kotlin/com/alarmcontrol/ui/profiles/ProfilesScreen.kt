@@ -227,6 +227,13 @@ private fun ProfileCard(
                         ),
                     positive = profile.isActive,
                 )
+                if (profile.hasDuplicateName) {
+                    Text(
+                        stringResource(R.string.profiles_duplicate_name),
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
             }
             Switch(
                 checked = profile.isActive,
@@ -331,6 +338,7 @@ private fun ProfileEditorContent(
                     state.name.isBlank() -> stringResource(R.string.validation_profile_name)
                     state.name.length > MAX_PROFILE_NAME_CHARS ->
                         stringResource(R.string.validation_name_too_long, MAX_PROFILE_NAME_CHARS)
+                    state.nameConflict -> stringResource(R.string.validation_profile_duplicate)
                     else -> null
                 }
             OutlinedTextField(

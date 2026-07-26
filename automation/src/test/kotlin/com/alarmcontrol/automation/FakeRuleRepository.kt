@@ -4,6 +4,7 @@ import com.alarmcontrol.core.filtering.Rule
 import com.alarmcontrol.core.filtering.RuleRepository
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.yield
 
 /** In-memory [RuleRepository] for JVM tests; [saveRule] replaces by id and re-emits. */
 class FakeRuleRepository(
@@ -32,6 +33,7 @@ class FakeRuleRepository(
         enabled: Boolean,
     ): Int {
         bulkUpdateCount++
+        yield()
         var changed = 0
         rules.value =
             rules.value.map { rule ->

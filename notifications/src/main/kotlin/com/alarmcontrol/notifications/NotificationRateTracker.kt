@@ -27,15 +27,11 @@ class NotificationRateTracker {
         packageEvents.clear()
         channelEvents.clear()
         val cutoff = nowMillis - MAX_RATE_WINDOW_MILLIS
-        events
+        (events + livePosts)
             .asSequence()
             .filter { it.postedAtMillis in cutoff..nowMillis }
             .distinct()
             .sortedBy { it.postedAtMillis }
-            .forEach(::append)
-        livePosts
-            .asSequence()
-            .filter { it.postedAtMillis >= cutoff }
             .forEach(::append)
         newestTimestampMillis = maxOf(nowMillis, livePosts.maxOfOrNull { it.postedAtMillis } ?: Long.MIN_VALUE)
         prune(newestTimestampMillis - MAX_RATE_WINDOW_MILLIS)

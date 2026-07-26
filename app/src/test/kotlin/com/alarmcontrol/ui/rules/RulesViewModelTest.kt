@@ -20,10 +20,11 @@ import com.alarmcontrol.ui.app.AppIdentityResolver
 import com.alarmcontrol.ui.app.AppIdentityUi
 import com.alarmcontrol.ui.settings.FakeSettingsRepository
 import com.alarmcontrol.ui.uiText
-import io.mockk.coVerify
 import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runTest
@@ -31,6 +32,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class RulesViewModelTest {
     @get:org.junit.Rule
     val mainDispatcherRule = MainDispatcherRule()
@@ -357,7 +359,16 @@ class RulesViewModelTest {
             rulesFlow.value = listOf(sampleRule.copy(id = "1", priority = 10), sampleRule.copy(id = "2"))
 
             viewModel().uiState.test {
-                val loaded = awaitUntil { it.rules.size == 2 }
+                awaitUntil { it.rules.size == 2 }
+                mainDispatcherRule.dispatcher.scheduler.advanceTimeBy(201)
+                mainDispatcherRule.dispatcher.scheduler.runCurrent()
+                val loaded =
+                    awaitUntil {
+                        it.rules
+                            .singleOrNull { rule -> rule.id == "2" }
+                            ?.warnings
+                            ?.isNotEmpty() == true
+                    }
                 assertTrue(
                     loaded.rules
                         .single { it.id == "2" }

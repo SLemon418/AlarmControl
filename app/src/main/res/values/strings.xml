@@ -22,14 +22,17 @@
     <string name="profiles_active">Active</string>
     <string name="profiles_partial">Partially active</string>
     <string name="profiles_inactive">Inactive</string>
+    <string name="profiles_duplicate_name">Duplicate name — rename this profile before using name-based automation.</string>
     <plurals name="profiles_rule_count">
         <item quantity="one">%1$d rule</item>
         <item quantity="other">%1$d rules</item>
     </plurals>
     <string name="validation_profile_name">Enter a profile name</string>
+    <string name="validation_profile_duplicate">Use a unique profile name</string>
     <string name="validation_name_too_long">Use at most %1$d characters</string>
     <string name="validation_profile_rule">Select at least one rule</string>
     <string name="message_profile_required">Enter a name and select at least one rule</string>
+    <string name="message_profile_duplicate">Another profile already uses this name</string>
     <string name="message_profiles_load_failed">Couldn\'t load filtering profiles</string>
 
     <string name="settings_title">Settings</string>
@@ -456,6 +459,10 @@
     <string name="rule_warning_negation">Warning: this group contains a condition and its negation.</string>
     <string name="rule_warning_double_not">Warning: double negation is unnecessary.</string>
     <string name="rule_warning_redundant_group">Warning: a one-child group is unnecessary.</string>
+    <plurals name="rule_warning_count">
+        <item quantity="one">%1$d rule warning</item>
+        <item quantity="other">%1$d rule warnings</item>
+    </plurals>
     <string name="template_keep_conversations">Protect calls and conversations</string>
     <string name="template_keep_conversations_summary">Keep call-category or Android-ranked conversation notifications.</string>
     <string name="template_keep_foreground">Protect ongoing services</string>

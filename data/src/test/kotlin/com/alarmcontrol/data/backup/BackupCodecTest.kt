@@ -20,8 +20,8 @@ import com.alarmcontrol.core.insights.HourInsightCount
 import com.alarmcontrol.core.insights.RuleTriggerCount
 import com.alarmcontrol.core.insights.SemanticIntentCount
 import com.alarmcontrol.core.profile.FilteringProfile
-import com.alarmcontrol.core.settings.SettingsSnapshot
 import com.alarmcontrol.core.settings.SemanticAnalysisScope
+import com.alarmcontrol.core.settings.SettingsSnapshot
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -246,6 +246,10 @@ class BackupCodecTest {
             remove("categoryCorrectionCount")
             remove("semanticCorrectionCount")
             remove("breakdownVersion")
+            remove("ruleBreakdownComplete")
+            remove("monitorRuleBreakdownComplete")
+            remove("appBreakdownComplete")
+            remove("channelBreakdownComplete")
             getJSONArray("channels").getJSONObject(0).remove("channelName")
         }
 

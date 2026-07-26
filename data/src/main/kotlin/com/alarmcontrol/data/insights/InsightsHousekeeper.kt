@@ -96,7 +96,12 @@ class InsightsHousekeeper
                     dailyInsightRepository.aggregateAndStore(
                         epochDay = day.toEpochDay(),
                         startMillis = day.atStartOfDay(zoneId).toInstant().toEpochMilli(),
-                        endMillis = day.plusDays(1).atStartOfDay(zoneId).toInstant().toEpochMilli(),
+                        endMillis =
+                            day
+                                .plusDays(1)
+                                .atStartOfDay(zoneId)
+                                .toInstant()
+                                .toEpochMilli(),
                         generatedAtMillis = nowMillis,
                         topRules = RULE_BREAKDOWN_LIMIT,
                     )

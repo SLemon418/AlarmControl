@@ -151,6 +151,17 @@ interface NotificationEventDao {
     )
     fun observeActionCountsSince(sinceMillis: Long): Flow<List<ActionCountRow>>
 
+    @Query(
+        "SELECT action, COUNT(*) AS count FROM notification_events " +
+            "WHERE ((posted_epoch_day = :epochDay) OR " +
+            "(posted_epoch_day IS NULL AND posted_at_millis >= :legacyStartMillis)) " +
+            "AND undone = 0 GROUP BY action",
+    )
+    fun observeActionCountsForDay(
+        epochDay: Long,
+        legacyStartMillis: Long,
+    ): Flow<List<ActionCountRow>>
+
     /** Excludes a logged event from insight counts; it cannot restore a dismissed notification. */
     @Query("UPDATE notification_events SET undone = 1 WHERE id = :id")
     suspend fun markUndone(id: Long)

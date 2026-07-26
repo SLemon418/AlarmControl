@@ -9,6 +9,7 @@ import com.alarmcontrol.core.backup.BackupPreview
 import com.alarmcontrol.core.backup.BackupRepository
 import com.alarmcontrol.core.backup.BackupSummary
 import com.alarmcontrol.core.filtering.NotificationHistoryRepository
+import com.alarmcontrol.core.privacy.ClearedDataCounts
 import com.alarmcontrol.core.privacy.LocalDataRepository
 import com.alarmcontrol.core.result.DataResult
 import com.alarmcontrol.ml.llm.LlmInitState
@@ -128,9 +129,14 @@ class SettingsViewModelTest {
         }
 
     @Test
-    fun `disabling encrypted content storage deletes payloads and key before updating state`() =
+    fun `disabling encrypted content storage blocks new capture before deleting payloads`() =
         runTest {
             repository.setNotificationContentStorageEnabled(true)
+            repository.operationLog.clear()
+            coEvery { localDataRepository.clearStoredNotificationContent() } answers {
+                repository.operationLog += "clear-content"
+                ClearedDataCounts()
+            }
             val vm = viewModel()
 
             vm.uiState.test {
@@ -141,6 +147,30 @@ class SettingsViewModelTest {
             }
 
             coVerify(exactly = 1) { localDataRepository.clearStoredNotificationContent() }
+            assertTrue(
+                repository.operationLog.indexOf("content-storage:false") <
+                    repository.operationLog.indexOf("clear-content"),
+            )
+        }
+
+    @Test
+    fun `excluding a package blocks future capture before deleting its ciphertext`() =
+        runTest {
+            coEvery { localDataRepository.clearStoredNotificationContentForPackage("com.example.bank") } answers {
+                repository.operationLog += "clear-package"
+                ClearedDataCounts()
+            }
+            val vm = viewModel()
+
+            vm.setContentPackageExcluded("com.example.bank", excluded = true)
+
+            assertTrue(
+                repository.operationLog.indexOf("excluded-packages:com.example.bank") <
+                    repository.operationLog.indexOf("clear-package"),
+            )
+            coVerify(exactly = 1) {
+                localDataRepository.clearStoredNotificationContentForPackage("com.example.bank")
+            }
         }
 
     @Test
@@ -216,6 +246,20 @@ class SettingsViewModelTest {
 
             coVerify { llmManager.removeModel() }
             coVerify { localDataRepository.clearAllDatabaseData() }
+        }
+
+    @Test
+    fun `clear all continues database and settings cleanup after model failures`() =
+        runTest {
+            coEvery { llmManager.close() } throws IllegalStateException("engine busy")
+            coEvery { llmManager.removeModel() } returns
+                DataResult.Failure(IllegalStateException("model locked"))
+            val vm = viewModel()
+
+            vm.clearAllData()
+
+            coVerify(exactly = 1) { localDataRepository.clearAllDatabaseData() }
+            assertTrue("reset" in repository.operationLog)
         }
 
     @Test

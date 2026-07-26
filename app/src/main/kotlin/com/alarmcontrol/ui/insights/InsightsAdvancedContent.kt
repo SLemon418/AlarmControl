@@ -168,42 +168,7 @@ internal fun NotificationRecordsContent(
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         item {
-            ExpressiveHeroCard {
-                Text(
-                    stringResource(R.string.insights_records_title),
-                    modifier = Modifier.semantics { heading() },
-                    style = MaterialTheme.typography.titleLarge,
-                )
-                Text(
-                    stringResource(R.string.insights_records_count, state.historyTotalCount),
-                    style = MaterialTheme.typography.headlineSmall,
-                )
-                Text(
-                    stringResource(R.string.insights_records_privacy),
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                state.historyCoverage?.let { coverage ->
-                    Text(
-                        coverage.retentionSummary(),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    if (coverage.eventLimitReached) {
-                        Text(
-                            stringResource(R.string.insights_records_retention_limited),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error,
-                        )
-                    }
-                    if (coverage.traceCoveragePartial) {
-                        Text(
-                            stringResource(R.string.insights_records_trace_partial),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
+            NotificationRecordsHero(state)
         }
         item {
             RecordsFilters(
@@ -219,18 +184,7 @@ internal fun NotificationRecordsContent(
         }
         if (state.historyEvents.isEmpty()) {
             item {
-                Card(Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(
-                            stringResource(R.string.insights_records_empty_title),
-                            style = MaterialTheme.typography.titleMedium,
-                        )
-                        Text(
-                            stringResource(R.string.insights_records_empty_body),
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                    }
-                }
+                NotificationRecordsEmptyCard()
             }
         }
         items(state.historyEvents, key = EventListItem::id) { event ->
@@ -252,27 +206,92 @@ internal fun NotificationRecordsContent(
         }
         if (state.historyTotalCount > state.historyEvents.size) {
             item {
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Text(
-                        stringResource(
-                            R.string.insights_records_limit,
-                            state.historyEvents.size,
-                            state.historyTotalCount,
-                        ),
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    Button(
-                        onClick = onLoadMore,
-                        enabled = state.historyEvents.size < 1_000,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text(stringResource(R.string.insights_records_load_more))
-                    }
-                }
+                NotificationRecordsLoadMore(
+                    visibleCount = state.historyEvents.size,
+                    totalCount = state.historyTotalCount,
+                    onLoadMore = onLoadMore,
+                )
             }
+        }
+    }
+}
+
+@Composable
+private fun NotificationRecordsHero(state: InsightsUiState) {
+    ExpressiveHeroCard {
+        Text(
+            stringResource(R.string.insights_records_title),
+            modifier = Modifier.semantics { heading() },
+            style = MaterialTheme.typography.titleLarge,
+        )
+        Text(
+            stringResource(R.string.insights_records_count, state.historyTotalCount),
+            style = MaterialTheme.typography.headlineSmall,
+        )
+        Text(
+            stringResource(R.string.insights_records_privacy),
+            style = MaterialTheme.typography.bodySmall,
+        )
+        state.historyCoverage?.let { coverage ->
+            Text(
+                coverage.retentionSummary(),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (coverage.eventLimitReached) {
+                Text(
+                    stringResource(R.string.insights_records_retention_limited),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+            if (coverage.traceCoveragePartial) {
+                Text(
+                    stringResource(R.string.insights_records_trace_partial),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun NotificationRecordsEmptyCard() {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                stringResource(R.string.insights_records_empty_title),
+                style = MaterialTheme.typography.titleMedium,
+            )
+            Text(
+                stringResource(R.string.insights_records_empty_body),
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
+    }
+}
+
+@Composable
+private fun NotificationRecordsLoadMore(
+    visibleCount: Int,
+    totalCount: Int,
+    onLoadMore: () -> Unit,
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            stringResource(R.string.insights_records_limit, visibleCount, totalCount),
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Button(
+            onClick = onLoadMore,
+            enabled = visibleCount < MAX_HISTORY_EVENTS,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(stringResource(R.string.insights_records_load_more))
         }
     }
 }
@@ -286,14 +305,28 @@ private fun NotificationHistoryCoverageUi.retentionSummary(): String {
     val zone = ZoneId.systemDefault()
     val oldest =
         oldestPostedAtMillis
-            ?.let { Instant.ofEpochMilli(it).atZone(zone).toLocalDate().format(formatter) }
+            ?.let {
+                Instant
+                    .ofEpochMilli(it)
+                    .atZone(zone)
+                    .toLocalDate()
+                    .format(formatter)
+            }
             ?: "—"
     val newest =
         newestPostedAtMillis
-            ?.let { Instant.ofEpochMilli(it).atZone(zone).toLocalDate().format(formatter) }
+            ?.let {
+                Instant
+                    .ofEpochMilli(it)
+                    .atZone(zone)
+                    .toLocalDate()
+                    .format(formatter)
+            }
             ?: "—"
     return stringResource(R.string.insights_records_retained_range, oldest, newest, totalEvents)
 }
+
+private const val MAX_HISTORY_EVENTS = 1_000
 
 @Composable
 internal fun NotificationDetailDialog(

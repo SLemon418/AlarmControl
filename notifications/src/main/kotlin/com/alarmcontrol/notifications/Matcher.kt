@@ -67,6 +67,40 @@ class Matcher {
     ): MatchDecision = evaluateRules(snapshot, compiled.monitorRules)
 
     /**
+     * Evaluates both lanes while building the selected rules' traces from the same short-circuiting
+     * condition traversal. Use this on the notification hot path when a persisted explanation is
+     * required; it avoids evaluating the matched conditions a second time.
+     */
+    fun evaluateWithTraces(
+        activeSnapshot: NotificationSnapshot,
+        monitorSnapshot: NotificationSnapshot,
+        compiled: CompiledRuleSet,
+    ): MatchEvaluation {
+        val active = evaluateRulesWithTree(activeSnapshot, compiled.activeRules)
+        val monitor = evaluateRulesWithTree(monitorSnapshot, compiled.monitorRules)
+        val bothMatched = active.tree != null && monitor.tree != null
+        val activeBudget =
+            when {
+                bothMatched -> ACTIVE_TRACE_BUDGET
+                active.tree != null -> MAX_PERSISTED_TRACE_NODES
+                else -> 0
+            }
+        val activeTrace =
+            active.tree?.toDecisionTrace(DecisionTraceLane.ACTIVE, activeBudget).orEmpty()
+        val monitorTrace =
+            monitor.tree
+                ?.toDecisionTrace(
+                    DecisionTraceLane.MONITOR,
+                    MAX_PERSISTED_TRACE_NODES - activeTrace.size,
+                ).orEmpty()
+        return MatchEvaluation(
+            activeDecision = active.decision,
+            monitorDecision = monitor.decision,
+            decisionTrace = activeTrace + monitorTrace,
+        )
+    }
+
+    /**
      * Convenience overload that [compile]s [rules] on every call — fine for one-off evaluation and
      * tests, but in a hot loop compile once and use the [CompiledRuleSet] overload instead.
      */
@@ -109,43 +143,9 @@ class Matcher {
     ): List<DecisionTraceNode> {
         val matched = decision as? MatchDecision.Matched ?: return emptyList()
         if (maxNodes <= 0) return emptyList()
-        val evaluated = matched.rule.condition.evaluateTree(snapshot)
-        val nodes = mutableListOf<DecisionTraceNode>()
-        var truncated = false
-
-        fun visit(
-            condition: EvaluatedCondition,
-            depth: Int,
-        ) {
-            if (nodes.size >= maxNodes - 1) {
-                truncated = true
-                return
-            }
-            nodes +=
-                DecisionTraceNode(
-                    lane = lane,
-                    position = nodes.size,
-                    depth = depth,
-                    kind = condition.condition.kind(),
-                    result = condition.result,
-                )
-            condition.children.forEach { child ->
-                if (!truncated) visit(child, depth + 1)
-            }
-        }
-
-        visit(evaluated, 0)
-        if (truncated) {
-            nodes +=
-                DecisionTraceNode(
-                    lane = lane,
-                    position = nodes.size,
-                    depth = 0,
-                    kind = DecisionConditionKind.TRUNCATED,
-                    result = ConditionResult.UNKNOWN,
-                )
-        }
-        return nodes
+        return matched.rule.condition
+            .evaluateTree(snapshot)
+            .toDecisionTrace(lane, maxNodes)
     }
 
     /**
@@ -172,6 +172,19 @@ class Matcher {
         return active + monitor
     }
 
+    private fun evaluateRulesWithTree(
+        snapshot: NotificationSnapshot,
+        rules: List<Rule>,
+    ): EvaluatedRuleDecision {
+        for (rule in rules) {
+            val tree = rule.condition.evaluateTree(snapshot)
+            if (tree.result == ConditionResult.MATCH) {
+                return EvaluatedRuleDecision(MatchDecision.Matched(rule, rule.action), tree)
+            }
+        }
+        return EvaluatedRuleDecision(MatchDecision.NoMatch, null)
+    }
+
     private fun evaluateRules(
         snapshot: NotificationSnapshot,
         rules: List<Rule>,
@@ -181,28 +194,97 @@ class Matcher {
     }
 }
 
+private fun EvaluatedCondition.toDecisionTrace(
+    lane: DecisionTraceLane,
+    maxNodes: Int,
+): List<DecisionTraceNode> {
+    if (maxNodes <= 0) return emptyList()
+    val nodes = mutableListOf<DecisionTraceNode>()
+    var truncated = false
+
+    fun visit(
+        condition: EvaluatedCondition,
+        depth: Int,
+    ) {
+        if (nodes.size >= maxNodes - 1) {
+            truncated = true
+            return
+        }
+        nodes +=
+            DecisionTraceNode(
+                lane = lane,
+                position = nodes.size,
+                depth = depth,
+                kind = condition.condition.kind(),
+                result = condition.result,
+            )
+        condition.children.forEach { child ->
+            if (!truncated) visit(child, depth + 1)
+        }
+    }
+
+    visit(this, 0)
+    if (truncated) {
+        nodes +=
+            DecisionTraceNode(
+                lane = lane,
+                position = nodes.size,
+                depth = 0,
+                kind = DecisionConditionKind.TRUNCATED,
+                result = ConditionResult.UNKNOWN,
+            )
+    }
+    return nodes
+}
+
 private fun List<Rule>.requiredSignals(): RuleSignalRequirements =
     fold(RuleSignalRequirements()) { result, rule -> result + rule.condition.requiredSignals() }
 
-private fun Condition.trace(snapshot: NotificationSnapshot): ConditionTrace =
-    evaluateTree(snapshot).toTrace()
+private fun Condition.trace(snapshot: NotificationSnapshot): ConditionTrace = evaluateTree(snapshot).toTrace()
 
-private fun Condition.evaluateTree(snapshot: NotificationSnapshot): EvaluatedCondition {
-    val evaluatedChildren =
-        when (this) {
-            is Condition.AllOf -> conditions.map { it.evaluateTree(snapshot) }
-            is Condition.AnyOf -> conditions.map { it.evaluateTree(snapshot) }
-            is Condition.Not -> listOf(condition.evaluateTree(snapshot))
-            else -> emptyList()
+private fun Condition.evaluateTree(snapshot: NotificationSnapshot): EvaluatedCondition =
+    when (this) {
+        is Condition.AllOf -> evaluateAllOf(snapshot)
+        is Condition.AnyOf -> evaluateAnyOf(snapshot)
+        is Condition.Not -> {
+            val child = condition.evaluateTree(snapshot)
+            EvaluatedCondition(this, child.result.not(), listOf(child))
         }
-    val result =
-        when (this) {
-            is Condition.AllOf -> evaluatedChildren.allOfResult()
-            is Condition.AnyOf -> evaluatedChildren.anyOfResult()
-            is Condition.Not -> evaluatedChildren.single().result.not()
-            else -> evaluate(snapshot)
+        else -> EvaluatedCondition(this, evaluate(snapshot), emptyList())
+    }
+
+private fun Condition.AllOf.evaluateAllOf(snapshot: NotificationSnapshot): EvaluatedCondition {
+    if (conditions.isEmpty()) return EvaluatedCondition(this, ConditionResult.NO_MATCH, emptyList())
+    val children = mutableListOf<EvaluatedCondition>()
+    var sawUnknown = false
+    for (condition in conditions) {
+        val child = condition.evaluateTree(snapshot)
+        children += child
+        when (child.result) {
+            ConditionResult.NO_MATCH -> return EvaluatedCondition(this, ConditionResult.NO_MATCH, children)
+            ConditionResult.UNKNOWN -> sawUnknown = true
+            ConditionResult.MATCH -> Unit
         }
-    return EvaluatedCondition(this, result, evaluatedChildren)
+    }
+    val result = if (sawUnknown) ConditionResult.UNKNOWN else ConditionResult.MATCH
+    return EvaluatedCondition(this, result, children)
+}
+
+private fun Condition.AnyOf.evaluateAnyOf(snapshot: NotificationSnapshot): EvaluatedCondition {
+    if (conditions.isEmpty()) return EvaluatedCondition(this, ConditionResult.NO_MATCH, emptyList())
+    val children = mutableListOf<EvaluatedCondition>()
+    var sawUnknown = false
+    for (condition in conditions) {
+        val child = condition.evaluateTree(snapshot)
+        children += child
+        when (child.result) {
+            ConditionResult.MATCH -> return EvaluatedCondition(this, ConditionResult.MATCH, children)
+            ConditionResult.UNKNOWN -> sawUnknown = true
+            ConditionResult.NO_MATCH -> Unit
+        }
+    }
+    val result = if (sawUnknown) ConditionResult.UNKNOWN else ConditionResult.NO_MATCH
+    return EvaluatedCondition(this, result, children)
 }
 
 private fun EvaluatedCondition.toTrace(): ConditionTrace =
@@ -212,26 +294,15 @@ private fun EvaluatedCondition.toTrace(): ConditionTrace =
         children = children.map(EvaluatedCondition::toTrace),
     )
 
-private fun List<EvaluatedCondition>.allOfResult(): ConditionResult =
-    when {
-        isEmpty() -> ConditionResult.NO_MATCH
-        any { it.result == ConditionResult.NO_MATCH } -> ConditionResult.NO_MATCH
-        any { it.result == ConditionResult.UNKNOWN } -> ConditionResult.UNKNOWN
-        else -> ConditionResult.MATCH
-    }
-
-private fun List<EvaluatedCondition>.anyOfResult(): ConditionResult =
-    when {
-        isEmpty() -> ConditionResult.NO_MATCH
-        any { it.result == ConditionResult.MATCH } -> ConditionResult.MATCH
-        any { it.result == ConditionResult.UNKNOWN } -> ConditionResult.UNKNOWN
-        else -> ConditionResult.NO_MATCH
-    }
-
 private data class EvaluatedCondition(
     val condition: Condition,
     val result: ConditionResult,
     val children: List<EvaluatedCondition>,
+)
+
+private data class EvaluatedRuleDecision(
+    val decision: MatchDecision,
+    val tree: EvaluatedCondition?,
 )
 
 private fun Condition.requiredSignals(): RuleSignalRequirements =

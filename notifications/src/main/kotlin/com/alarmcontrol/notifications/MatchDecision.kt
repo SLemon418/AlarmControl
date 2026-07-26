@@ -15,3 +15,13 @@ sealed interface MatchDecision {
 
     data object NoMatch : MatchDecision
 }
+
+/**
+ * Active and monitor decisions evaluated in one pass per lane, with their combined content-free
+ * persistence trace already capped by the matcher.
+ */
+data class MatchEvaluation(
+    val activeDecision: MatchDecision,
+    val monitorDecision: MatchDecision,
+    val decisionTrace: List<com.alarmcontrol.core.filtering.DecisionTraceNode>,
+)

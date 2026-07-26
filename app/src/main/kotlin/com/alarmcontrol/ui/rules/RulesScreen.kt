@@ -76,6 +76,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.alarmcontrol.R
+import com.alarmcontrol.core.filtering.Condition
 import com.alarmcontrol.core.filtering.MAX_CONDITION_VALUE_CHARS
 import com.alarmcontrol.core.filtering.MAX_RATE_THRESHOLD
 import com.alarmcontrol.core.filtering.MAX_RATE_WINDOW_MILLIS
@@ -144,7 +145,9 @@ fun RulesRoute(
         onConfirmDeleteRule = viewModel::confirmDeleteRule,
         onCancelDeleteRule = viewModel::cancelDeleteRule,
         onUserMessageShown = viewModel::onUserMessageShown,
-        onGrantAccess = { context.startActivity(NotificationAccess.settingsIntent()) },
+        onGrantAccess = {
+            NotificationAccess.openWithAppDetailsFallback(context, NotificationAccess.settingsIntent())
+        },
         onOpenSettings = onOpenSettings,
     )
 }
@@ -209,118 +212,176 @@ fun RulesScreen(
             )
         },
     ) { padding ->
-        Box(Modifier.fillMaxSize().padding(padding)) {
-            when {
-                state.isLoading -> CircularProgressIndicator(Modifier.align(Alignment.Center))
-                state.errorMessage != null ->
-                    Text(
-                        text = state.errorMessage.asString(),
-                        modifier = Modifier.align(Alignment.Center).padding(24.dp),
+        RulesContent(
+            state = state,
+            modifier = Modifier.fillMaxSize().padding(padding),
+            onAddRule = onAddRule,
+            onEditRule = onEditRule,
+            onToggleRule = onToggleRule,
+            onDeleteRule = onDeleteRule,
+            onUseTemplate = onUseTemplate,
+            onGrantAccess = onGrantAccess,
+            onOpenSettings = onOpenSettings,
+        )
+    }
+    DeleteRuleConfirmation(
+        pending = state.pendingDelete,
+        onConfirm = onConfirmDeleteRule,
+        onCancel = onCancelDeleteRule,
+    )
+}
+
+@Composable
+private fun RulesContent(
+    state: RulesUiState,
+    modifier: Modifier,
+    onAddRule: () -> Unit,
+    onEditRule: (String) -> Unit,
+    onToggleRule: (String, Boolean) -> Unit,
+    onDeleteRule: (String) -> Unit,
+    onUseTemplate: (RuleTemplate) -> Unit,
+    onGrantAccess: () -> Unit,
+    onOpenSettings: () -> Unit,
+) {
+    Box(modifier) {
+        when {
+            state.isLoading -> CircularProgressIndicator(Modifier.align(Alignment.Center))
+            state.errorMessage != null ->
+                Text(
+                    text = state.errorMessage.asString(),
+                    modifier = Modifier.align(Alignment.Center).padding(24.dp),
+                )
+            else ->
+                MaxWidthContent(Modifier.fillMaxSize()) {
+                    RulesList(
+                        state = state,
+                        onAddRule = onAddRule,
+                        onEditRule = onEditRule,
+                        onToggleRule = onToggleRule,
+                        onDeleteRule = onDeleteRule,
+                        onUseTemplate = onUseTemplate,
+                        onGrantAccess = onGrantAccess,
+                        onOpenSettings = onOpenSettings,
                     )
-                else ->
-                    MaxWidthContent(Modifier.fillMaxSize()) {
-                        LazyColumn(
-                            modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(start = 16.dp, top = 12.dp, end = 16.dp, bottom = 96.dp),
-                            verticalArrangement = Arrangement.spacedBy(12.dp),
-                        ) {
-                            when (state.notificationAccessState) {
-                                NotificationAccessUiState.CHECKING ->
-                                    item { NotificationAccessCheckingRow() }
-                                NotificationAccessUiState.DENIED ->
-                                    item { NotificationAccessBanner(onGrant = onGrantAccess) }
-                                NotificationAccessUiState.GRANTED -> Unit
-                            }
-                            val hasMonitorRule =
-                                state.rules.any {
-                                    it.enabled && it.executionMode == RuleExecutionMode.MONITOR
-                                }
-                            val hasObservedRecords = state.availableSources.isNotEmpty()
-                            if (
-                                state.notificationAccessState != NotificationAccessUiState.GRANTED ||
-                                !hasMonitorRule ||
-                                !hasObservedRecords ||
-                                state.enabledRuleCount == 0
-                            ) {
-                                item {
-                                    GettingStartedChecklist(
-                                        accessGranted =
-                                            state.notificationAccessState == NotificationAccessUiState.GRANTED,
-                                        hasMonitorRule = hasMonitorRule,
-                                        hasObservedRecords = hasObservedRecords,
-                                        hasActiveRule = state.enabledRuleCount > 0,
-                                    )
-                                }
-                            }
-                            item {
-                                SetupHealthCard(
-                                    filteringEnabled = state.filteringEnabled,
-                                    enabledRuleCount = state.enabledRuleCount,
-                                    onAddRule = onAddRule,
-                                    onOpenSettings = onOpenSettings,
-                                )
-                            }
-                            item { RuleTemplatePicker(onSelect = onUseTemplate) }
-                            if (state.showAutomationHint) {
-                                item { AutomationHintCard() }
-                            }
-                            if (state.rules.isEmpty()) {
-                                item {
-                                    EmptyState(
-                                        icon = Icons.Default.Add,
-                                        title = stringResource(R.string.rules_empty_title),
-                                        body = stringResource(R.string.rules_empty_body),
-                                        actionLabel = stringResource(R.string.rules_add),
-                                        onAction = onAddRule,
-                                        illustration = { FilterShieldGraphic() },
-                                    )
-                                }
-                            } else {
-                                item { SectionHeader(stringResource(R.string.rules_your_rules)) }
-                                items(state.rules, key = { it.id }) { rule ->
-                                    RuleRow(
-                                        item = rule,
-                                        onToggle = { enabled -> onToggleRule(rule.id, enabled) },
-                                        onEdit = { onEditRule(rule.id) },
-                                        onDelete = { onDeleteRule(rule.id) },
-                                    )
-                                }
-                            }
-                        }
-                    }
+                }
+        }
+    }
+}
+
+@Composable
+private fun RulesList(
+    state: RulesUiState,
+    onAddRule: () -> Unit,
+    onEditRule: (String) -> Unit,
+    onToggleRule: (String, Boolean) -> Unit,
+    onDeleteRule: (String) -> Unit,
+    onUseTemplate: (RuleTemplate) -> Unit,
+    onGrantAccess: () -> Unit,
+    onOpenSettings: () -> Unit,
+) {
+    val accessGranted = state.notificationAccessState == NotificationAccessUiState.GRANTED
+    val hasMonitorRule =
+        state.rules.any { it.enabled && it.executionMode == RuleExecutionMode.MONITOR }
+    val hasObservedRecords = state.availableSources.isNotEmpty()
+    val hasActiveRule = state.enabledRuleCount > 0
+    val showChecklist = !accessGranted || !hasMonitorRule || !hasObservedRecords || !hasActiveRule
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().testTag(RULES_LIST_TEST_TAG),
+        contentPadding =
+            PaddingValues(
+                start = 16.dp,
+                top = 12.dp,
+                end = 16.dp,
+                bottom = 96.dp,
+            ),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        when (state.notificationAccessState) {
+            NotificationAccessUiState.CHECKING -> item { NotificationAccessCheckingRow() }
+            NotificationAccessUiState.DENIED -> item { NotificationAccessBanner(onGrant = onGrantAccess) }
+            NotificationAccessUiState.GRANTED -> Unit
+        }
+        if (showChecklist) {
+            item {
+                GettingStartedChecklist(
+                    accessGranted = accessGranted,
+                    hasMonitorRule = hasMonitorRule,
+                    hasObservedRecords = hasObservedRecords,
+                    hasActiveRule = hasActiveRule,
+                )
+            }
+        }
+        item {
+            SetupHealthCard(
+                filteringEnabled = state.filteringEnabled,
+                enabledRuleCount = state.enabledRuleCount,
+                onAddRule = onAddRule,
+                onOpenSettings = onOpenSettings,
+            )
+        }
+        item { RuleTemplatePicker(onSelect = onUseTemplate) }
+        if (state.showAutomationHint) item { AutomationHintCard() }
+        if (state.rules.isEmpty()) {
+            item {
+                EmptyState(
+                    icon = Icons.Default.Add,
+                    title = stringResource(R.string.rules_empty_title),
+                    body = stringResource(R.string.rules_empty_body),
+                    actionLabel = stringResource(R.string.rules_add),
+                    onAction = onAddRule,
+                    illustration = { FilterShieldGraphic() },
+                )
+            }
+        } else {
+            item { SectionHeader(stringResource(R.string.rules_your_rules)) }
+            items(state.rules, key = { it.id }) { rule ->
+                RuleRow(
+                    item = rule,
+                    onToggle = { enabled -> onToggleRule(rule.id, enabled) },
+                    onEdit = { onEditRule(rule.id) },
+                    onDelete = { onDeleteRule(rule.id) },
+                )
             }
         }
     }
-    state.pendingDelete?.let { pending ->
-        AlertDialog(
-            onDismissRequest = onCancelDeleteRule,
-            title = { Text(stringResource(R.string.rules_delete_confirm_title)) },
-            text = {
-                Text(
-                    if (pending.profileCount > 0) {
-                        pluralStringResource(
-                            R.plurals.rules_delete_profile_warning,
-                            pending.profileCount,
-                            pending.ruleName,
-                            pending.profileCount,
-                        )
-                    } else {
-                        stringResource(R.string.rules_delete_confirm_message, pending.ruleName)
-                    },
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = onConfirmDeleteRule) {
-                    Text(stringResource(R.string.delete))
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = onCancelDeleteRule) {
-                    Text(stringResource(R.string.cancel))
-                }
-            },
-        )
-    }
+}
+
+@Composable
+private fun DeleteRuleConfirmation(
+    pending: RuleDeleteConfirmationUi?,
+    onConfirm: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    if (pending == null) return
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text(stringResource(R.string.rules_delete_confirm_title)) },
+        text = {
+            Text(
+                if (pending.profileCount > 0) {
+                    pluralStringResource(
+                        R.plurals.rules_delete_profile_warning,
+                        pending.profileCount,
+                        pending.ruleName,
+                        pending.profileCount,
+                    )
+                } else {
+                    stringResource(R.string.rules_delete_confirm_message, pending.ruleName)
+                },
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text(stringResource(R.string.delete))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onCancel) {
+                Text(stringResource(R.string.cancel))
+            }
+        },
+    )
 }
 
 @Composable
@@ -422,6 +483,7 @@ private fun RuleRow(
     onDelete: () -> Unit,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
+    var warningsExpanded by remember(item.id) { mutableStateOf(false) }
     ElevatedCard(onClick = onEdit, modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             val ruleName = if (item.name.isBlank()) stringResource(R.string.rule_untitled) else item.name
@@ -476,12 +538,25 @@ private fun RuleRow(
                     positive = item.enabled,
                 )
             }
-            item.warnings.forEach { warning ->
-                Text(
-                    warning.asString(),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
+            if (item.warnings.isNotEmpty()) {
+                TextButton(onClick = { warningsExpanded = !warningsExpanded }) {
+                    Text(
+                        pluralStringResource(
+                            R.plurals.rule_warning_count,
+                            item.warnings.size,
+                            item.warnings.size,
+                        ),
+                    )
+                }
+                if (warningsExpanded) {
+                    item.warnings.forEach { warning ->
+                        Text(
+                            warning.asString(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
             }
         }
     }
@@ -1041,14 +1116,22 @@ private fun SnoozeDurationField(
 
 @Composable
 private fun RuleWarningCards(warnings: List<com.alarmcontrol.ui.UiText>) {
-    warnings.forEach { warning ->
-        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
-            Text(
-                warning.asString(),
-                modifier = Modifier.padding(12.dp),
-                color = MaterialTheme.colorScheme.onErrorContainer,
-                style = MaterialTheme.typography.bodySmall,
-            )
+    var expanded by remember(warnings) { mutableStateOf(false) }
+    if (warnings.isNotEmpty()) {
+        TextButton(onClick = { expanded = !expanded }) {
+            Text(pluralStringResource(R.plurals.rule_warning_count, warnings.size, warnings.size))
+        }
+    }
+    if (expanded) {
+        warnings.forEach { warning ->
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                Text(
+                    warning.asString(),
+                    modifier = Modifier.padding(12.dp),
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
         }
     }
 }
@@ -1098,6 +1181,23 @@ private fun RuleSimulator(
     if (!state.expanded) return
 
     Text(stringResource(R.string.simulator_summary), style = MaterialTheme.typography.bodySmall)
+    SimulatorTextFields(state, condition, onChange)
+    val invalidTime = condition.requiresSignal(SimulationSignal.TIME) && parseMinuteOfDay(state.localTime) == null
+    SimulatorSignalFields(state, condition, invalidTime, onChange)
+    Button(onClick = onRun, enabled = !invalidTime) {
+        Text(stringResource(R.string.simulator_run))
+    }
+    state.result?.let { result ->
+        SimulationResultCard(result, state.trace)
+    }
+}
+
+@Composable
+private fun SimulatorTextFields(
+    state: RuleSimulationState,
+    condition: Condition?,
+    onChange: (RuleSimulationState) -> Unit,
+) {
     if (condition.requiresSignal(SimulationSignal.PACKAGE)) {
         SimulatorField(state.packageName, R.string.simulator_package) { onChange(state.copy(packageName = it)) }
     }
@@ -1116,10 +1216,16 @@ private fun RuleSimulator(
     if (condition.requiresSignal(SimulationSignal.ML_CATEGORY)) {
         SimulatorField(state.mlCategory, R.string.simulator_ml_category) { onChange(state.copy(mlCategory = it)) }
     }
+}
 
-    val needsTime = condition.requiresSignal(SimulationSignal.TIME)
-    val invalidTime = needsTime && parseMinuteOfDay(state.localTime) == null
-    if (needsTime) {
+@Composable
+private fun SimulatorSignalFields(
+    state: RuleSimulationState,
+    condition: Condition?,
+    invalidTime: Boolean,
+    onChange: (RuleSimulationState) -> Unit,
+) {
+    if (condition.requiresSignal(SimulationSignal.TIME)) {
         OutlinedTextField(
             value = state.localTime,
             onValueChange = { onChange(state.copy(localTime = it)) },
@@ -1170,33 +1276,37 @@ private fun RuleSimulator(
     if (condition.requiresSignal(SimulationSignal.RATE)) {
         RateSimulationInput(state, onChange)
     }
-    Button(onClick = onRun, enabled = !invalidTime) { Text(stringResource(R.string.simulator_run)) }
-    state.result?.let { result ->
-        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
-            Column(
-                modifier = Modifier.padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                Text(result.asString(), style = MaterialTheme.typography.titleSmall)
-                state.trace.forEach { item ->
-                    val status =
-                        when (item.status) {
-                            SimulationTraceStatus.MATCH -> stringResource(R.string.simulator_trace_match)
-                            SimulationTraceStatus.NO_MATCH -> stringResource(R.string.simulator_trace_no_match)
-                            SimulationTraceStatus.UNKNOWN -> stringResource(R.string.simulator_trace_unknown)
-                        }
-                    Text(
-                        text = stringResource(R.string.simulator_trace_line, status, item.condition.asString()),
-                        modifier = Modifier.padding(start = (item.depth * 12).dp),
-                        style = MaterialTheme.typography.bodySmall,
-                        color =
-                            if (item.status == SimulationTraceStatus.UNKNOWN) {
-                                MaterialTheme.colorScheme.error
-                            } else {
-                                MaterialTheme.colorScheme.onSecondaryContainer
-                            },
-                    )
-                }
+}
+
+@Composable
+private fun SimulationResultCard(
+    result: com.alarmcontrol.ui.UiText,
+    trace: List<SimulationTraceItem>,
+) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(result.asString(), style = MaterialTheme.typography.titleSmall)
+            trace.forEach { item ->
+                val status =
+                    when (item.status) {
+                        SimulationTraceStatus.MATCH -> stringResource(R.string.simulator_trace_match)
+                        SimulationTraceStatus.NO_MATCH -> stringResource(R.string.simulator_trace_no_match)
+                        SimulationTraceStatus.UNKNOWN -> stringResource(R.string.simulator_trace_unknown)
+                    }
+                Text(
+                    text = stringResource(R.string.simulator_trace_line, status, item.condition.asString()),
+                    modifier = Modifier.padding(start = (item.depth * TRACE_INDENT_DP).dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color =
+                        if (item.status == SimulationTraceStatus.UNKNOWN) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSecondaryContainer
+                        },
+                )
             }
         }
     }
@@ -1789,7 +1899,9 @@ private fun String.asSignedIntegerInput(): String =
 private const val MAX_EDITOR_DEPTH = 32
 private const val MAX_SOURCE_QUERY_CHARS = 80
 private const val MILLIS_PER_MINUTE = 60_000L
+private const val TRACE_INDENT_DP = 12
 internal const val RULE_ADD_FAB_TEST_TAG = "rule_add_fab"
+internal const val RULES_LIST_TEST_TAG = "rules_list"
 internal const val CONDITION_MOVE_UP_TEST_TAG = "condition_move_up"
 internal const val CONDITION_MOVE_UP_ENABLED_TEST_TAG = "condition_move_up_enabled"
 private val RATE_WINDOW_PRESET_MINUTES = listOf(1, 5, 15, 60)

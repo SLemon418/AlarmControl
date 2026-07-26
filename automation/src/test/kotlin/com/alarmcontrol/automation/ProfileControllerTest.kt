@@ -7,8 +7,10 @@ import com.alarmcontrol.core.filtering.Condition
 import com.alarmcontrol.core.filtering.Rule
 import com.alarmcontrol.core.filtering.RuleAction
 import com.alarmcontrol.core.profile.FilteringProfile
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -320,6 +322,26 @@ class ProfileControllerTest {
             assertTrue(repo.current().all { it.enabled })
             assertEquals(2, controller.toggle("10"))
             assertTrue(repo.current().none { it.enabled })
+        }
+
+    @Test
+    fun `concurrent profile toggles are serialized without lost updates`() =
+        runTest {
+            val repo = FakeRuleRepository(listOf(rule("1", "First", enabled = false)))
+            val profiles =
+                FakeProfileRepository(
+                    listOf(FilteringProfile(id = "10", name = "Focus", ruleIds = setOf("1"))),
+                )
+            val controller = ProfileController(repo, profiles, FakeSettingsRepository())
+
+            coroutineScope {
+                repeat(20) {
+                    launch { controller.toggle("10") }
+                }
+            }
+
+            assertFalse(repo.current().single().enabled)
+            assertEquals(20, repo.bulkUpdateCount)
         }
 }
 

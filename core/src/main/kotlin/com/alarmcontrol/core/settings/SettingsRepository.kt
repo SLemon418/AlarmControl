@@ -81,6 +81,12 @@ interface SettingsRepository {
 
     suspend fun setContentExcludedPackages(packageNames: Set<String>)
 
+    /**
+     * Atomically claims the one-time insights bootstrap for [appVersion]. Returns false when this
+     * version already claimed it, preventing an expensive aggregation on every process start.
+     */
+    suspend fun claimInsightsBootstrap(appVersion: Int): Boolean = true
+
     /** Returns one coherent, portable snapshot for local backup. */
     suspend fun snapshot(): SettingsSnapshot
 

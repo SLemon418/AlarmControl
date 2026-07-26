@@ -33,7 +33,7 @@ Editing an existing complex rule always opens the lossless advanced tree.
 
 Rules may use package, title/text substring, Android category, channel id, ongoing state, ML label,
 time window, semantic intent, conversation, foreground-service state, ranking importance, and
-frequency conditions. `AllOf`, `AnyOf`, and `Not` can be nested without a fixed depth in the editor.
+frequency conditions. `AllOf`, `AnyOf`, and `Not` can be nested up to 32 levels and 256 total nodes.
 Evaluation short-circuits while preserving three-state logic.
 
 The visual editor preserves the full tree and allows sibling nodes to move up or down. Node order
@@ -52,6 +52,14 @@ short-circuit sooner. Invalid or empty nodes are highlighted and cannot be saved
 
 Rate rules count posted callbacks represented by the local event metadata. They do not inspect or
 retain notification title/body content.
+
+## Runtime safety
+
+The listener tracks at most 64 notification jobs and evaluates at most four concurrently. A newer
+post replaces pending work for the same notification. Rule or privacy-setting changes revoke stale
+jobs before any cancel/snooze Binder call, and an unavailable startup cache fails open after two
+seconds. These limits favor leaving a notification untouched over performing an action from stale
+or overloaded state.
 
 ## Protection templates
 
@@ -94,9 +102,9 @@ same-condition shadowing, mutually exclusive package/category/channel requiremen
 contradictions, `X AND NOT X`, double negation, and one-child groups. Warnings do not block save and
 the analyzer does not guess arbitrary string implication.
 
-For each selected active and monitor winner, history may store up to 128 trace nodes containing
-only condition kind, `MATCH`/`NO_MATCH`/`UNKNOWN`, depth, position, and lane. Predicate values,
-notification content, and LLM reasoning are excluded.
+For the selected active and monitor winners together, history may store up to 128 trace nodes
+containing only condition kind, `MATCH`/`NO_MATCH`/`UNKNOWN`, depth, position, and lane. Predicate
+values, notification content, and LLM reasoning are excluded.
 
 Local 7-day SQL aggregations can propose only:
 

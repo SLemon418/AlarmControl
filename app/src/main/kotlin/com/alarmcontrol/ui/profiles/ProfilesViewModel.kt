@@ -69,18 +69,25 @@ class ProfilesViewModel
         }
 
         fun onEditProfile(profileId: String) {
-            currentContent()?.profiles?.firstOrNull { it.id == profileId }?.let { profile ->
+            val profiles = currentContent()?.profiles.orEmpty()
+            profiles.firstOrNull { it.id == profileId }?.let { profile ->
                 editor.value =
                     ProfileEditorState(
                         id = profile.id,
                         name = profile.name,
                         selectedRuleIds = profile.ruleIds,
+                        nameConflict = profiles.hasNameConflict(profile.name, profile.id),
                     )
             }
         }
 
         fun onEditorChange(state: ProfileEditorState) {
-            editor.value = state.copy(hasUnsavedChanges = true, showDiscardConfirmation = false)
+            editor.value =
+                state.copy(
+                    nameConflict = currentContent()?.profiles.orEmpty().hasNameConflict(state.name, state.id),
+                    hasUnsavedChanges = true,
+                    showDiscardConfirmation = false,
+                )
         }
 
         fun onDismissEditor() {
@@ -104,7 +111,14 @@ class ProfilesViewModel
         fun onSaveProfile() {
             val state = editor.value ?: return
             if (!state.canSave) {
-                messages.value = uiText(R.string.message_profile_required)
+                messages.value =
+                    uiText(
+                        if (state.nameConflict) {
+                            R.string.message_profile_duplicate
+                        } else {
+                            R.string.message_profile_required
+                        },
+                    )
                 return
             }
             launchOp(onSuccess = { editor.value = null }) {
@@ -159,6 +173,12 @@ class ProfilesViewModel
         ) {
             fun toListItems(): List<ProfileListItem> {
                 val rulesById = rules.associateBy(Rule::id)
+                val duplicateNames =
+                    profiles
+                        .groupingBy { it.name.normalizedProfileName() }
+                        .eachCount()
+                        .filterValues { it > 1 }
+                        .keys
                 return profiles.map { profile ->
                     val existingRules = profile.ruleIds.mapNotNull(rulesById::get)
                     ProfileListItem(
@@ -166,6 +186,7 @@ class ProfilesViewModel
                         name = profile.name,
                         memberCount = existingRules.size,
                         enabledCount = existingRules.count(Rule::enabled),
+                        hasDuplicateName = profile.name.normalizedProfileName() in duplicateNames,
                     )
                 }
             }
@@ -182,3 +203,16 @@ private fun Rule.toOption(): ProfileRuleOption =
         name = name,
         enabled = enabled,
     )
+
+private fun List<FilteringProfile>.hasNameConflict(
+    name: String,
+    excludingId: String,
+): Boolean {
+    val normalized = name.normalizedProfileName()
+    return normalized.isNotEmpty() &&
+        any { profile ->
+            profile.id != excludingId && profile.name.normalizedProfileName() == normalized
+        }
+}
+
+private fun String.normalizedProfileName(): String = trim().lowercase()

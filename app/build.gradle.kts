@@ -58,6 +58,7 @@ android {
     }
 
     buildFeatures {
+        buildConfig = true
         compose = true
     }
 
@@ -214,4 +215,27 @@ tasks
             it.name == "bundleRelease"
     }.configureEach {
         dependsOn(offlineGuard)
+    }
+
+val maxReleaseBundleBytes = 60L * 1_024 * 1_024
+
+tasks
+    .matching { it.name == "bundleRelease" }
+    .configureEach {
+        doLast {
+            val bundles =
+                layout.buildDirectory
+                    .dir("outputs/bundle/release")
+                    .get()
+                    .asFile
+                    .listFiles { file -> file.extension == "aab" }
+                    .orEmpty()
+            check(bundles.size == 1) {
+                "Expected one release AAB, found ${bundles.size}"
+            }
+            val bundle = bundles.single()
+            check(bundle.length() <= maxReleaseBundleBytes) {
+                "Release AAB is ${bundle.length()} bytes; limit is $maxReleaseBundleBytes bytes"
+            }
+        }
     }

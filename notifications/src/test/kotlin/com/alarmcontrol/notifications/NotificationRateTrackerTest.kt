@@ -90,6 +90,21 @@ class NotificationRateTrackerTest {
         assertEquals(2, counts[packageMinute])
     }
 
+    @Test
+    fun `seed does not duplicate an identical post received while loading`() {
+        val tracker = NotificationRateTracker()
+        tracker.markUnavailable()
+        tracker.record(snapshot(100_000), "live")
+        tracker.seed(
+            listOf(NotificationRateEvent("pkg", "offers", 100_000)),
+            nowMillis = 100_000,
+        )
+
+        val counts = tracker.counts(snapshot(100_000), setOf(packageMinute))
+
+        assertEquals(1, counts[packageMinute])
+    }
+
     private fun snapshot(at: Long) =
         NotificationSnapshot(
             packageName = "pkg",

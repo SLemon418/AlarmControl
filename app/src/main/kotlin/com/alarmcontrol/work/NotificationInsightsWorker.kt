@@ -32,15 +32,36 @@ class NotificationInsightsWorker
     ) : CoroutineWorker(appContext, params) {
         override suspend fun doWork(): Result =
             withContext(ioDispatcher) {
-                when (housekeeper.run(clock.millis(), clock.zone)) {
-                    is DataResult.Success -> Result.success()
-                    // Bound retries: a corrupt local row must not create an endless wake-up loop.
-                    is DataResult.Failure -> if (runAttemptCount < MAX_RETRY_ATTEMPTS) Result.retry() else Result.failure()
-                    DataResult.Loading -> if (runAttemptCount < MAX_RETRY_ATTEMPTS) Result.retry() else Result.failure()
+                when (insightWorkOutcome(housekeeper.run(clock.millis(), clock.zone), runAttemptCount)) {
+                    InsightWorkOutcome.SUCCESS -> Result.success()
+                    InsightWorkOutcome.RETRY -> Result.retry()
+                    InsightWorkOutcome.FAILURE -> Result.failure()
                 }
             }
+    }
 
-        private companion object {
-            const val MAX_RETRY_ATTEMPTS = 3
+internal enum class InsightWorkOutcome {
+    SUCCESS,
+    RETRY,
+    FAILURE,
+}
+
+/** Pure WorkManager result policy kept separately testable from Android worker construction. */
+internal fun insightWorkOutcome(
+    result: DataResult<*>,
+    runAttemptCount: Int,
+): InsightWorkOutcome =
+    when (result) {
+        is DataResult.Success -> InsightWorkOutcome.SUCCESS
+        is DataResult.Failure,
+        DataResult.Loading,
+        -> {
+            if (runAttemptCount < MAX_RETRY_ATTEMPTS) {
+                InsightWorkOutcome.RETRY
+            } else {
+                InsightWorkOutcome.FAILURE
+            }
         }
     }
+
+private const val MAX_RETRY_ATTEMPTS = 3

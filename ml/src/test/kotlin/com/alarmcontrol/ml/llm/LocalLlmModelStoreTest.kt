@@ -35,6 +35,22 @@ class LocalLlmModelStoreTest {
     }
 
     @Test
+    fun `declared model larger than four gibibytes is rejected before copying`() {
+        val model = temporaryFolder.root.resolve("large/model.task")
+        val source = byteArrayOf(1).inputStream()
+
+        assertThrows(IllegalArgumentException::class.java) {
+            LocalLlmModelStore(model).stage(
+                source = source,
+                expectedBytes = 4L * 1_024 * 1_024 * 1_024 + 1,
+            )
+        }
+
+        assertFalse(model.exists())
+        assertEquals(1, source.available())
+    }
+
+    @Test
     fun `staged model can be rolled back after compatibility validation fails`() {
         val model = temporaryFolder.newFile("rollback.task").apply { writeBytes(byteArrayOf(9)) }
         val progress = mutableListOf<Long>()

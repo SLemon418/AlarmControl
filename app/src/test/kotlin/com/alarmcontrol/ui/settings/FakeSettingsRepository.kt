@@ -16,6 +16,7 @@ class FakeSettingsRepository(
     insightDays: Int = RetentionDefaults.DAILY_INSIGHT_DAYS,
     dynamicColor: Boolean = false,
 ) : SettingsRepository {
+    val operationLog = mutableListOf<String>()
     private val state = MutableStateFlow(enabled)
     private val filteringState = MutableStateFlow(filtering)
     private val llmState = MutableStateFlow(llmEnabled)
@@ -79,10 +80,12 @@ class FakeSettingsRepository(
     }
 
     override suspend fun setNotificationContentStorageEnabled(enabled: Boolean) {
+        operationLog += "content-storage:$enabled"
         contentStorageState.value = enabled
     }
 
     override suspend fun setContentExcludedPackages(packageNames: Set<String>) {
+        operationLog += "excluded-packages:${packageNames.sorted().joinToString()}"
         excludedPackagesState.value = packageNames
     }
 
@@ -106,6 +109,7 @@ class FakeSettingsRepository(
     }
 
     override suspend fun reset() {
+        operationLog += "reset"
         state.value = false
         filteringState.value = true
         llmState.value = false

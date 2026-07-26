@@ -67,52 +67,64 @@ class FakeDailyInsightDao : DailyInsightDao {
     }
 
     private fun NotificationEventEntity.inWindow(
+        epochDay: Long,
         start: Long,
         end: Long,
-    ) = postedAtMillis >= start && postedAtMillis < end && !undone
+    ) = !undone &&
+        if (postedEpochDay != null) {
+            postedEpochDay == epochDay
+        } else {
+            postedAtMillis >= start && postedAtMillis < end
+        }
 
     override suspend fun countBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
-    ): Int = events.count { it.inWindow(startMillis, endMillis) }
+    ): Int = events.count { it.inWindow(epochDay, startMillis, endMillis) }
 
     override suspend fun countMutedBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
         cancelAction: StoredRuleAction,
         snoozeAction: StoredRuleAction,
     ): Int =
         events.count {
-            it.inWindow(startMillis, endMillis) && it.action in setOf(cancelAction, snoozeAction)
+            it.inWindow(epochDay, startMillis, endMillis) &&
+                it.action in setOf(cancelAction, snoozeAction)
         }
 
     override suspend fun actionCountsBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
     ): List<ActionCountRow> =
         events
-            .filter { it.inWindow(startMillis, endMillis) }
+            .filter { it.inWindow(epochDay, startMillis, endMillis) }
             .groupingBy(NotificationEventEntity::action)
             .eachCount()
             .map { (action, count) -> ActionCountRow(action, count) }
 
     override suspend fun monitoredActionCountsBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
     ): List<ActionCountRow> =
         events
-            .filter { it.inWindow(startMillis, endMillis) && it.monitoredAction != null }
+            .filter { it.inWindow(epochDay, startMillis, endMillis) && it.monitoredAction != null }
             .groupingBy { requireNotNull(it.monitoredAction) }
             .eachCount()
             .map { (action, count) -> ActionCountRow(action, count) }
 
     override suspend fun topRulesBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
         limit: Int,
     ): List<RuleCountRow> =
         events
-            .filter { it.inWindow(startMillis, endMillis) && it.matchedRuleId != null }
+            .filter { it.inWindow(epochDay, startMillis, endMillis) && it.matchedRuleId != null }
             .groupingBy { it.matchedRuleId!! }
             .eachCount()
             .entries
@@ -121,12 +133,13 @@ class FakeDailyInsightDao : DailyInsightDao {
             .map { RuleCountRow(it.key, it.value) }
 
     override suspend fun topMonitoredRulesBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
         limit: Int,
     ): List<RuleCountRow> =
         events
-            .filter { it.inWindow(startMillis, endMillis) && it.monitoredRuleId != null }
+            .filter { it.inWindow(epochDay, startMillis, endMillis) && it.monitoredRuleId != null }
             .groupingBy { requireNotNull(it.monitoredRuleId) }
             .eachCount()
             .entries
@@ -135,31 +148,34 @@ class FakeDailyInsightDao : DailyInsightDao {
             .map { RuleCountRow(it.key, it.value) }
 
     override suspend fun countMatchedRulesBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
     ): Int =
         events
-            .filter { it.inWindow(startMillis, endMillis) }
+            .filter { it.inWindow(epochDay, startMillis, endMillis) }
             .mapNotNull(NotificationEventEntity::matchedRuleId)
             .distinct()
             .size
 
     override suspend fun countMonitoredRulesBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
     ): Int =
         events
-            .filter { it.inWindow(startMillis, endMillis) }
+            .filter { it.inWindow(epochDay, startMillis, endMillis) }
             .mapNotNull(NotificationEventEntity::monitoredRuleId)
             .distinct()
             .size
 
     override suspend fun categoryBreakdownBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
     ): List<CategoryCountRow> =
         events
-            .filter { it.inWindow(startMillis, endMillis) }
+            .filter { it.inWindow(epochDay, startMillis, endMillis) }
             .groupingBy { eventCorrections[it.id] ?: it.mlCategory ?: it.category }
             .eachCount()
             .entries
@@ -167,12 +183,13 @@ class FakeDailyInsightDao : DailyInsightDao {
             .map { CategoryCountRow(it.key, it.value) }
 
     override suspend fun channelBreakdownBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
         limit: Int,
     ): List<ChannelCountRow> =
         events
-            .filter { it.inWindow(startMillis, endMillis) && it.channelId != null }
+            .filter { it.inWindow(epochDay, startMillis, endMillis) && it.channelId != null }
             .groupingBy { it.packageName to requireNotNull(it.channelId) }
             .eachCount()
             .entries
@@ -184,13 +201,14 @@ class FakeDailyInsightDao : DailyInsightDao {
                         .filter {
                             it.packageName == entry.key.first &&
                                 it.channelId == entry.key.second &&
-                                it.inWindow(startMillis, endMillis)
+                                it.inWindow(epochDay, startMillis, endMillis)
                         }.mapNotNull { it.channelName }
                         .lastOrNull()
                 ChannelCountRow(entry.key.first, entry.key.second, channelName, entry.value)
             }
 
     override suspend fun appBreakdownBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
         cancelAction: StoredRuleAction,
@@ -198,7 +216,7 @@ class FakeDailyInsightDao : DailyInsightDao {
         limit: Int,
     ): List<AppCountRow> =
         events
-            .filter { it.inWindow(startMillis, endMillis) }
+            .filter { it.inWindow(epochDay, startMillis, endMillis) }
             .groupBy(NotificationEventEntity::packageName)
             .map { (packageName, rows) ->
                 AppCountRow(
@@ -210,34 +228,38 @@ class FakeDailyInsightDao : DailyInsightDao {
             .take(limit)
 
     override suspend fun countChannelsBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
     ): Int =
         events
-            .filter { it.inWindow(startMillis, endMillis) && it.channelId != null }
+            .filter { it.inWindow(epochDay, startMillis, endMillis) && it.channelId != null }
             .map { it.packageName to it.channelId }
             .distinct()
             .size
 
     override suspend fun countAppsBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
     ): Int =
         events
-            .filter { it.inWindow(startMillis, endMillis) }
+            .filter { it.inWindow(epochDay, startMillis, endMillis) }
             .map(NotificationEventEntity::packageName)
             .distinct()
             .size
 
     override suspend fun hourBreakdownBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
         cancelAction: StoredRuleAction,
         snoozeAction: StoredRuleAction,
     ): List<HourCountRow> =
         events
-            .filter { it.inWindow(startMillis, endMillis) && it.postedMinuteOfDay != null }
-            .groupBy { requireNotNull(it.postedMinuteOfDay) / MINUTES_PER_HOUR }
+            .filter {
+                it.inWindow(epochDay, startMillis, endMillis) && it.postedMinuteOfDay != null
+            }.groupBy { requireNotNull(it.postedMinuteOfDay) / MINUTES_PER_HOUR }
             .map { (hour, rows) ->
                 HourCountRow(
                     hour,
@@ -247,33 +269,47 @@ class FakeDailyInsightDao : DailyInsightDao {
             }.sortedBy(HourCountRow::hour)
 
     override suspend fun semanticBreakdownBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
     ): List<SemanticCountRow> =
         events
-            .filter { it.inWindow(startMillis, endMillis) && semanticByEvent.containsKey(it.id) }
-            .groupingBy { event ->
+            .filter {
+                it.inWindow(epochDay, startMillis, endMillis) &&
+                    semanticByEvent.containsKey(it.id)
+            }.groupingBy { event ->
                 requireNotNull(semanticByEvent[event.id]).let { it.corrected ?: it.predicted }
             }.eachCount()
             .map { SemanticCountRow(it.key, it.value) }
             .sortedWith(compareByDescending<SemanticCountRow> { it.count }.thenBy { it.intent })
 
     override suspend fun countMlClassifiedBetween(
-        startMillis: Long,
-        endMillis: Long,
-    ): Int = events.count { it.inWindow(startMillis, endMillis) && it.mlCategory != null }
-
-    override suspend fun countCategoryCorrectionsBetween(
-        startMillis: Long,
-        endMillis: Long,
-    ): Int = events.count { it.inWindow(startMillis, endMillis) && eventCorrections.containsKey(it.id) }
-
-    override suspend fun countSemanticCorrectionsBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
     ): Int =
         events.count {
-            it.inWindow(startMillis, endMillis) && semanticByEvent[it.id]?.corrected != null
+            it.inWindow(epochDay, startMillis, endMillis) && it.mlCategory != null
+        }
+
+    override suspend fun countCategoryCorrectionsBetween(
+        epochDay: Long,
+        startMillis: Long,
+        endMillis: Long,
+    ): Int =
+        events.count {
+            it.inWindow(epochDay, startMillis, endMillis) &&
+                eventCorrections.containsKey(it.id)
+        }
+
+    override suspend fun countSemanticCorrectionsBetween(
+        epochDay: Long,
+        startMillis: Long,
+        endMillis: Long,
+    ): Int =
+        events.count {
+            it.inWindow(epochDay, startMillis, endMillis) &&
+                semanticByEvent[it.id]?.corrected != null
         }
 
     override suspend fun upsertInsight(insight: DailyInsightEntity) {

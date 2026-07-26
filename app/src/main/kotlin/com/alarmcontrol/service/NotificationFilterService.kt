@@ -19,8 +19,8 @@ import com.alarmcontrol.core.filtering.RuleAction
 import com.alarmcontrol.core.filtering.RuleRepository
 import com.alarmcontrol.core.filtering.SemanticIntent
 import com.alarmcontrol.core.result.runCatchingPreservingCancellation
-import com.alarmcontrol.core.settings.SettingsRepository
 import com.alarmcontrol.core.settings.SemanticAnalysisScope
+import com.alarmcontrol.core.settings.SettingsRepository
 import com.alarmcontrol.ml.NotificationClassifier
 import com.alarmcontrol.ml.llm.LlmAnalysisResult
 import com.alarmcontrol.ml.llm.OnDeviceLlmManager
@@ -57,6 +57,7 @@ import javax.inject.Inject
  * `:ml` dependency (§4).
  */
 @AndroidEntryPoint
+@Suppress("TooManyFunctions")
 class NotificationFilterService : NotificationListenerService() {
     @Inject lateinit var matcher: Matcher
 
@@ -102,6 +103,12 @@ class NotificationFilterService : NotificationListenerService() {
 
     override fun onListenerConnected() {
         super.onListenerConnected()
+        seedRateCacheIfNeeded()
+        observeRulesIfNeeded()
+        observeSettingsIfNeeded()
+    }
+
+    private fun seedRateCacheIfNeeded() {
         if (rateSeedJob == null || rateSeedJob?.isCompleted == true) {
             rateTracker.markUnavailable()
             rateSeedJob =
@@ -118,6 +125,9 @@ class NotificationFilterService : NotificationListenerService() {
                     }
                 }
         }
+    }
+
+    private fun observeRulesIfNeeded() {
         // Warm and keep the rule cache fresh for the listener's lifetime; recompile on every change.
         if (rulesJob == null) {
             rulesJob =
@@ -143,14 +153,17 @@ class NotificationFilterService : NotificationListenerService() {
                     }
                 }
         }
+    }
+
+    private fun observeSettingsIfNeeded() {
         if (settingsJob == null) {
             settingsJob =
                 scope.launch {
                     runCatchingPreservingCancellation {
                         val llmSettings =
                             combine(
-                            settingsRepository.llmAnalysisEnabled,
-                            settingsRepository.llmAutoActionsEnabled,
+                                settingsRepository.llmAnalysisEnabled,
+                                settingsRepository.llmAutoActionsEnabled,
                                 settingsRepository.semanticAnalysisScope,
                                 ::ListenerLlmSettings,
                             )
@@ -169,52 +182,61 @@ class NotificationFilterService : NotificationListenerService() {
                                 excludedPackages,
                             )
                         }.collect { settings ->
-                            val previous =
-                                filteringEnabled.value?.let { filtering ->
-                                    ListenerSettings(
-                                        filtering = filtering,
-                                        llmEnabled = llmAnalysisEnabled.value ?: false,
-                                        llmAutoActions = llmAutoActionsEnabled.value ?: false,
-                                        semanticScope =
-                                            semanticAnalysisScope.value ?: SemanticAnalysisScope.RULES_ONLY,
-                                        storeContent = contentStorageEnabled.value ?: false,
-                                        excludedPackages = contentExcludedPackages.value.orEmpty(),
-                                    )
-                                }
-                            val wasLlmEnabled = llmAnalysisEnabled.value
-                            filteringEnabled.value = settings.filtering
-                            llmAnalysisEnabled.value = settings.llmEnabled
-                            llmAutoActionsEnabled.value = settings.llmAutoActions
-                            semanticAnalysisScope.value = settings.semanticScope
-                            contentStorageEnabled.value = settings.storeContent
-                            contentExcludedPackages.value = settings.excludedPackages
-                            if (previous != null && previous != settings) {
-                                // Includes privacy reductions such as new content exclusions.
-                                processingCoordinator.invalidateAll()
-                            }
-                            if (settings.llmEnabled) {
-                                initializeLlmOnce()
-                            } else if (wasLlmEnabled == true) {
-                                semanticObservationQueue.clearPending()
-                                llmInitializationStarted.set(false)
-                                llmManager.close()
-                            }
+                            applySettings(settings)
                         }
                     }.onFailure {
-                        // Fail closed: unknown settings must never activate destructive filtering.
-                        filteringEnabled.value = false
-                        llmAnalysisEnabled.value = false
-                        llmAutoActionsEnabled.value = false
-                        semanticAnalysisScope.value = SemanticAnalysisScope.RULES_ONLY
-                        contentStorageEnabled.value = false
-                        contentExcludedPackages.value = emptySet()
-                        llmInitializationStarted.set(false)
-                        processingCoordinator.invalidateAll()
-                        llmManager.close()
+                        resetSettingsCache()
                         Log.w(TAG, "Settings cache stopped")
                     }
                 }
         }
+    }
+
+    private suspend fun applySettings(settings: ListenerSettings) {
+        val previous = currentSettings()
+        val wasLlmEnabled = llmAnalysisEnabled.value
+        filteringEnabled.value = settings.filtering
+        llmAnalysisEnabled.value = settings.llmEnabled
+        llmAutoActionsEnabled.value = settings.llmAutoActions
+        semanticAnalysisScope.value = settings.semanticScope
+        contentStorageEnabled.value = settings.storeContent
+        contentExcludedPackages.value = settings.excludedPackages
+        if (previous != null && previous != settings) {
+            // Includes privacy reductions such as new content exclusions.
+            processingCoordinator.invalidateAll()
+        }
+        if (settings.llmEnabled) {
+            initializeLlmOnce()
+        } else if (wasLlmEnabled == true) {
+            semanticObservationQueue.clearPending()
+            llmInitializationStarted.set(false)
+            llmManager.close()
+        }
+    }
+
+    private fun currentSettings(): ListenerSettings? =
+        filteringEnabled.value?.let { filtering ->
+            ListenerSettings(
+                filtering = filtering,
+                llmEnabled = llmAnalysisEnabled.value ?: false,
+                llmAutoActions = llmAutoActionsEnabled.value ?: false,
+                semanticScope = semanticAnalysisScope.value ?: SemanticAnalysisScope.RULES_ONLY,
+                storeContent = contentStorageEnabled.value ?: false,
+                excludedPackages = contentExcludedPackages.value.orEmpty(),
+            )
+        }
+
+    private suspend fun resetSettingsCache() {
+        // Fail closed: unknown settings must never activate destructive filtering.
+        filteringEnabled.value = false
+        llmAnalysisEnabled.value = false
+        llmAutoActionsEnabled.value = false
+        semanticAnalysisScope.value = SemanticAnalysisScope.RULES_ONLY
+        contentStorageEnabled.value = false
+        contentExcludedPackages.value = emptySet()
+        llmInitializationStarted.set(false)
+        processingCoordinator.invalidateAll()
+        llmManager.close()
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
@@ -333,22 +355,25 @@ class NotificationFilterService : NotificationListenerService() {
                 semanticIntent = trustedIntent.takeIf { useLlmForMonitor },
                 isAdvertisement = trustedIntent?.isAdvertisement.takeIf { useLlmForMonitor },
             )
-        val decision = matcher.evaluate(activeSnapshot, compiled)
-        val monitorDecision = matcher.evaluateMonitor(monitorSnapshot, compiled)
+        val matchEvaluation =
+            matcher.evaluateWithTraces(
+                activeSnapshot = activeSnapshot,
+                monitorSnapshot = monitorSnapshot,
+                compiled = compiled,
+            )
+        val decision = matchEvaluation.activeDecision
+        val monitorDecision = matchEvaluation.monitorDecision
         val active = decision.resolve(RuleAction.Keep)
         val monitor = monitorDecision.resolve(null)
         return EvaluatedNotification(
             common = common,
-            activeSnapshot = activeSnapshot,
-            monitorSnapshot = monitorSnapshot,
-            activeDecision = decision,
-            monitorDecision = monitorDecision,
             action = requireNotNull(active.action),
             matchedRuleId = active.ruleId,
             monitoredAction = monitor.action,
             monitoredRuleId = monitor.ruleId,
             mlConfidence = classification?.confidence,
             analysis = decisionAnalysis,
+            decisionTrace = matchEvaluation.decisionTrace,
         )
     }
 
@@ -359,13 +384,6 @@ class NotificationFilterService : NotificationListenerService() {
         excludedPackages: Set<String>,
         semanticScope: SemanticAnalysisScope,
     ) {
-        val trace =
-            matcher.decisionTraces(
-                activeSnapshot = evaluated.activeSnapshot,
-                activeDecision = evaluated.activeDecision,
-                monitorSnapshot = evaluated.monitorSnapshot,
-                monitorDecision = evaluated.monitorDecision,
-            )
         val analyticsClassification =
             if (evaluated.common.mlCategory == null) {
                 withTimeoutOrNull(ANALYTICS_CLASSIFICATION_TIMEOUT_MILLIS) {
@@ -405,7 +423,7 @@ class NotificationFilterService : NotificationListenerService() {
                     matchedRuleId = evaluated.matchedRuleId,
                     monitoredRuleId = evaluated.monitoredRuleId,
                     monitoredAction = evaluated.monitoredAction,
-                    decisionTrace = trace,
+                    decisionTrace = evaluated.decisionTrace,
                     recordedAtMillis = clock.millis(),
                 ),
                 encryptedContent,
@@ -482,16 +500,13 @@ class NotificationFilterService : NotificationListenerService() {
 
     private data class EvaluatedNotification(
         val common: NotificationSnapshot,
-        val activeSnapshot: NotificationSnapshot,
-        val monitorSnapshot: NotificationSnapshot,
-        val activeDecision: MatchDecision,
-        val monitorDecision: MatchDecision,
         val action: RuleAction,
         val matchedRuleId: String?,
         val monitoredAction: RuleAction?,
         val monitoredRuleId: String?,
         val mlConfidence: Float?,
         val analysis: LlmAnalysisResult?,
+        val decisionTrace: List<com.alarmcontrol.core.filtering.DecisionTraceNode>,
     )
 
     private data class ResolvedDecision(

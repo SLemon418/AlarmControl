@@ -45,8 +45,8 @@ sdk.dir=/absolute/path/to/your/Android/sdk
 `ACCESS_NETWORK_STATE` 권한은 허용됩니다. `:baselineprofile:offlineManifestGuard`는 같은
 검사를 두 Baseline Profile 테스트 APK에도 적용합니다.
 
-현재 Debug JVM/Robolectric 테스트 집계는 총 382개이며 실패, 오류, 건너뜀은 모두 0개입니다.
-API 34 Managed Device 계측 테스트는 총 7개(Room 2, 실제 TFLite 4, 앱 스모크 1)이며 모두
+현재 Debug JVM/Robolectric 테스트 집계는 총 425개이며 실패, 오류, 건너뜀은 모두 0개입니다.
+API 34 Managed Device 계측 테스트는 총 11개(Room/데이터 6, 실제 TFLite 4, 앱 스모크 1)이며 모두
 통과합니다.
 
 ## 빌드 산출물
@@ -80,7 +80,7 @@ JVM 테스트는 실제 Android 런타임 검증을 대체하지 않습니다. �
 있을 때 다음 명령을 실행합니다.
 
 ```sh
-./gradlew :data:connectedDebugAndroidTest  # Room v3 -> ... -> v12 순차 마이그레이션
+./gradlew :data:connectedDebugAndroidTest  # Room v1/v2/v3/v10/v12 -> v13 마이그레이션
 ./gradlew :ml:connectedDebugAndroidTest    # 번들 TFLite 런타임/에셋 호환성
 ./gradlew :app:connectedDebugAndroidTest   # 실제 Activity/Hilt/리소스/탐색 스모크 테스트
 ```
@@ -94,8 +94,8 @@ JVM 테스트는 실제 Android 런타임 검증을 대체하지 않습니다. �
 
 계측 테스트 APK 컴파일을 실제 기기 테스트 실행으로 보고하지 않습니다.
 
-현재 Room 테스트는 v3부터 v12까지 모든 실제 마이그레이션과 기존 이진 광고 관찰값의
-7종 의미 prior 이관을 검증합니다.
+현재 Room 테스트는 v1, v2, v3, v10, v12에서 v13까지의 실제 경로와 기존 이진 광고
+관찰값의 7종 의미 prior 이관을 검증합니다.
 `:baselineprofile:assemble`은 기기를 시작하지 않고 생성기 변형을 컴파일하며 프로필 수집은
 명시적인 별도 작업입니다.
 

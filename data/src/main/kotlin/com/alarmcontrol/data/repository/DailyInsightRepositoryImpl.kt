@@ -32,14 +32,18 @@ class DailyInsightRepositoryImpl
             generatedAtMillis: Long,
             topRules: Int,
         ): DailyInsight {
-            val actionBreakdown = dao.actionCountsBetween(startMillis, endMillis).toActionBreakdown()
+            val actionBreakdown =
+                dao.actionCountsBetween(epochDay, startMillis, endMillis).toActionBreakdown()
             val monitoredActionBreakdown =
-                dao.monitoredActionCountsBetween(startMillis, endMillis).toActionBreakdown()
-            val ruleRows = dao.topRulesBetween(startMillis, endMillis, topRules)
-            val monitorRuleRows = dao.topMonitoredRulesBetween(startMillis, endMillis, topRules)
-            val channelRows = dao.channelBreakdownBetween(startMillis, endMillis, BREAKDOWN_LIMIT)
+                dao.monitoredActionCountsBetween(epochDay, startMillis, endMillis).toActionBreakdown()
+            val ruleRows = dao.topRulesBetween(epochDay, startMillis, endMillis, topRules)
+            val monitorRuleRows =
+                dao.topMonitoredRulesBetween(epochDay, startMillis, endMillis, topRules)
+            val channelRows =
+                dao.channelBreakdownBetween(epochDay, startMillis, endMillis, BREAKDOWN_LIMIT)
             val appRows =
                 dao.appBreakdownBetween(
+                    epochDay,
                     startMillis,
                     endMillis,
                     StoredRuleAction.CANCEL,
@@ -52,7 +56,7 @@ class DailyInsightRepositoryImpl
                     epochDay = epochDay,
                     windowStartMillis = startMillis,
                     windowEndMillis = endMillis,
-                    totalNotifications = dao.countBetween(startMillis, endMillis),
+                    totalNotifications = dao.countBetween(epochDay, startMillis, endMillis),
                     mutedCount = actionBreakdown.silenced,
                     topRules =
                         ruleRows
@@ -62,7 +66,7 @@ class DailyInsightRepositoryImpl
                             .map { RuleTriggerCount(it.ruleId.toString(), it.count) },
                     categoryBreakdown =
                         dao
-                            .categoryBreakdownBetween(startMillis, endMillis)
+                            .categoryBreakdownBetween(epochDay, startMillis, endMillis)
                             .map { CategoryCount(it.category, it.count) },
                     generatedAtMillis = generatedAtMillis,
                     actionBreakdown = actionBreakdown,
@@ -75,6 +79,7 @@ class DailyInsightRepositoryImpl
                     hourBreakdown =
                         dao
                             .hourBreakdownBetween(
+                                epochDay,
                                 startMillis,
                                 endMillis,
                                 StoredRuleAction.CANCEL,
@@ -82,17 +87,22 @@ class DailyInsightRepositoryImpl
                             ).map { HourInsightCount(it.hour, it.totalCount, it.silencedCount) },
                     semanticBreakdown =
                         dao
-                            .semanticBreakdownBetween(startMillis, endMillis)
+                            .semanticBreakdownBetween(epochDay, startMillis, endMillis)
                             .map { SemanticIntentCount(SemanticIntent.valueOf(it.intent), it.count) },
-                    mlClassifiedCount = dao.countMlClassifiedBetween(startMillis, endMillis),
-                    categoryCorrectionCount = dao.countCategoryCorrectionsBetween(startMillis, endMillis),
-                    semanticCorrectionCount = dao.countSemanticCorrectionsBetween(startMillis, endMillis),
+                    mlClassifiedCount = dao.countMlClassifiedBetween(epochDay, startMillis, endMillis),
+                    categoryCorrectionCount =
+                        dao.countCategoryCorrectionsBetween(epochDay, startMillis, endMillis),
+                    semanticCorrectionCount =
+                        dao.countSemanticCorrectionsBetween(epochDay, startMillis, endMillis),
                     breakdownVersion = CURRENT_BREAKDOWN_VERSION,
-                    ruleBreakdownComplete = dao.countMatchedRulesBetween(startMillis, endMillis) <= topRules,
+                    ruleBreakdownComplete =
+                        dao.countMatchedRulesBetween(epochDay, startMillis, endMillis) <= topRules,
                     monitorRuleBreakdownComplete =
-                        dao.countMonitoredRulesBetween(startMillis, endMillis) <= topRules,
-                    appBreakdownComplete = dao.countAppsBetween(startMillis, endMillis) <= BREAKDOWN_LIMIT,
-                    channelBreakdownComplete = dao.countChannelsBetween(startMillis, endMillis) <= BREAKDOWN_LIMIT,
+                        dao.countMonitoredRulesBetween(epochDay, startMillis, endMillis) <= topRules,
+                    appBreakdownComplete =
+                        dao.countAppsBetween(epochDay, startMillis, endMillis) <= BREAKDOWN_LIMIT,
+                    channelBreakdownComplete =
+                        dao.countChannelsBetween(epochDay, startMillis, endMillis) <= BREAKDOWN_LIMIT,
                 )
 
             dao.store(insight.toWrite())

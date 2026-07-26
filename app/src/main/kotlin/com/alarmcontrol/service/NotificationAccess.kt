@@ -67,13 +67,13 @@ object NotificationAccess {
         }
         val appNotificationOpened =
             try {
-            context.startActivity(appNotificationSettingsIntent(packageName))
-            true
-        } catch (_: ActivityNotFoundException) {
-            false
-        } catch (_: SecurityException) {
-            false
-        }
+                context.startActivity(appNotificationSettingsIntent(packageName))
+                true
+            } catch (_: ActivityNotFoundException) {
+                false
+            } catch (_: SecurityException) {
+                false
+            }
         return appNotificationOpened || openWithFallback(context, appDetailsSettingsIntent(packageName), null)
     }
 

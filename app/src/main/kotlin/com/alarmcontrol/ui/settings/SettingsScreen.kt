@@ -338,52 +338,52 @@ private fun SettingsContent(
                     verticalArrangement = Arrangement.spacedBy(16.dp),
                 ) {
                     when (destination) {
-                    SettingsDestination.OVERVIEW ->
-                        SettingsOverview(
-                            state = state,
-                            onFilteringChange = onFilteringChange,
-                            onDynamicColorChange = onDynamicColorChange,
-                            onOpenNotificationAccess = onOpenNotificationAccess,
-                            onOpenBatterySettings = onOpenBatterySettings,
-                            onNavigate = onNavigate,
-                        )
-                    SettingsDestination.AUTOMATION ->
-                        AutomationSettingsSection(
-                            state = state,
-                            onExternalAutomationChange = onExternalAutomationChange,
-                            onRotateAutomationToken = onRotateAutomationToken,
-                            onCopyAutomationToken = onCopyAutomationToken,
-                        )
-                    SettingsDestination.LOCAL_AI ->
-                        LlmSettingsSection(
-                            state,
-                            onLlmAnalysisChange,
-                            onLlmAutoActionsChange,
-                            onSemanticAnalysisScopeChange,
-                            onChooseModel,
-                            onRemoveLlmModel,
-                        )
-                    SettingsDestination.BACKUP ->
-                        BackupSettingsSection(
-                            backupPassword,
-                            onPasswordChange,
-                            includeLearningFeedback,
-                            onIncludeLearningFeedbackChange,
-                            onBackup,
-                            onRestore,
-                        )
-                    SettingsDestination.DATA_PRIVACY -> {
-                        NotificationContentSettingsSection(
-                            state = state,
-                            onStorageChange = onNotificationContentStorageChange,
-                            onOpenExclusions = { onNavigate(SettingsDestination.CONTENT_EXCLUSIONS) },
-                            onRequestClear = { onRequestClear(ClearAction.CONTENT) },
-                        )
-                        HorizontalDivider()
-                        RetentionSettingsSection(state, onEventRetentionChange, onInsightRetentionChange)
-                        HorizontalDivider()
-                        PrivacySettingsSection(onRequestClear)
-                    }
+                        SettingsDestination.OVERVIEW ->
+                            SettingsOverview(
+                                state = state,
+                                onFilteringChange = onFilteringChange,
+                                onDynamicColorChange = onDynamicColorChange,
+                                onOpenNotificationAccess = onOpenNotificationAccess,
+                                onOpenBatterySettings = onOpenBatterySettings,
+                                onNavigate = onNavigate,
+                            )
+                        SettingsDestination.AUTOMATION ->
+                            AutomationSettingsSection(
+                                state = state,
+                                onExternalAutomationChange = onExternalAutomationChange,
+                                onRotateAutomationToken = onRotateAutomationToken,
+                                onCopyAutomationToken = onCopyAutomationToken,
+                            )
+                        SettingsDestination.LOCAL_AI ->
+                            LlmSettingsSection(
+                                state,
+                                onLlmAnalysisChange,
+                                onLlmAutoActionsChange,
+                                onSemanticAnalysisScopeChange,
+                                onChooseModel,
+                                onRemoveLlmModel,
+                            )
+                        SettingsDestination.BACKUP ->
+                            BackupSettingsSection(
+                                backupPassword,
+                                onPasswordChange,
+                                includeLearningFeedback,
+                                onIncludeLearningFeedbackChange,
+                                onBackup,
+                                onRestore,
+                            )
+                        SettingsDestination.DATA_PRIVACY -> {
+                            NotificationContentSettingsSection(
+                                state = state,
+                                onStorageChange = onNotificationContentStorageChange,
+                                onOpenExclusions = { onNavigate(SettingsDestination.CONTENT_EXCLUSIONS) },
+                                onRequestClear = { onRequestClear(ClearAction.CONTENT) },
+                            )
+                            HorizontalDivider()
+                            RetentionSettingsSection(state, onEventRetentionChange, onInsightRetentionChange)
+                            HorizontalDivider()
+                            PrivacySettingsSection(onRequestClear)
+                        }
                         SettingsDestination.CONTENT_EXCLUSIONS -> Unit
                     }
                 }
@@ -644,78 +644,106 @@ private fun AutomationSettingsSection(
         onCheckedChange = onExternalAutomationChange,
     )
     if (state.externalAutomationEnabled && state.externalAutomationToken.isNotBlank()) {
-        Card(Modifier.fillMaxWidth().padding(top = 8.dp)) {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(stringResource(R.string.settings_automation_token), style = MaterialTheme.typography.labelLarge)
-                if (tokenVisible) {
-                    SelectionContainer {
-                        Text(state.externalAutomationToken, style = MaterialTheme.typography.bodySmall)
-                    }
-                } else {
-                    Text("••••••••••••••••", style = MaterialTheme.typography.bodySmall)
-                }
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    TextButton(
-                        onClick = { tokenVisible = !tokenVisible },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text(
-                            stringResource(
-                                if (tokenVisible) R.string.settings_token_hide else R.string.settings_token_show,
-                            ),
-                        )
-                    }
-                    TextButton(
-                        onClick = { onCopyAutomationToken(state.externalAutomationToken) },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text(stringResource(R.string.settings_automation_token_copy))
-                    }
-                    TextButton(
-                        onClick = { confirmRotation = true },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text(stringResource(R.string.settings_automation_token_rotate))
-                    }
-                }
-                Text(
-                    stringResource(R.string.settings_automation_token_summary),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
+        AutomationTokenCard(
+            token = state.externalAutomationToken,
+            visible = tokenVisible,
+            onVisibilityChange = { tokenVisible = it },
+            onCopy = onCopyAutomationToken,
+            onRequestRotation = { confirmRotation = true },
+        )
     }
-    if (confirmRotation) {
-        AlertDialog(
-            onDismissRequest = { confirmRotation = false },
-            title = { Text(stringResource(R.string.settings_token_rotate_confirm_title)) },
-            text = { Text(stringResource(R.string.settings_token_rotate_confirm_message)) },
-            confirmButton = {
+    TokenRotationDialog(
+        visible = confirmRotation,
+        onDismiss = { confirmRotation = false },
+        onConfirm = {
+            confirmRotation = false
+            tokenVisible = false
+            onRotateAutomationToken()
+        },
+    )
+    AutomationAuditList(state.automationAudit)
+}
+
+@Composable
+private fun AutomationTokenCard(
+    token: String,
+    visible: Boolean,
+    onVisibilityChange: (Boolean) -> Unit,
+    onCopy: (String) -> Unit,
+    onRequestRotation: () -> Unit,
+) {
+    Card(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(stringResource(R.string.settings_automation_token), style = MaterialTheme.typography.labelLarge)
+            if (visible) {
+                SelectionContainer {
+                    Text(token, style = MaterialTheme.typography.bodySmall)
+                }
+            } else {
+                Text("••••••••••••••••", style = MaterialTheme.typography.bodySmall)
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 TextButton(
-                    onClick = {
-                        confirmRotation = false
-                        tokenVisible = false
-                        onRotateAutomationToken()
-                    },
+                    onClick = { onVisibilityChange(!visible) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(stringResource(if (visible) R.string.settings_token_hide else R.string.settings_token_show))
+                }
+                TextButton(
+                    onClick = { onCopy(token) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(stringResource(R.string.settings_automation_token_copy))
+                }
+                TextButton(
+                    onClick = onRequestRotation,
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(stringResource(R.string.settings_automation_token_rotate))
                 }
-            },
-            dismissButton = {
-                TextButton(onClick = { confirmRotation = false }) {
-                    Text(stringResource(R.string.cancel))
-                }
-            },
-        )
+            }
+            Text(
+                stringResource(R.string.settings_automation_token_summary),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
-    if (state.automationAudit.isNotEmpty()) {
+}
+
+@Composable
+private fun TokenRotationDialog(
+    visible: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    if (!visible) return
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.settings_token_rotate_confirm_title)) },
+        text = { Text(stringResource(R.string.settings_token_rotate_confirm_message)) },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text(stringResource(R.string.settings_automation_token_rotate))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.cancel))
+            }
+        },
+    )
+}
+
+@Composable
+private fun AutomationAuditList(entries: List<AutomationAuditUi>) {
+    if (entries.isNotEmpty()) {
         Text(
             stringResource(R.string.settings_automation_recent),
             modifier = Modifier.padding(top = 12.dp).semantics { heading() },
             style = MaterialTheme.typography.titleSmall,
         )
-        state.automationAudit.forEach { entry ->
+        entries.forEach { entry ->
             Text(
                 stringResource(
                     R.string.settings_automation_audit_row,

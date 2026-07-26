@@ -183,6 +183,19 @@ class SettingsRepositoryImplTest {
         }
 
     @Test
+    fun `insights bootstrap is claimed once per app version and resettable`() =
+        runTest {
+            val repository = repository()
+
+            assertTrue(repository.claimInsightsBootstrap(100))
+            assertFalse(repository.claimInsightsBootstrap(100))
+            assertTrue(repository.claimInsightsBootstrap(101))
+
+            repository.reset()
+            assertTrue(repository.claimInsightsBootstrap(101))
+        }
+
+    @Test
     fun `invalid persisted retention values degrade to safe defaults`() =
         runTest {
             val dataStore =

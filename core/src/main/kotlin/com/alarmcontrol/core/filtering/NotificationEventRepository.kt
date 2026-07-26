@@ -30,6 +30,15 @@ interface NotificationEventRepository {
     /** One reactive SQL aggregation for all current action counters. */
     fun observeActionBreakdownSince(sinceMillis: Long): Flow<ActionBreakdown>
 
+    /**
+     * Observes actions posted on [epochDay]. Implementations should use [legacyStartMillis] only
+     * for rows written before a posted-day key was available.
+     */
+    fun observeActionBreakdownForDay(
+        epochDay: Long,
+        legacyStartMillis: Long,
+    ): Flow<ActionBreakdown> = observeActionBreakdownSince(legacyStartMillis)
+
     /** Excludes [eventId] from local statistics; it cannot restore a dismissed notification. */
     suspend fun undo(eventId: String)
 

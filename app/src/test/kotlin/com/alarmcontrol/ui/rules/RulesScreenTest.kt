@@ -6,12 +6,14 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextInput
 import com.alarmcontrol.core.filtering.Condition
 import com.alarmcontrol.core.filtering.RateScope
@@ -50,6 +52,7 @@ class RulesScreenTest {
     fun showsHint_whenShowAutomationHintIsTrue() {
         setRulesScreen(showHint = true)
 
+        composeRule.onNodeWithTag(RULES_LIST_TEST_TAG).performScrollToNode(hasText(hintText))
         composeRule.onNodeWithText(hintText).assertIsDisplayed()
     }
 
@@ -138,9 +141,9 @@ class RulesScreenTest {
         }
 
         composeRule
-            .onNodeWithText("Always keep alarm notifications")
-            .performScrollTo()
-            .performClick()
+            .onNodeWithTag(RULES_LIST_TEST_TAG)
+            .performScrollToNode(hasText("Always keep alarm notifications"))
+        composeRule.onNodeWithText("Always keep alarm notifications").performScrollTo().performClick()
 
         assertEquals(RuleTemplate.KEEP_ALARMS, selected)
     }
@@ -279,8 +282,56 @@ class RulesScreenTest {
             .onNodeWithText("Monitor rules predict and record an action", substring = true)
             .performScrollTo()
             .assertIsDisplayed()
+        composeRule.onNodeWithText("1 rule warning").performScrollTo().performClick()
         composeRule.onNodeWithText("Structural warning").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Save").assertIsEnabled()
+    }
+
+    @Test
+    fun ruleCardCollapsesStructuralWarningsUntilRequested() {
+        composeRule.setContent {
+            RulesScreen(
+                state =
+                    RulesUiState(
+                        isLoading = false,
+                        notificationAccessState = NotificationAccessUiState.GRANTED,
+                        rules =
+                            listOf(
+                                RuleListItem(
+                                    id = "1",
+                                    name = "Focus",
+                                    summary = UiText.Dynamic("Package: example"),
+                                    actionLabel = UiText.Dynamic("Cancel"),
+                                    enabled = true,
+                                    executionMode = RuleExecutionMode.ACTIVE,
+                                    warnings = listOf(UiText.Dynamic("Structural warning")),
+                                ),
+                            ),
+                        enabledRuleCount = 1,
+                        availableSources =
+                            listOf(
+                                RuleSourceUi(
+                                    key = "example:",
+                                    packageName = "example",
+                                    appName = "Example",
+                                    channelId = null,
+                                    channelName = null,
+                                    eventCount = 1,
+                                ),
+                            ),
+                    ),
+                onAddRule = {},
+                onEditRule = {},
+                onToggleRule = { _, _ -> },
+                onDeleteRule = {},
+                onUserMessageShown = {},
+            )
+        }
+
+        composeRule.onNodeWithText("Structural warning").assertDoesNotExist()
+        composeRule.onNodeWithTag(RULES_LIST_TEST_TAG).performScrollToNode(hasText("1 rule warning"))
+        composeRule.onNodeWithText("1 rule warning").performScrollTo().performClick()
+        composeRule.onNodeWithText("Structural warning").assertIsDisplayed()
     }
 
     @Test

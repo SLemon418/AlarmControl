@@ -165,7 +165,7 @@ Lower layers never depend on `:app` or on Compose, and the feature modules don't
 other — shared contracts live in `:core`. This is why, for example, the ML feedback blender can read
 user corrections through a `:core` interface without `:ml` ever touching `:data`.
 
-Tech stack: **Kotlin** (Coroutines + Flow), **Jetpack Compose / Material 3**, **Hilt**, **Room v12**,
+Tech stack: **Kotlin** (Coroutines + Flow), **Jetpack Compose / Material 3**, **Hilt**, **Room v13**,
 **DataStore**, **LiteRT (TensorFlow Lite)**, Gradle Kotlin DSL + version catalog. minSdk 26,
 compile/target SDK 36.
 
@@ -207,7 +207,7 @@ export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
 
 ./gradlew assembleDebug        # build the universal local debug APK
 ./gradlew :app:bundleRelease   # preferred release artifact (Play performs ABI delivery)
-./gradlew test                 # all modules' 382 JVM unit and Robolectric test methods
+./gradlew test                 # all modules' 425 JVM unit and Robolectric test methods
 ./gradlew check                # tests + detekt + ktlint (also run as part of `build`)
 ./gradlew build                # complete device-independent build and quality gate
 ```
@@ -227,12 +227,12 @@ export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
   They use `@RunWith(RobolectricTestRunner::class)` with `@GraphicsMode(NATIVE)` and a pinned
   `@Config(application = Application::class, sdk = [34])` so Compose lays out without booting Hilt.
 - **ML determinism:** classification tests pin the bundled model + fixtures and assert exact labels.
-- **382 local JVM test methods** across the runtime modules, plus **7 API 34 Managed Device tests**
-  (Room 2, real TFLite 4, app/Hilt/navigation 1); CI requires both suites to stay green.
+- **425 local JVM test methods** across the runtime modules, plus **11 API 34 Managed Device tests**
+  (Room/data 6, real TFLite 4, app/Hilt/navigation 1); CI requires both suites to stay green.
 - **Instrumented tests** (run on a device/emulator) cover the paths the JVM can't:
   - `:ml/src/androidTest` validates the real TensorFlow Lite runtime against the bundled model.
-  - `:data/src/androidTest` is a **Room migration test** that upgrades a seeded database
-    v3 → v4 → v5 → v6 → v7 → v8 → v9 → v10 → v11 → v12 and asserts seeded rules/events/feedback survive while
+  - `:data/src/androidTest` contains **Room migration tests** that upgrade seeded v1, v2, v3, v10,
+    and v12 databases to v13 and assert rules/events/feedback survive while
     daily-history, profiles, local LLM observations, imported priors, and automation audit tables
     remain usable.
   - `:app/src/androidTest` launches the real Activity and verifies the Hilt/resources/navigation
@@ -294,7 +294,7 @@ making changes — the offline and on-device guarantees are the reason this proj
 - **Daily insight history.** A Room `DailyInsight` rollup (per-day totals, top rules, category
   breakdown) aggregated by the periodic worker via SQL, surfaced on the native-`Canvas` Insights UI
   with reactive rule-name resolution and graceful empty states.
-- **Release hardening.** detekt + ktlint enforced on `build`; a sequential Room v3 → v12 migration
+- **Release hardening.** detekt + ktlint enforced on `build`; Room v1/v2/v3/v10/v12 → v13 migration
   test; previewed merge/replace backup and selective encrypted learning-vote restore via the Storage
   Access Framework; named filtering profiles; and UI/UX polish — Material You dynamic color,
   sibling node reordering, inline condition validation, and destructive-action confirmation.
@@ -356,9 +356,27 @@ Detailed behavior and privacy fields are documented in the
 - **Optional encrypted detail.** Users may opt in to seven-day, per-app-excludable notification
   title/body history protected by Android Keystore AES-256-GCM. `SECRET` notifications are never
   stored; disabling the feature deletes ciphertext and its key.
-- **Compatibility.** Room v12 migrates v3 data through every intermediate schema. Backup v5 adds
-  the richer content-free daily aggregates, restores v1–v4, and still excludes notification
-  content, LLM reasoning, keys, and automation tokens.
+- **Compatibility.** Room v13 preserves legacy data from every supported migration origin. Backup
+  v6 adds semantic-analysis scope and breakdown-completeness metadata, restores v1–v5, and still
+  excludes notification content, LLM reasoning, keys, and automation tokens.
+
+## Release stabilization — completed
+
+- **Bounded notification pipeline.** The listener tracks at most 64 posts, evaluates four
+  concurrently, replaces stale work for the same notification, and revokes pending actions when
+  rules or privacy settings change. Cache initialization fails open after two seconds.
+- **Correct, bounded analytics.** Daily and today metrics use the local day captured at post time
+  (legacy rows fall back to timestamps). WorkManager backfills at most seven missing days, while raw
+  history is capped at 10,000 events and detailed traces at 1,000 events.
+- **Efficient explainability.** Matching and trace creation share one short-circuiting tree walk,
+  with active and monitor explanations capped at 128 content-free nodes in total.
+- **Security and UX hardening.** Sensitive windows use reference-counted screenshot protection,
+  automation token copies are marked sensitive and expire after 60 seconds, data deletion steps are
+  failure-isolated, duplicate profile names are rejected case-insensitively, and rule warnings stay
+  collapsed until requested.
+- **Release gates.** The release AAB must remain at or below 60 MiB, and detekt, ktlint, all local
+  tests, migration/test APK compilation, dependency verification, and offline guards remain
+  mandatory.
 
 ## Physical Galaxy validation
 
@@ -377,7 +395,7 @@ The temporary test rule and activity records were removed after validation.
 
 - Validate Doze/battery behavior, Tasker/RoutinePlus end-to-end contracts, and notification ranking
   across additional One UI/API versions.
-- Run the new v12 migration, guided editor, range analysis, Records detail, retention, and Keystore
+- Run the new v13 migration, guided editor, range analysis, Records detail, retention, and Keystore
   deletion scenarios on the connected Galaxy before publishing this milestone.
 - Validate representative MediaPipe quantized models and latency/thermal behavior across a physical
   device matrix; this cannot be proven by local JVM or managed-emulator tests.

@@ -2,7 +2,8 @@ package com.alarmcontrol
 
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
-import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.filters.LargeTest
 import org.junit.Rule
@@ -19,6 +20,9 @@ class AppLaunchInstrumentedTest {
     @Test
     fun launchesWithAccessibleTopLevelNavigation() {
         val rulesLabel = composeRule.activity.getString(R.string.nav_rules)
-        composeRule.onNodeWithText(rulesLabel).assertIsDisplayed()
+        composeRule.onNodeWithTag("bottom_navigation").assertIsDisplayed()
+        composeRule
+            .onNodeWithContentDescription(rulesLabel, useUnmergedTree = true)
+            .assertExists()
     }
 }

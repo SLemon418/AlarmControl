@@ -57,9 +57,7 @@ class LocalDataRepositoryImpl
             return ClearedDataCounts(encryptedContents = count)
         }
 
-        override suspend fun clearStoredNotificationContentForPackage(
-            packageName: String,
-        ): ClearedDataCounts {
+        override suspend fun clearStoredNotificationContentForPackage(packageName: String): ClearedDataCounts {
             require(packageName.isNotBlank()) { "Package name is blank" }
             val count = transactionRunner.run { eventDao.deleteEncryptedContentsForPackage(packageName) }
             return ClearedDataCounts(encryptedContents = count)

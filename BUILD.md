@@ -45,8 +45,8 @@ forbidden networking dependency appears on the debug/release runtime classpath. 
 `:baselineprofile:offlineManifestGuard` task applies the same rule to both test APK variants.
 WorkManager's read-only `ACCESS_NETWORK_STATE` permission is allowed.
 
-The current debug JVM/Robolectric aggregate is 382 tests with zero failures, errors, or skips. The
-API 34 Managed Device aggregate is 7 tests (Room 2, real TFLite 4, app smoke 1), all passing.
+The current debug JVM/Robolectric aggregate is 425 tests with zero failures, errors, or skips. The
+API 34 Managed Device aggregate is 11 tests (Room/data 6, real TFLite 4, app smoke 1), all passing.
 
 ## Build artifacts
 
@@ -79,7 +79,7 @@ The JVM suite does not replace tests that require the real Android runtime. With
 or emulator, run:
 
 ```sh
-./gradlew :data:connectedDebugAndroidTest  # sequential Room v3 -> v4 -> ... -> v12 migration
+./gradlew :data:connectedDebugAndroidTest  # supported Room v1/v2/v3/v10/v12 -> v13 migrations
 ./gradlew :ml:connectedDebugAndroidTest    # bundled TFLite runtime/asset compatibility
 ./gradlew :app:connectedDebugAndroidTest   # real Activity, Hilt, resources, and navigation smoke test
 ```
@@ -93,8 +93,8 @@ Without a device, compile the test APKs to catch source, resource, and dependenc
 
 Do not report a compiled instrumented-test APK as an executed device test.
 
-The Room test currently exercises every real migration from v3 through v12, including migration of
-legacy binary advertisement observations into seven-way semantic-intent priors. The
+The Room tests exercise every real path from seeded v1, v2, v3, v10, and v12 databases to v13,
+including migration of legacy binary advertisement observations into seven-way semantic-intent priors. The
 `:baselineprofile:assemble` lifecycle is configured to compile both generator variants without
 starting a device; profile collection remains an explicit command.
 

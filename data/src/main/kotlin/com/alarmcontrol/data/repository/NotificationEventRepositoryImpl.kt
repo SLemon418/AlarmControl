@@ -10,9 +10,9 @@ import com.alarmcontrol.core.filtering.NotificationEvent
 import com.alarmcontrol.core.filtering.NotificationEventDetail
 import com.alarmcontrol.core.filtering.NotificationEventRepository
 import com.alarmcontrol.core.filtering.NotificationEventTimeBounds
+import com.alarmcontrol.core.filtering.NotificationHistoryCoverage
 import com.alarmcontrol.core.filtering.NotificationHistoryPage
 import com.alarmcontrol.core.filtering.NotificationHistoryQuery
-import com.alarmcontrol.core.filtering.NotificationHistoryCoverage
 import com.alarmcontrol.core.filtering.NotificationHistoryRepository
 import com.alarmcontrol.core.filtering.NotificationRateEvent
 import com.alarmcontrol.core.filtering.NotificationSource
@@ -162,6 +162,14 @@ class NotificationEventRepositoryImpl
         override fun observeActionBreakdownSince(sinceMillis: Long): Flow<ActionBreakdown> =
             eventDao.observeActionCountsSince(sinceMillis).map(List<ActionCountRow>::toActionBreakdown)
 
+        override fun observeActionBreakdownForDay(
+            epochDay: Long,
+            legacyStartMillis: Long,
+        ): Flow<ActionBreakdown> =
+            eventDao
+                .observeActionCountsForDay(epochDay, legacyStartMillis)
+                .map(List<ActionCountRow>::toActionBreakdown)
+
         override suspend fun undo(eventId: String) {
             eventId.toLongOrNull()?.let { eventDao.markUndone(it) }
         }
@@ -170,8 +178,7 @@ class NotificationEventRepositoryImpl
 
         override suspend fun trimToMostRecent(max: Int): Int = eventDao.deleteOverLimit(max)
 
-        override suspend fun trimDecisionTracesToMostRecent(max: Int): Int =
-            eventDao.deleteTracesOutsideMostRecent(max)
+        override suspend fun trimDecisionTracesToMostRecent(max: Int): Int = eventDao.deleteTracesOutsideMostRecent(max)
 
         override suspend fun postedAtBounds(): NotificationEventTimeBounds? =
             eventDao.getPostedAtBounds().let { bounds ->

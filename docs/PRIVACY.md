@@ -56,23 +56,26 @@ never downloaded: the user selects a local file and AlarmControl copies it atomi
 storage. Inference remains on-device. Corrections adjust SQL counts and a shrinkage prior; the app
 does not perform cloud or runtime backpropagation.
 
-## Backup v5
+## Backup v6
 
-Storage Access Framework export/import requests are local-only. Backup v5 can contain rules,
+Storage Access Framework export/import requests are local-only. Backup v6 can contain rules,
 profiles, selected settings, richer channel/app/hour/semantic daily summaries, and supported
-condition types. It can
+condition types, including semantic-analysis scope and breakdown-completeness metadata. It can
 optionally include package-level learning votes only inside a password-derived PBKDF2-HMAC-SHA256 +
 AES-256-GCM envelope. Plain backup is intentionally portable and should be treated as readable by
 anyone who receives the file. Restore previews and validates data before a transactional merge or
-replacement, and v1–v4 backups remain supported.
+replacement, and v1–v5 backups remain supported.
 
 The per-install automation token, imported LLM model, notification content, and LLM reasoning are
 never backed up. Android OS cloud backup is disabled for the app.
 
 ## User control and platform boundaries
 
-Retention settings independently bound activity and daily history. Optional notification detail
-history has a fixed seven-day maximum and supports per-package exclusion. Settings can clear
+Retention settings independently bound activity and daily history. Raw activity is additionally
+capped at the newest 10,000 rows and condition traces at the newest 1,000 events. Daily/today
+analytics use the local day captured at notification post time, falling back to timestamps only for
+legacy rows. Optional notification detail history has a fixed seven-day maximum and supports
+per-package exclusion. Settings can clear
 encrypted details, activity, feedback, insights, or all local data; full deletion also removes
 suggestion dismissals, imported model files, keys, and preferences.
 

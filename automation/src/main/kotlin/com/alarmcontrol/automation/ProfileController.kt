@@ -6,7 +6,6 @@ import com.alarmcontrol.core.automation.AutomationOperation
 import com.alarmcontrol.core.automation.AutomationOutcome
 import com.alarmcontrol.core.automation.AutomationSource
 import com.alarmcontrol.core.automation.AutomationTarget
-import com.alarmcontrol.core.filtering.Rule
 import com.alarmcontrol.core.filtering.RuleRepository
 import com.alarmcontrol.core.profile.ProfileRepository
 import com.alarmcontrol.core.result.runCatchingPreservingCancellation
@@ -48,42 +47,49 @@ class ProfileController
             profileId: String?,
             enabled: Boolean,
             source: AutomationSource = AutomationSource.IN_APP,
-        ): Int = operationMutex.withLock {
-            val result = applyEnabled(profileId.normalizedTarget(), enabled)
-            record(source, if (enabled) AutomationOperation.ENABLE else AutomationOperation.DISABLE, profileId, result)
-            result.changedCount
-        }
+        ): Int =
+            operationMutex.withLock {
+                val result = applyEnabled(profileId.normalizedTarget(), enabled)
+                record(
+                    source,
+                    if (enabled) AutomationOperation.ENABLE else AutomationOperation.DISABLE,
+                    profileId,
+                    result,
+                )
+                result.changedCount
+            }
 
         /** Toggles a profile (or the master gate when [profileId] is blank) for first-party actions. */
         suspend fun toggle(
             profileId: String?,
             source: AutomationSource = AutomationSource.IN_APP,
-        ): Int = operationMutex.withLock {
-            val target = profileId.normalizedTarget()
-            val result =
-                if (target == null) {
-                    applyEnabled(null, enabled = !settingsRepository.filteringEnabled.first())
-                } else {
-                    when (val resolution = resolveRuleIds(target)) {
-                        TargetResolution.Invalid -> ApplyResult(AutomationOutcome.INVALID, 0)
-                        TargetResolution.NotFound -> ApplyResult(AutomationOutcome.NOT_FOUND, 0)
-                        is TargetResolution.Resolved -> {
-                            val currentRules =
-                                ruleRepository.observeRules().first().filter { it.id in resolution.ruleIds }
-                            if (currentRules.isEmpty()) {
-                                ApplyResult(AutomationOutcome.NOT_FOUND, 0)
-                            } else {
-                                applyResolved(
-                                    resolution.ruleIds,
-                                    enabled = currentRules.any { !it.enabled },
-                                )
+        ): Int =
+            operationMutex.withLock {
+                val target = profileId.normalizedTarget()
+                val result =
+                    if (target == null) {
+                        applyEnabled(null, enabled = !settingsRepository.filteringEnabled.first())
+                    } else {
+                        when (val resolution = resolveRuleIds(target)) {
+                            TargetResolution.Invalid -> ApplyResult(AutomationOutcome.INVALID, 0)
+                            TargetResolution.NotFound -> ApplyResult(AutomationOutcome.NOT_FOUND, 0)
+                            is TargetResolution.Resolved -> {
+                                val currentRules =
+                                    ruleRepository.observeRules().first().filter { it.id in resolution.ruleIds }
+                                if (currentRules.isEmpty()) {
+                                    ApplyResult(AutomationOutcome.NOT_FOUND, 0)
+                                } else {
+                                    applyResolved(
+                                        resolution.ruleIds,
+                                        enabled = currentRules.any { !it.enabled },
+                                    )
+                                }
                             }
                         }
                     }
-                }
-            record(source, AutomationOperation.TOGGLE, profileId, result)
-            result.changedCount
-        }
+                record(source, AutomationOperation.TOGGLE, profileId, result)
+                result.changedCount
+            }
 
         /**
          * The **external** path used by the exported receiver. Applies [setEnabled] only when the user
@@ -94,23 +100,24 @@ class ProfileController
             profileId: String?,
             enabled: Boolean,
             token: String?,
-        ): Int = operationMutex.withLock {
-            val operation = if (enabled) AutomationOperation.ENABLE else AutomationOperation.DISABLE
-            val target = profileId.normalizedTarget()
-            val result =
-                when {
-                    profileId != null && target == null && profileId.isNotBlank() ->
-                        ApplyResult(AutomationOutcome.INVALID, 0)
-                    !settingsRepository.externalAutomationEnabled.first() ->
-                        ApplyResult(AutomationOutcome.DISABLED, 0)
-                    !token.isAuthorized(settingsRepository.externalAutomationToken.first()) ->
-                        ApplyResult(AutomationOutcome.UNAUTHORIZED, 0)
-                    !rateLimiter.tryAcquire(clock.millis()) -> ApplyResult(AutomationOutcome.THROTTLED, 0)
-                    else -> applyEnabled(target, enabled)
-                }
-            record(AutomationSource.EXTERNAL, operation, profileId, result)
-            result.changedCount
-        }
+        ): Int =
+            operationMutex.withLock {
+                val operation = if (enabled) AutomationOperation.ENABLE else AutomationOperation.DISABLE
+                val target = profileId.normalizedTarget()
+                val result =
+                    when {
+                        profileId != null && target == null && profileId.isNotBlank() ->
+                            ApplyResult(AutomationOutcome.INVALID, 0)
+                        !settingsRepository.externalAutomationEnabled.first() ->
+                            ApplyResult(AutomationOutcome.DISABLED, 0)
+                        !token.isAuthorized(settingsRepository.externalAutomationToken.first()) ->
+                            ApplyResult(AutomationOutcome.UNAUTHORIZED, 0)
+                        !rateLimiter.tryAcquire(clock.millis()) -> ApplyResult(AutomationOutcome.THROTTLED, 0)
+                        else -> applyEnabled(target, enabled)
+                    }
+                record(AutomationSource.EXTERNAL, operation, profileId, result)
+                result.changedCount
+            }
 
         private suspend fun applyEnabled(
             profileId: String?,

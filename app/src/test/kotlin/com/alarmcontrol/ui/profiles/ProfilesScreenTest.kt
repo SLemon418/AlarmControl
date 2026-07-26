@@ -56,6 +56,27 @@ class ProfilesScreenTest {
     }
 
     @Test
+    fun `duplicate profile name shows a repair message`() {
+        setContent(
+            ProfilesUiState(
+                isLoading = false,
+                profiles =
+                    listOf(
+                        ProfileListItem(
+                            id = "7",
+                            name = "Focus",
+                            memberCount = 1,
+                            enabledCount = 1,
+                            hasDuplicateName = true,
+                        ),
+                    ),
+            ),
+        )
+
+        composeRule.onNodeWithText("Duplicate name", substring = true).assertIsDisplayed()
+    }
+
+    @Test
     fun `editor validates then saves a selected rule`() {
         val editor = mutableStateOf(ProfileEditorState())
         var saved = false

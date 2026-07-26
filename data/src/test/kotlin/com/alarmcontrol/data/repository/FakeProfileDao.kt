@@ -71,6 +71,5 @@ class FakeProfileDao : ProfileDao {
         excludingId: Long,
     ): Int = profiles.count { it.id != excludingId && it.name.equals(name, ignoreCase = true) }
 
-    override suspend fun countUsingRule(ruleId: Long): Int =
-        links.count { it.ruleId == ruleId }
+    override suspend fun countUsingRule(ruleId: Long): Int = links.count { it.ruleId == ruleId }
 }

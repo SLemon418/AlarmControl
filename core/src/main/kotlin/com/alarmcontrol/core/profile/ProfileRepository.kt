@@ -15,6 +15,5 @@ interface ProfileRepository {
     suspend fun delete(profileId: String)
 
     /** Number of saved profiles that currently reference [ruleId]. */
-    suspend fun countUsingRule(ruleId: String): Int =
-        observeProfiles().first().count { ruleId in it.ruleIds }
+    suspend fun countUsingRule(ruleId: String): Int = observeProfiles().first().count { ruleId in it.ruleIds }
 }

@@ -86,9 +86,9 @@ propose it first, don't just add it.
   `INTERNET`; a missing or invalid file degrades gracefully (§0/§5).
 - **User-directed backup/model file pickers request local providers only** with
   `Intent.EXTRA_LOCAL_ONLY`; AlarmControl never offers or implements a cloud upload path.
-- **Portable backup v5 is local and bounded.** It contains rule modes and supported condition
+- **Portable backup v6 is local and bounded.** It contains rule modes and supported condition
   trees, named profiles, richer channel/app/hour/semantic daily summaries, selected settings, and
-  optional seven-way semantic votes, while still restoring v1–v4 files. Package-level learning votes
+  optional seven-way semantic votes, while still restoring v1–v5 files. Package-level learning votes
   are optional and may appear only inside a password-derived AES-256-GCM envelope; notification
   content, LLM reasoning, and the per-install
   automation token are never exported. Restore is previewed, validated, and applied transactionally.
@@ -116,7 +116,7 @@ Boundaries exist to keep features small and to make the offline rule structurall
 ```
 :app           Compose UI host, navigation, DI wiring, the NotificationListenerService entry point
 :core          framework-free domain models, repository contracts, dispatchers, Result types
-:data          Room v12 + DataStore, repositories, backup, mappers (the only module that persists)
+:data          Room v13 + DataStore, repositories, backup, mappers (the only module that persists)
 :ml            bundled classifier, optional local LLM, feature extraction, feedback/learning
 :notifications notification matching/filtering engine (pure, testable logic)
 :automation    exported intents, Tasker/Locale plugin, QS tiles, App Shortcuts
@@ -162,6 +162,9 @@ Boundaries exist to keep features small and to make the offline rule structurall
 - Enabled rules are compiled into independent **ACTIVE** and **MONITOR** lanes. The first active
   match alone may perform a platform action; the first monitor match records an expected action and
   can never shadow or block an active rule.
+- Listener work is bounded to 64 tracked notifications and four concurrent evaluations. Newer posts
+  invalidate older work for the same notification, and rule or permission changes revoke stale
+  actions before their Binder commit. An unavailable startup cache fails open after two seconds.
 - Frequency conditions are package or package+channel scoped, include the current post, and support
   1 minute–24 hours with thresholds 2–1000. Seed the content-free in-memory tracker once from Room;
   never query Room per notification. Missing seed/channel/ranking signals evaluate to `UNKNOWN`,
@@ -172,8 +175,10 @@ Boundaries exist to keep features small and to make the offline rule structurall
 - Protection behavior is represented by visible, editable, high-priority `Keep` rules — never by a
   hidden exception. Conversation, foreground-service, importance, and alarm templates open drafts
   and do not auto-save.
-- Persisted explanations contain only lane, condition kind, three-state result, depth, and position,
-  capped at 128 nodes. Trace rows never persist predicate values, notification content, or LLM reasoning.
+- Condition matching and explanation tracing share one short-circuiting traversal. Persisted
+  explanations contain only lane, condition kind, three-state result, depth, and position, capped
+  at 128 nodes across active and monitor lanes. Trace rows never persist predicate values,
+  notification content, or LLM reasoning.
 - Rule suggestions are SQL-derived local drafts only. They must never auto-save or auto-enable, must
   exclude an existing structurally identical rule, and must honor locally persisted dismissals.
 - Map only what we can actually act on: **cancel** and **snooze**. `Keep` and the legacy `MarkRead`
@@ -183,6 +188,9 @@ Boundaries exist to keep features small and to make the offline rule structurall
 - Persist a content-free local event record for each decision (for insights and optional statistics
   exclusion). Optional detail title/body is a separate, bounded, Keystore-encrypted seven-day child
   payload and is never used by list queries or analytics. Exclusion cannot restore a dismissed notification.
+- Raw history is bounded by both its configured age and the newest 10,000 rows; condition traces are
+  retained only for the newest 1,000 events. Daily/today analytics use the local day captured when
+  the notification was posted, with timestamp fallback only for legacy rows.
 - All `NotificationListenerService` callbacks delegate immediately to pure logic; no business rules
   inside the service class.
 
@@ -231,7 +239,7 @@ Turn tasks into verifiable goals and loop until green (see §10).
   criterion.
 - **Room migrations**: schema upgrades ship with an **instrumented** migration test
   (`:data/src/androidTest`, using `MigrationTestHelper` over the exported schema JSONs) that seeds
-  data in the old version and asserts it survives the sequential upgrade (currently v3 → v12),
+  data in old versions and asserts it survives upgrades from v1, v2, v3, v10, and v12 to v13,
   including legacy binary-ad feedback migration to semantic intents.
   Instrumented tests run on a device/emulator (`./gradlew :data:connectedDebugAndroidTest`),
   complementing the JVM unit suite — they are **not** part of the default `./gradlew test` run.

@@ -67,6 +67,29 @@ class ProfilesViewModelTest {
         }
 
     @Test
+    fun `legacy duplicate profile names are flagged and cannot be saved unchanged`() =
+        runTest {
+            profiles.value =
+                listOf(
+                    FilteringProfile(id = "10", name = "Focus", ruleIds = setOf("1")),
+                    FilteringProfile(id = "11", name = " focus ", ruleIds = setOf("1")),
+                )
+            rules.value = listOf(rule("1", true))
+            val vm = viewModel()
+
+            vm.uiState.test {
+                val loaded = awaitUntil { it.profiles.size == 2 }
+                assertTrue(loaded.profiles.all(ProfileListItem::hasDuplicateName))
+
+                vm.onEditProfile("10")
+                val editor = awaitUntil { it.editor?.id == "10" }.editor!!
+                assertTrue(editor.nameConflict)
+                assertFalse(editor.canSave)
+                cancelAndIgnoreRemainingEvents()
+            }
+        }
+
+    @Test
     fun `saving an editor delegates a trimmed profile and closes the dialog`() =
         runTest {
             rules.value = listOf(rule("1", true))

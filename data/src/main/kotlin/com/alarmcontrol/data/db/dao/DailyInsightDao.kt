@@ -18,6 +18,14 @@ import com.alarmcontrol.data.db.model.StoredRuleAction
 import com.alarmcontrol.data.db.relation.DailyInsightWithBreakdown
 import kotlinx.coroutines.flow.Flow
 
+private const val EVENT_DAY_FILTER =
+    "((posted_epoch_day = :epochDay) OR " +
+        "(posted_epoch_day IS NULL AND posted_at_millis >= :startMillis AND posted_at_millis < :endMillis))"
+private const val ALIASED_EVENT_DAY_FILTER =
+    "((event.posted_epoch_day = :epochDay) OR " +
+        "(event.posted_epoch_day IS NULL AND event.posted_at_millis >= :startMillis " +
+        "AND event.posted_at_millis < :endMillis))"
+
 /**
  * Aggregates the decision log into per-day rollups and persists them (CLAUDE.md §5). The summarising
  * runs as pure SQL `GROUP BY` over `notification_events` — never loading rows into memory — which is
@@ -31,12 +39,13 @@ interface DailyInsightDao {
 
     // ---- aggregation over the decision log (read side) ----
 
-    /** All non-undone decisions recorded in `[startMillis, endMillis)`. */
+    /** Decisions posted on [epochDay], with the millisecond window retained for legacy rows. */
     @Query(
         "SELECT COUNT(*) FROM notification_events " +
-            "WHERE posted_at_millis >= :startMillis AND posted_at_millis < :endMillis AND undone = 0",
+            "WHERE " + EVENT_DAY_FILTER + " AND undone = 0",
     )
     suspend fun countBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
     ): Int
@@ -44,10 +53,11 @@ interface DailyInsightDao {
     /** Non-undone decisions actually silenced by cancel or snooze. */
     @Query(
         "SELECT COUNT(*) FROM notification_events " +
-            "WHERE posted_at_millis >= :startMillis AND posted_at_millis < :endMillis " +
-            "AND undone = 0 AND action IN (:cancelAction, :snoozeAction)",
+            "WHERE " + EVENT_DAY_FILTER + " AND undone = 0 " +
+            "AND action IN (:cancelAction, :snoozeAction)",
     )
     suspend fun countMutedBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
         cancelAction: StoredRuleAction,
@@ -56,20 +66,21 @@ interface DailyInsightDao {
 
     @Query(
         "SELECT action, COUNT(*) AS count FROM notification_events " +
-            "WHERE posted_at_millis >= :startMillis AND posted_at_millis < :endMillis " +
-            "AND undone = 0 GROUP BY action",
+            "WHERE " + EVENT_DAY_FILTER + " AND undone = 0 GROUP BY action",
     )
     suspend fun actionCountsBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
     ): List<ActionCountRow>
 
     @Query(
         "SELECT monitored_action AS `action`, COUNT(*) AS count FROM notification_events " +
-            "WHERE posted_at_millis >= :startMillis AND posted_at_millis < :endMillis " +
-            "AND undone = 0 AND monitored_action IS NOT NULL GROUP BY monitored_action",
+            "WHERE " + EVENT_DAY_FILTER + " AND undone = 0 " +
+            "AND monitored_action IS NOT NULL GROUP BY monitored_action",
     )
     suspend fun monitoredActionCountsBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
     ): List<ActionCountRow>
@@ -77,11 +88,11 @@ interface DailyInsightDao {
     /** The most-triggered rules in the window, highest first (ties by id), capped at [limit]. */
     @Query(
         "SELECT matched_rule_id AS rule_id, COUNT(*) AS count FROM notification_events " +
-            "WHERE posted_at_millis >= :startMillis AND posted_at_millis < :endMillis " +
-            "AND undone = 0 AND matched_rule_id IS NOT NULL " +
+            "WHERE " + EVENT_DAY_FILTER + " AND undone = 0 AND matched_rule_id IS NOT NULL " +
             "GROUP BY matched_rule_id ORDER BY count DESC, matched_rule_id ASC LIMIT :limit",
     )
     suspend fun topRulesBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
         limit: Int,
@@ -89,21 +100,21 @@ interface DailyInsightDao {
 
     @Query(
         "SELECT COUNT(DISTINCT matched_rule_id) FROM notification_events " +
-            "WHERE posted_at_millis >= :startMillis AND posted_at_millis < :endMillis " +
-            "AND undone = 0 AND matched_rule_id IS NOT NULL",
+            "WHERE " + EVENT_DAY_FILTER + " AND undone = 0 AND matched_rule_id IS NOT NULL",
     )
     suspend fun countMatchedRulesBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
     ): Int
 
     @Query(
         "SELECT monitored_rule_id AS rule_id, COUNT(*) AS count FROM notification_events " +
-            "WHERE posted_at_millis >= :startMillis AND posted_at_millis < :endMillis " +
-            "AND undone = 0 AND monitored_rule_id IS NOT NULL " +
+            "WHERE " + EVENT_DAY_FILTER + " AND undone = 0 AND monitored_rule_id IS NOT NULL " +
             "GROUP BY monitored_rule_id ORDER BY count DESC, monitored_rule_id ASC LIMIT :limit",
     )
     suspend fun topMonitoredRulesBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
         limit: Int,
@@ -111,10 +122,10 @@ interface DailyInsightDao {
 
     @Query(
         "SELECT COUNT(DISTINCT monitored_rule_id) FROM notification_events " +
-            "WHERE posted_at_millis >= :startMillis AND posted_at_millis < :endMillis " +
-            "AND undone = 0 AND monitored_rule_id IS NOT NULL",
+            "WHERE " + EVENT_DAY_FILTER + " AND undone = 0 AND monitored_rule_id IS NOT NULL",
     )
     suspend fun countMonitoredRulesBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
     ): Int
@@ -124,12 +135,13 @@ interface DailyInsightDao {
         "SELECT COALESCE((SELECT corrected_label FROM category_feedback " +
             "WHERE notification_event_id = notification_events.id ORDER BY id DESC LIMIT 1), " +
             "ml_category, category) AS category, COUNT(*) AS count FROM notification_events " +
-            "WHERE posted_at_millis >= :startMillis AND posted_at_millis < :endMillis AND undone = 0 " +
+            "WHERE " + EVENT_DAY_FILTER + " AND undone = 0 " +
             "GROUP BY COALESCE((SELECT corrected_label FROM category_feedback " +
             "WHERE notification_event_id = notification_events.id ORDER BY id DESC LIMIT 1), ml_category, category) " +
             "ORDER BY count DESC, category ASC",
     )
     suspend fun categoryBreakdownBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
     ): List<CategoryCountRow>
@@ -137,12 +149,12 @@ interface DailyInsightDao {
     @Query(
         "SELECT package_name, channel_id, MAX(channel_name) AS channel_name, COUNT(*) AS count " +
             "FROM notification_events " +
-            "WHERE posted_at_millis >= :startMillis AND posted_at_millis < :endMillis " +
-            "AND undone = 0 AND channel_id IS NOT NULL " +
+            "WHERE " + EVENT_DAY_FILTER + " AND undone = 0 AND channel_id IS NOT NULL " +
             "GROUP BY package_name, channel_id ORDER BY count DESC, package_name ASC, channel_id ASC " +
             "LIMIT :limit",
     )
     suspend fun channelBreakdownBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
         limit: Int,
@@ -150,10 +162,11 @@ interface DailyInsightDao {
 
     @Query(
         "SELECT COUNT(*) FROM (SELECT 1 FROM notification_events " +
-            "WHERE posted_at_millis >= :startMillis AND posted_at_millis < :endMillis " +
-            "AND undone = 0 AND channel_id IS NOT NULL GROUP BY package_name, channel_id)",
+            "WHERE " + EVENT_DAY_FILTER + " AND undone = 0 " +
+            "AND channel_id IS NOT NULL GROUP BY package_name, channel_id)",
     )
     suspend fun countChannelsBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
     ): Int
@@ -161,11 +174,12 @@ interface DailyInsightDao {
     @Query(
         "SELECT package_name, COUNT(*) AS total_count, " +
             "SUM(CASE WHEN action IN (:cancelAction, :snoozeAction) THEN 1 ELSE 0 END) AS silenced_count " +
-            "FROM notification_events WHERE posted_at_millis >= :startMillis " +
-            "AND posted_at_millis < :endMillis AND undone = 0 GROUP BY package_name " +
+            "FROM notification_events WHERE " + EVENT_DAY_FILTER + " " +
+            "AND undone = 0 GROUP BY package_name " +
             "ORDER BY total_count DESC, package_name ASC LIMIT :limit",
     )
     suspend fun appBreakdownBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
         cancelAction: StoredRuleAction,
@@ -175,9 +189,10 @@ interface DailyInsightDao {
 
     @Query(
         "SELECT COUNT(DISTINCT package_name) FROM notification_events " +
-            "WHERE posted_at_millis >= :startMillis AND posted_at_millis < :endMillis AND undone = 0",
+            "WHERE " + EVENT_DAY_FILTER + " AND undone = 0",
     )
     suspend fun countAppsBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
     ): Int
@@ -185,11 +200,12 @@ interface DailyInsightDao {
     @Query(
         "SELECT CAST(posted_minute_of_day / 60 AS INTEGER) AS hour, COUNT(*) AS total_count, " +
             "SUM(CASE WHEN action IN (:cancelAction, :snoozeAction) THEN 1 ELSE 0 END) AS silenced_count " +
-            "FROM notification_events WHERE posted_at_millis >= :startMillis " +
-            "AND posted_at_millis < :endMillis AND undone = 0 AND posted_minute_of_day IS NOT NULL " +
+            "FROM notification_events WHERE " + EVENT_DAY_FILTER + " " +
+            "AND undone = 0 AND posted_minute_of_day IS NOT NULL " +
             "GROUP BY hour ORDER BY hour ASC",
     )
     suspend fun hourBreakdownBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
         cancelAction: StoredRuleAction,
@@ -199,20 +215,22 @@ interface DailyInsightDao {
     @Query(
         "SELECT COALESCE(llm.corrected_intent, llm.predicted_intent) AS intent, COUNT(*) AS count " +
             "FROM llm_observations AS llm INNER JOIN notification_events AS event " +
-            "ON event.id = llm.notification_event_id WHERE event.posted_at_millis >= :startMillis " +
-            "AND event.posted_at_millis < :endMillis AND event.undone = 0 " +
+            "ON event.id = llm.notification_event_id WHERE " + ALIASED_EVENT_DAY_FILTER + " " +
+            "AND event.undone = 0 " +
             "GROUP BY intent ORDER BY count DESC, intent ASC",
     )
     suspend fun semanticBreakdownBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
     ): List<SemanticCountRow>
 
     @Query(
-        "SELECT COUNT(*) FROM notification_events WHERE posted_at_millis >= :startMillis " +
-            "AND posted_at_millis < :endMillis AND undone = 0 AND ml_category IS NOT NULL",
+        "SELECT COUNT(*) FROM notification_events WHERE " + EVENT_DAY_FILTER + " " +
+            "AND undone = 0 AND ml_category IS NOT NULL",
     )
     suspend fun countMlClassifiedBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
     ): Int
@@ -220,21 +238,22 @@ interface DailyInsightDao {
     @Query(
         "SELECT COUNT(DISTINCT feedback.notification_event_id) FROM category_feedback AS feedback " +
             "INNER JOIN notification_events AS event ON event.id = feedback.notification_event_id " +
-            "WHERE event.posted_at_millis >= :startMillis AND event.posted_at_millis < :endMillis " +
-            "AND event.undone = 0",
+            "WHERE " + ALIASED_EVENT_DAY_FILTER + " AND event.undone = 0",
     )
     suspend fun countCategoryCorrectionsBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
     ): Int
 
     @Query(
         "SELECT COUNT(*) FROM llm_observations AS llm INNER JOIN notification_events AS event " +
-            "ON event.id = llm.notification_event_id WHERE event.posted_at_millis >= :startMillis " +
-            "AND event.posted_at_millis < :endMillis AND event.undone = 0 " +
+            "ON event.id = llm.notification_event_id WHERE " + ALIASED_EVENT_DAY_FILTER + " " +
+            "AND event.undone = 0 " +
             "AND llm.corrected_intent IS NOT NULL",
     )
     suspend fun countSemanticCorrectionsBetween(
+        epochDay: Long,
         startMillis: Long,
         endMillis: Long,
     ): Int

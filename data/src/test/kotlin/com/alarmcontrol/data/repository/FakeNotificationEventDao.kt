@@ -164,6 +164,24 @@ class FakeNotificationEventDao : NotificationEventDao {
                 .map { (action, count) -> ActionCountRow(action, count) }
         }
 
+    override fun observeActionCountsForDay(
+        epochDay: Long,
+        legacyStartMillis: Long,
+    ): Flow<List<ActionCountRow>> =
+        revision.map {
+            events
+                .filter { event ->
+                    !event.undone &&
+                        if (event.postedEpochDay != null) {
+                            event.postedEpochDay == epochDay
+                        } else {
+                            event.postedAtMillis >= legacyStartMillis
+                        }
+                }.groupingBy(NotificationEventEntity::action)
+                .eachCount()
+                .map { (action, count) -> ActionCountRow(action, count) }
+        }
+
     override suspend fun markUndone(id: Long) {
         val index = events.indexOfFirst { it.id == id }
         if (index >= 0) events[index] = events[index].copy(undone = true)

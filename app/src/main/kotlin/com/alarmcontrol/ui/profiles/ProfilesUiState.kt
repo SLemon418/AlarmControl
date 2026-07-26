@@ -18,6 +18,7 @@ data class ProfileListItem(
     val name: String,
     val memberCount: Int,
     val enabledCount: Int,
+    val hasDuplicateName: Boolean = false,
 ) {
     val isActive: Boolean get() = memberCount > 0 && enabledCount == memberCount
     val isPartial: Boolean get() = enabledCount in 1 until memberCount
@@ -33,10 +34,15 @@ data class ProfileEditorState(
     val id: String = "",
     val name: String = "",
     val selectedRuleIds: Set<String> = emptySet(),
+    val nameConflict: Boolean = false,
     val hasUnsavedChanges: Boolean = false,
     val showDiscardConfirmation: Boolean = false,
 ) {
     val isEditing: Boolean get() = id.isNotBlank()
     val canSave: Boolean
-        get() = name.isNotBlank() && name.length <= MAX_PROFILE_NAME_CHARS && selectedRuleIds.isNotEmpty()
+        get() =
+            name.isNotBlank() &&
+                name.length <= MAX_PROFILE_NAME_CHARS &&
+                !nameConflict &&
+                selectedRuleIds.isNotEmpty()
 }

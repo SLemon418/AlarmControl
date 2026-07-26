@@ -322,19 +322,7 @@ object BackupCodec {
                 optJSONArray("channels")
                     .orEmpty()
                     .objects()
-                    .map {
-                        ChannelCount(
-                            packageName = it.getString("packageName"),
-                            channelId = it.getString("channelId"),
-                            count = it.getInt("count"),
-                            channelName =
-                                if (!it.has("channelName") || it.isNull("channelName")) {
-                                    null
-                                } else {
-                                    it.getString("channelName")
-                                },
-                        )
-                    },
+                    .map { it.toChannelCount() },
             appBreakdown =
                 optJSONArray("apps")
                     .orEmpty()
@@ -375,6 +363,19 @@ object BackupCodec {
             monitorRuleBreakdownComplete = optBoolean("monitorRuleBreakdownComplete", false),
             appBreakdownComplete = optBoolean("appBreakdownComplete", false),
             channelBreakdownComplete = optBoolean("channelBreakdownComplete", false),
+        )
+
+    private fun JSONObject.toChannelCount(): ChannelCount =
+        ChannelCount(
+            packageName = getString("packageName"),
+            channelId = getString("channelId"),
+            count = getInt("count"),
+            channelName =
+                if (!has("channelName") || isNull("channelName")) {
+                    null
+                } else {
+                    getString("channelName")
+                },
         )
 
     private class ConditionDecodeBudget {

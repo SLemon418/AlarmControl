@@ -19,8 +19,8 @@ import com.alarmcontrol.core.filtering.NotificationHistoryRepository
 import com.alarmcontrol.core.privacy.LocalDataRepository
 import com.alarmcontrol.core.result.DataResult
 import com.alarmcontrol.core.result.runCatchingPreservingCancellation
-import com.alarmcontrol.core.settings.SettingsRepository
 import com.alarmcontrol.core.settings.SemanticAnalysisScope
+import com.alarmcontrol.core.settings.SettingsRepository
 import com.alarmcontrol.ml.llm.LlmFailure
 import com.alarmcontrol.ml.llm.LlmInitState
 import com.alarmcontrol.ml.llm.OnDeviceLlmManager
@@ -274,6 +274,7 @@ class SettingsViewModel
         fun clearAllData() {
             viewModelScope.launch(ioDispatcher) {
                 val failures = mutableListOf<Throwable>()
+
                 suspend fun attempt(block: suspend () -> Unit) {
                     runCatchingPreservingCancellation { block() }.onFailure(failures::add)
                 }

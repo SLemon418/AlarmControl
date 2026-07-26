@@ -6,8 +6,8 @@ import com.alarmcontrol.core.filtering.ConditionResult
 import com.alarmcontrol.core.filtering.MAX_RULE_NAME_CHARS
 import com.alarmcontrol.core.filtering.Rule
 import com.alarmcontrol.core.filtering.RuleAction
-import com.alarmcontrol.core.filtering.RuleDefinitionValidator
 import com.alarmcontrol.core.filtering.RuleAnalysisIssueKind
+import com.alarmcontrol.core.filtering.RuleDefinitionValidator
 import com.alarmcontrol.notifications.ConditionTrace
 import com.alarmcontrol.ui.UiText
 import com.alarmcontrol.ui.uiText
@@ -166,14 +166,14 @@ internal fun RuleEditorState.toRuleOrNull(): Rule? {
         }
     val rule =
         Rule(
-        id = id,
-        name = name.trim(),
-        enabled = enabled,
-        priority = parsedPriority,
-        condition = condition,
-        action = ruleAction,
-        executionMode = executionMode,
-    )
+            id = id,
+            name = name.trim(),
+            enabled = enabled,
+            priority = parsedPriority,
+            condition = condition,
+            action = ruleAction,
+            executionMode = executionMode,
+        )
     return rule.takeIf { RuleDefinitionValidator.validate(it).isEmpty() }
 }
 

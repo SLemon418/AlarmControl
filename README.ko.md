@@ -128,7 +128,7 @@ MVVM, 단방향 데이터 흐름, 저장소 패턴을 적용한 여섯 개 런�
 |---|---|
 | `:app` | Compose/Material 3 UI, 단일 Activity, Navigation, DI 연결, `NotificationListenerService`. **Compose를 사용하는 유일한 모듈** |
 | `:core` | 프레임워크 독립 도메인 모델, 저장소 계약, 디스패처, 결과 타입 |
-| `:data` | Room v12, DataStore, 저장소 구현, 매퍼, 백업. 데이터를 영속화하는 유일한 모듈 |
+| `:data` | Room v13, DataStore, 저장소 구현, 매퍼, 백업. 데이터를 영속화하는 유일한 모듈 |
 | `:ml` | 번들 LiteRT 분류기, Unicode 특징 추출, 피드백 블렌더, 선택형 로컬 MediaPipe LLM |
 | `:notifications` | 순수 Kotlin 알림 매칭 엔진 |
 | `:automation` | 외부 Intent, 프로필 제어, 빠른 설정 타일, 동적 App Shortcuts |
@@ -143,7 +143,7 @@ MVVM, 단방향 데이터 흐름, 저장소 패턴을 적용한 여섯 개 런�
 하위 계층은 `:app`이나 Compose에 의존하지 않으며 기능 모듈끼리 직접 의존하지 않습니다.
 공유 계약은 `:core`에 위치합니다.
 
-주요 기술: Kotlin, Coroutines/Flow, Jetpack Compose/Material 3, Hilt, Room v12, DataStore,
+주요 기술: Kotlin, Coroutines/Flow, Jetpack Compose/Material 3, Hilt, Room v13, DataStore,
 WorkManager, LiteRT, MediaPipe Tasks GenAI, Gradle Kotlin DSL, KSP, R8. minSdk 26,
 compile/target SDK 36입니다.
 
@@ -180,9 +180,9 @@ export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
 ./gradlew build
 ```
 
-- 런타임 모듈에 **382개의 JVM/Robolectric 테스트**가 있습니다. 현재 검증 집계는
-  **382개, 실패 0개, 오류 0개, 건너뜀 0개**입니다.
-- API 34 Managed Device 계측 테스트도 **7개(Room 2, 실제 TFLite 4, 앱/Hilt/탐색 1)**가
+- 런타임 모듈에 **425개의 JVM/Robolectric 테스트**가 있습니다. 현재 검증 집계는
+  **425개, 실패 0개, 오류 0개, 건너뜀 0개**입니다.
+- API 34 Managed Device 계측 테스트도 **11개(Room/데이터 6, 실제 TFLite 4, 앱/Hilt/탐색 1)**가
   모두 통과합니다.
 - `:app` Compose UI 테스트는 Robolectric Native Graphics 모드로 로컬 JVM에서 실행됩니다.
 - `detekt`, `ktlint`, Android Lint, 오프라인 가드는 `check`와 `build`의 필수 게이트입니다.
@@ -225,7 +225,7 @@ export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
 - 중첩 복합·시간대 규칙과 시각적 편집기
 - 활성 규칙 메모리 캐시, 단락 평가, 성능 테스트
 - Room `DailyInsight` 기록과 Canvas 기반 인사이트 UI
-- Room v3→v12 순차 마이그레이션 테스트
+- Room v1·v2·v3·v10·v12→v13 마이그레이션 테스트
 - 암호화 백업/복원, 이름 있는 프로필, Material You와 입력 검증
 
 ### Milestone 4
@@ -253,7 +253,21 @@ export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
   **유지** 판정을 포함한 인덱스 기반 알림 기록
 - 기본 꺼짐, 앱별 제외, `SECRET` 제외, 7일 만료, 비활성화 시 키까지 삭제하는 Android
   Keystore AES-256-GCM 알림 상세
-- 기존 v3 데이터의 Room v12 순차 이관과 v1~v4를 계속 복원하는 백업 v5
+- 지원되는 구버전 데이터의 Room v13 이관과 v1~v5를 계속 복원하는 백업 v6
+
+### 출시 안정화
+
+- 알림 리스너 작업을 최대 64개, 동시 평가 4개로 제한하고 같은 알림의 오래된 작업과
+  규칙·개인정보 설정 변경 전에 시작된 동작을 실행 직전에 무효화합니다.
+- 일별/오늘 통계는 게시 당시 로컬 날짜를 기준으로 계산하고, WorkManager 누락 일자는 한 번에
+  최대 7일만 보충합니다. 원본 기록은 최신 10,000건, 상세 트레이스는 최신 1,000건으로
+  제한합니다.
+- 조건 판정과 설명 생성을 단락 가능한 한 번의 트리 순회로 통합하고 활성/관찰 트레이스를
+  합쳐 최대 128개의 내용 없는 노드만 저장합니다.
+- 민감 화면 캡처 차단, 60초 민감 클립보드 만료, 독립적인 데이터 삭제 실패 처리,
+  대소문자 무시 프로필 중복 방지, 접을 수 있는 규칙 경고를 적용했습니다.
+- Release AAB 60MiB 상한과 detekt, ktlint, 전체 로컬 테스트, 마이그레이션/계측 APK 컴파일,
+  의존성 검증, 오프라인 가드를 필수 출시 게이트로 유지합니다.
 
 세부 동작은 [규칙 안내](docs/RULES_GUIDE.ko.md), 저장 항목과 제외 항목은
 [개인정보 안내](docs/PRIVACY.ko.md)를 참고하세요.
@@ -276,7 +290,7 @@ export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
 
 - 추가 One UI/API 버전의 알림 중요도, Doze·배터리, Tasker/RoutinePlus 전체 흐름을
   실기기에서 검증합니다.
-- 연결된 Galaxy에서 새 v12 마이그레이션, 안내형 편집기, 기간 분석, 기록 상세, 7일 보존,
+- 연결된 Galaxy에서 새 v13 마이그레이션, 안내형 편집기, 기간 분석, 기록 상세, 7일 보존,
   Keystore 키 삭제 시나리오를 출시 전에 검증합니다.
 - 대표적인 실제 기기에서 MediaPipe 모델 호환성, 지연, 메모리, 발열을 측정합니다.
 - 사용자의 알림 내용을 수집하지 않고 직접 작성한 익명 다국어 픽스처를 확대합니다.

@@ -14,7 +14,9 @@ import com.alarmcontrol.core.filtering.NotificationContentState
 import com.alarmcontrol.core.filtering.NotificationEvent
 import com.alarmcontrol.core.filtering.NotificationEventDetail
 import com.alarmcontrol.core.filtering.NotificationEventRepository
+import com.alarmcontrol.core.filtering.NotificationHistoryCoverage
 import com.alarmcontrol.core.filtering.NotificationHistoryPage
+import com.alarmcontrol.core.filtering.NotificationHistoryQuery
 import com.alarmcontrol.core.filtering.NotificationHistoryRepository
 import com.alarmcontrol.core.filtering.NotificationSource
 import com.alarmcontrol.core.filtering.Rule
@@ -51,14 +53,20 @@ import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.just
 import io.mockk.mockk
+import io.mockk.verify
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
 
+@OptIn(ExperimentalCoroutinesApi::class)
+@Suppress("LargeClass")
 class InsightsViewModelTest {
     @get:org.junit.Rule
     val mainDispatcherRule = MainDispatcherRule()
@@ -111,12 +119,24 @@ class InsightsViewModelTest {
     private fun viewModel(): InsightsViewModel {
         every { eventRepository.observeRecent(any()) } returns recent
         every { eventRepository.observeActionBreakdownSince(any()) } returns actionBreakdownFlow
+        every {
+            eventRepository.observeActionBreakdownForDay(any(), any())
+        } returns actionBreakdownFlow
         every { feedbackRepository.observeEventCorrections() } returns correctionsFlow
         every { adFeedbackRepository.observeByEvent() } returns adObservationsFlow
         every { insightsSummaryRepository.summary } returns summaryFlow
         every { dailyInsightRepository.observeRecent(any()) } returns dailyFlow
         every { notificationHistoryRepository.observeHistory(any()) } returns historyFlow
         every { notificationHistoryRepository.observeSources(any()) } returns sourceFlow
+        every { notificationHistoryRepository.observeCoverage() } returns
+            flowOf(
+                NotificationHistoryCoverage(
+                    totalEvents = 0,
+                    oldestPostedAtMillis = null,
+                    newestPostedAtMillis = null,
+                    eventsWithTrace = 0,
+                ),
+            )
         every { insightsAnalyticsRepository.observe(any()) } returns analyticsFlow
         every { insightsAnalyticsRepository.observeAvailableRange() } returns availableRangeFlow
         every { ruleRepository.observeRules() } returns rulesFlow
@@ -653,7 +673,12 @@ class InsightsViewModelTest {
 
             vm.uiState.test {
                 vm.onTabSelected(InsightsTab.RECORDS)
-                val records = awaitUntil { it.selectedTab == InsightsTab.RECORDS && it.historyEvents.size == 1 }
+                val records =
+                    awaitUntil {
+                        it.selectedTab == InsightsTab.RECORDS &&
+                            it.historyEvents.size == 1 &&
+                            it.historySources.size == 1
+                    }
                 assertEquals(EventActionUi.KEPT, records.historyEvents.single().action)
                 assertEquals("Transactions", records.historySources.single().channelName)
 
@@ -665,6 +690,64 @@ class InsightsViewModelTest {
             }
 
             coVerify(exactly = 1) { notificationHistoryRepository.getDetail("7") }
+        }
+
+    @Test
+    fun `records queries activate only on their tab and page size is capped at one thousand`() =
+        runTest {
+            val queries = mutableListOf<NotificationHistoryQuery>()
+            val vm = viewModel()
+            every { notificationHistoryRepository.observeHistory(any()) } answers {
+                val query = firstArg<NotificationHistoryQuery>()
+                queries += query
+                flowOf(NotificationHistoryPage(emptyList(), totalCount = 5_000))
+            }
+
+            vm.uiState.test {
+                awaitUntil { !it.isLoading }
+                verify(exactly = 0) { notificationHistoryRepository.observeHistory(any()) }
+
+                vm.onTabSelected(InsightsTab.RECORDS)
+                awaitUntil { it.selectedTab == InsightsTab.RECORDS && it.historyTotalCount == 5_000 }
+                assertEquals(100, queries.last().limit)
+
+                repeat(20) { vm.onLoadMoreHistory() }
+                mainDispatcherRule.dispatcher.scheduler.runCurrent()
+                assertEquals(1_000, queries.last().limit)
+                cancelAndIgnoreRemainingEvents()
+            }
+        }
+
+    @Test
+    fun `history search debounces rapid typing for three hundred milliseconds`() =
+        runTest {
+            val queries = mutableListOf<NotificationHistoryQuery>()
+            historyFlow.value = NotificationHistoryPage(emptyList(), totalCount = 1)
+            val vm = viewModel()
+            every { notificationHistoryRepository.observeHistory(any()) } answers {
+                queries += firstArg<NotificationHistoryQuery>()
+                historyFlow
+            }
+
+            vm.uiState.test {
+                vm.onTabSelected(InsightsTab.RECORDS)
+                awaitUntil { it.selectedTab == InsightsTab.RECORDS && it.historyTotalCount == 1 }
+                assertTrue(queries.isNotEmpty())
+                queries.clear()
+
+                vm.onActivityQueryChange("%")
+                vm.onActivityQueryChange("%_")
+                vm.onActivityQueryChange("%_\\")
+                mainDispatcherRule.dispatcher.scheduler.runCurrent()
+                mainDispatcherRule.dispatcher.scheduler.advanceTimeBy(299)
+                mainDispatcherRule.dispatcher.scheduler.runCurrent()
+                assertTrue(queries.isEmpty())
+
+                mainDispatcherRule.dispatcher.scheduler.advanceTimeBy(1)
+                mainDispatcherRule.dispatcher.scheduler.runCurrent()
+                assertEquals("%_\\", queries.single().search)
+                cancelAndIgnoreRemainingEvents()
+            }
         }
 
     private fun dailyInsight(

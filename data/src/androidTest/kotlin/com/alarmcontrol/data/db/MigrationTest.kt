@@ -1,5 +1,6 @@
 package com.alarmcontrol.data.db
 
+import androidx.room.migration.Migration
 import androidx.room.testing.MigrationTestHelper
 import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -66,6 +67,165 @@ class MigrationTest {
         assertMilestone5TablesAndDefaultsWork(db)
         assertMilestone6TablesAndDefaultsWork(db)
         assertStabilizationDefaultsAndIndexesWork(db)
+    }
+
+    @Test
+    @Throws(IOException::class)
+    fun migratesFromV1ToV13PreservingRulesAndEvents() {
+        helper.createDatabase(V1_TEST_DB, version = 1).use { db ->
+            seedLegacyCore(db, includeUndone = false)
+        }
+
+        helper
+            .runMigrationsAndValidate(
+                V1_TEST_DB,
+                13,
+                true,
+                *migrationsFrom(1),
+            ).use { db ->
+                assertLegacyCoreSurvived(db, expectedUndone = 0)
+            }
+    }
+
+    @Test
+    @Throws(IOException::class)
+    fun migratesFromV2ToV13PreservingExcludedStatisticsState() {
+        helper.createDatabase(V2_TEST_DB, version = 2).use { db ->
+            seedLegacyCore(db, includeUndone = true)
+        }
+
+        helper
+            .runMigrationsAndValidate(
+                V2_TEST_DB,
+                13,
+                true,
+                *migrationsFrom(2),
+            ).use { db ->
+                assertLegacyCoreSurvived(db, expectedUndone = 1)
+            }
+    }
+
+    @Test
+    @Throws(IOException::class)
+    fun migratesFromV10ToV13ConvertingBinaryAdFeedback() {
+        helper.createDatabase(V10_TEST_DB, version = 10).use { db ->
+            seedVersion10CoreAndBinaryFeedback(db)
+        }
+
+        helper
+            .runMigrationsAndValidate(
+                V10_TEST_DB,
+                13,
+                true,
+                *migrationsFrom(10),
+            ).use { db ->
+                assertLlmObservationTableWorks(db)
+                assertBackupPriorsAndAutomationAuditTablesWork(db)
+            }
+    }
+
+    @Test
+    @Throws(IOException::class)
+    fun migratesFromV12ToV13PreservingDailyHistoryAndSemanticPrior() {
+        helper.createDatabase(V12_TEST_DB, version = 12).use { db ->
+            db.execSQL(
+                "INSERT INTO daily_insights " +
+                    "(epoch_day, window_start_millis, window_end_millis, total_notifications, " +
+                    "muted_count, generated_at_millis) VALUES (20000, 0, 1, 4, 3, 5)",
+            )
+            db.execSQL(
+                "INSERT INTO semantic_feedback_priors (package_name, intent, count) " +
+                    "VALUES ('com.example.bank', 'SECURITY', 4)",
+            )
+        }
+
+        helper
+            .runMigrationsAndValidate(
+                V12_TEST_DB,
+                13,
+                true,
+                AppDatabase.MIGRATION_12_13,
+            ).use { db ->
+                db
+                    .query(
+                        "SELECT total_notifications, muted_count, rule_breakdown_complete, " +
+                            "monitor_rule_breakdown_complete, app_breakdown_complete, " +
+                            "channel_breakdown_complete FROM daily_insights WHERE epoch_day = 20000",
+                    ).use { cursor ->
+                        assertTrue(cursor.moveToFirst())
+                        assertEquals(4, cursor.getInt(0))
+                        assertEquals(3, cursor.getInt(1))
+                        repeat(4) { index -> assertEquals(0, cursor.getInt(index + 2)) }
+                    }
+                db
+                    .query(
+                        "SELECT count FROM semantic_feedback_priors " +
+                            "WHERE package_name = 'com.example.bank' AND intent = 'SECURITY'",
+                    ).use { cursor ->
+                        assertTrue(cursor.moveToFirst())
+                        assertEquals(4, cursor.getInt(0))
+                    }
+            }
+    }
+
+    private fun seedLegacyCore(
+        db: SupportSQLiteDatabase,
+        includeUndone: Boolean,
+    ) {
+        db.execSQL(
+            "INSERT INTO rules " +
+                "(id, name, enabled, priority, action, snooze_duration_millis, " +
+                "created_at_millis, updated_at_millis) " +
+                "VALUES (1, 'Legacy rule', 1, 7, 'CANCEL', NULL, 100, 100)",
+        )
+        db.execSQL(
+            "INSERT INTO rule_conditions (id, rule_id, type, value, ignore_case, negate) " +
+                "VALUES (1, 1, 'PACKAGE', 'com.example.legacy', 1, 0)",
+        )
+        val undoneColumn = if (includeUndone) ", undone" else ""
+        val undoneValue = if (includeUndone) ", 1" else ""
+        db.execSQL(
+            "INSERT INTO notification_events " +
+                "(id, package_name, category, posted_at_millis, action, matched_rule_id, " +
+                "recorded_at_millis$undoneColumn) " +
+                "VALUES (1, 'com.example.legacy', 'status', 10, 'CANCEL', 1, 20$undoneValue)",
+        )
+    }
+
+    private fun assertLegacyCoreSurvived(
+        db: SupportSQLiteDatabase,
+        expectedUndone: Int,
+    ) {
+        db.query("SELECT name, execution_mode FROM rules WHERE id = 1").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals("Legacy rule", cursor.getString(0))
+            assertEquals("ACTIVE", cursor.getString(1))
+        }
+        db
+            .query(
+                "SELECT package_name, posted_at_millis, undone FROM notification_events WHERE id = 1",
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("com.example.legacy", cursor.getString(0))
+                assertEquals(10L, cursor.getLong(1))
+                assertEquals(expectedUndone, cursor.getInt(2))
+            }
+    }
+
+    private fun seedVersion10CoreAndBinaryFeedback(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "INSERT INTO rules " +
+                "(id, name, enabled, priority, action, snooze_duration_millis, " +
+                "created_at_millis, updated_at_millis) " +
+                "VALUES (1, 'Ads', 1, 5, 'CANCEL', NULL, 100, 100)",
+        )
+        db.execSQL(
+            "INSERT INTO notification_events " +
+                "(id, package_name, ml_category, category, posted_at_millis, action, " +
+                "matched_rule_id, recorded_at_millis, undone) " +
+                "VALUES (1, 'com.example.shop', 'promotion', 'promo', 10, 'CANCEL', 1, 20, 0)",
+        )
+        seedVersion10BinaryFeedback(db)
     }
 
     private fun seedVersion10BinaryFeedback(db: SupportSQLiteDatabase) {
@@ -341,5 +501,26 @@ class MigrationTest {
 
     private companion object {
         const val TEST_DB = "migration-test"
+        const val V1_TEST_DB = "migration-v1-test"
+        const val V2_TEST_DB = "migration-v2-test"
+        const val V10_TEST_DB = "migration-v10-test"
+        const val V12_TEST_DB = "migration-v12-test"
+
+        fun migrationsFrom(version: Int): Array<Migration> =
+            listOf(
+                AppDatabase.MIGRATION_1_2,
+                AppDatabase.MIGRATION_2_3,
+                AppDatabase.MIGRATION_3_4,
+                AppDatabase.MIGRATION_4_5,
+                AppDatabase.MIGRATION_5_6,
+                AppDatabase.MIGRATION_6_7,
+                AppDatabase.MIGRATION_7_8,
+                AppDatabase.MIGRATION_8_9,
+                AppDatabase.MIGRATION_9_10,
+                AppDatabase.MIGRATION_10_11,
+                AppDatabase.MIGRATION_11_12,
+                AppDatabase.MIGRATION_12_13,
+            ).filter { migration -> migration.startVersion >= version }
+                .toTypedArray()
     }
 }

@@ -35,6 +35,7 @@ class DailyInsightRepositoryImplTest {
         channelName: String? = null,
         monitoredAction: StoredRuleAction? = null,
         monitoredRuleId: Long? = null,
+        postedEpochDay: Long? = null,
         postedMinuteOfDay: Int? = null,
     ) = NotificationEventEntity(
         id = id,
@@ -44,6 +45,7 @@ class DailyInsightRepositoryImplTest {
         channelName = channelName,
         category = category,
         postedAtMillis = recordedAtMillis,
+        postedEpochDay = postedEpochDay,
         action = action,
         matchedRuleId = ruleId,
         monitoredAction = monitoredAction,
@@ -177,6 +179,44 @@ class DailyInsightRepositoryImplTest {
             val insight = repository.aggregateAndStore(5, start, end, 1_500, topRules = 5)
 
             assertEquals(listOf(CategoryCount("alarm", 1), CategoryCount("social", 1)), insight.categoryBreakdown)
+        }
+
+    @Test
+    fun `posted epoch day wins while legacy rows fall back to the millisecond window`() =
+        runTest {
+            dao.seedEvents(
+                event(
+                    packageName = "com.target",
+                    category = "msg",
+                    action = StoredRuleAction.KEEP,
+                    ruleId = null,
+                    recordedAtMillis = 500,
+                    postedEpochDay = 5,
+                ),
+                event(
+                    packageName = "com.other",
+                    category = "msg",
+                    action = StoredRuleAction.KEEP,
+                    ruleId = null,
+                    recordedAtMillis = 1_100,
+                    postedEpochDay = 4,
+                ),
+                event(
+                    packageName = "com.legacy",
+                    category = "msg",
+                    action = StoredRuleAction.KEEP,
+                    ruleId = null,
+                    recordedAtMillis = 1_200,
+                ),
+            )
+
+            val insight = repository.aggregateAndStore(5, start, end, 1_500, topRules = 5)
+
+            assertEquals(2, insight.totalNotifications)
+            assertEquals(
+                listOf("com.legacy", "com.target"),
+                insight.appBreakdown.map { it.packageName }.sorted(),
+            )
         }
 
     @Test

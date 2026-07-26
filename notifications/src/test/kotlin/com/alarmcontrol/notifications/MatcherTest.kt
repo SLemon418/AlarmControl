@@ -284,19 +284,46 @@ class MatcherTest {
         val active = rule("active", activeCondition)
         val monitor = rule("monitor", monitorCondition, mode = RuleExecutionMode.MONITOR)
 
-        val trace =
-            matcher.decisionTraces(
+        val evaluation =
+            matcher.evaluateWithTraces(
                 activeSnapshot = alarmNotification,
-                activeDecision = MatchDecision.Matched(active, active.action),
                 monitorSnapshot = alarmNotification,
-                monitorDecision = MatchDecision.Matched(monitor, monitor.action),
+                compiled = matcher.compile(listOf(active, monitor)),
             )
+        val trace = evaluation.decisionTrace
 
         assertEquals(128, trace.size)
+        assertEquals(MatchDecision.Matched(active, active.action), evaluation.activeDecision)
+        assertEquals(MatchDecision.Matched(monitor, monitor.action), evaluation.monitorDecision)
         assertEquals(96, trace.count { it.lane == DecisionTraceLane.ACTIVE })
         assertEquals(32, trace.count { it.lane == DecisionTraceLane.MONITOR })
         assertEquals(DecisionConditionKind.TRUNCATED, trace[95].kind)
         assertEquals(DecisionConditionKind.TRUNCATED, trace.last().kind)
+    }
+
+    @Test
+    fun `evaluation trace contains only the short circuited condition path`() {
+        val condition =
+            Condition.AnyOf(
+                listOf(
+                    Condition.PackageEquals("com.example.clock"),
+                    Condition.TextContains("must not be evaluated"),
+                ),
+            )
+        val active = rule("active", condition)
+
+        val evaluation =
+            matcher.evaluateWithTraces(
+                activeSnapshot = alarmNotification,
+                monitorSnapshot = alarmNotification,
+                compiled = matcher.compile(listOf(active)),
+            )
+
+        assertEquals(MatchDecision.Matched(active, active.action), evaluation.activeDecision)
+        assertEquals(
+            listOf(DecisionConditionKind.ANY_OF, DecisionConditionKind.PACKAGE),
+            evaluation.decisionTrace.map { it.kind },
+        )
     }
 
     @Test
