@@ -2,6 +2,8 @@ package com.alarmcontrol.ui.rules
 
 import com.alarmcontrol.core.filtering.Condition
 import com.alarmcontrol.core.filtering.MAX_CONDITION_VALUE_CHARS
+import com.alarmcontrol.core.filtering.MAX_RULE_CONDITION_DEPTH
+import com.alarmcontrol.core.filtering.MAX_RULE_CONDITION_NODES
 import com.alarmcontrol.core.filtering.NotificationImportance
 import com.alarmcontrol.core.filtering.RateScope
 import com.alarmcontrol.core.filtering.SemanticIntent
@@ -172,6 +174,45 @@ class EditableConditionTest {
     }
 
     @Test
+    fun `condition conversion accepts the maximum depth and rejects one level more`() {
+        assertTrue(nestedNotRoot(MAX_RULE_CONDITION_DEPTH - 2).toConditionOrNull() != null)
+        assertNull(nestedNotRoot(MAX_RULE_CONDITION_DEPTH - 1).toConditionOrNull())
+    }
+
+    @Test
+    fun `condition conversion accepts the node limit and rejects one node more`() {
+        val atLimit =
+            GroupNode(
+                key = 0,
+                anyOf = false,
+                children =
+                    List(MAX_RULE_CONDITION_NODES - 1) { index ->
+                        LeafNode(index.toLong() + 1, LeafKind.PACKAGE, "com.example.$index")
+                    },
+            )
+        val overLimit =
+            atLimit.copy(
+                children =
+                    atLimit.children +
+                        LeafNode(MAX_RULE_CONDITION_NODES.toLong(), LeafKind.PACKAGE, "com.example.extra"),
+            )
+
+        assertEquals(MAX_RULE_CONDITION_NODES, atLimit.nodeCount())
+        assertTrue(atLimit.toConditionOrNull() != null)
+        assertEquals(MAX_RULE_CONDITION_NODES + 1, overLimit.nodeCount())
+        assertNull(overLimit.toConditionOrNull())
+    }
+
+    @Test
+    fun `condition add guards account for depth and remaining node slots`() {
+        assertTrue(canAddLeafCondition(groupDepth = 30, remainingNodes = 1))
+        assertFalse(canAddLeafCondition(groupDepth = 31, remainingNodes = 1))
+        assertTrue(canAddContainerCondition(groupDepth = 29, remainingNodes = 2))
+        assertFalse(canAddContainerCondition(groupDepth = 30, remainingNodes = 2))
+        assertFalse(canAddContainerCondition(groupDepth = 1, remainingNodes = 1))
+    }
+
+    @Test
     fun `movedUp swaps an item with its predecessor and is a no-op at the top`() {
         assertEquals(listOf("b", "a", "c"), listOf("a", "b", "c").movedUp(1))
         assertEquals(listOf("a", "b", "c"), listOf("a", "b", "c").movedUp(0))
@@ -181,5 +222,13 @@ class EditableConditionTest {
     fun `movedDown swaps an item with its successor and is a no-op at the bottom`() {
         assertEquals(listOf("a", "c", "b"), listOf("a", "b", "c").movedDown(1))
         assertEquals(listOf("a", "b", "c"), listOf("a", "b", "c").movedDown(2))
+    }
+
+    private fun nestedNotRoot(notCount: Int): GroupNode {
+        var child: ConditionNode = LeafNode(1, LeafKind.PACKAGE, "com.example")
+        repeat(notCount) { index ->
+            child = NotNode(index.toLong() + 2, child)
+        }
+        return GroupNode(0, anyOf = false, children = listOf(child))
     }
 }

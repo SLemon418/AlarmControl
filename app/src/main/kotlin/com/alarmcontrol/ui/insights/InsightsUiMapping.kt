@@ -33,6 +33,8 @@ internal fun NotificationEvent.toListItem(
         actionLabel = action.eventLabel(),
         action = action.toEventAction(),
         recordedAtMillis = recordedAtMillis,
+        postedAtMillis = postedAtMillis,
+        postedEpochDay = postedEpochDay,
         undone = undone,
         // A kept notification doesn't affect mute statistics, and an excluded row needs no repeat action.
         canUndo = !undone && action != RuleAction.Keep,
@@ -138,7 +140,7 @@ internal fun DailyInsight.toUiModel(
         hours = hourBreakdown.map { HourAnalysisUi(it.hour, it.totalCount, it.silencedCount) },
         semanticIntents =
             semanticBreakdown.map {
-                SemanticAnalysisUi(it.intent.label(), it.count)
+                SemanticAnalysisUi(it.intent.toLabelUiText(), it.count)
             },
         mlClassifiedCount = mlClassifiedCount,
         categoryCorrectionCount = categoryCorrectionCount,
@@ -186,7 +188,7 @@ internal fun InsightsAnalytics.toUiModel(
                 )
             },
         hours = hours.map { HourAnalysisUi(it.hour, it.totalCount, it.silencedCount) },
-        semanticIntents = semanticIntents.map { SemanticAnalysisUi(it.intent.label(), it.count) },
+        semanticIntents = semanticIntents.map { SemanticAnalysisUi(it.intent.toLabelUiText(), it.count) },
         trend =
             trend.map {
                 TrendPointUi(it.startEpochDay, it.endEpochDay, it.totalCount, it.silencedCount)
@@ -226,7 +228,7 @@ internal fun NotificationEventDetail.toUiModel(identity: AppIdentityUi): Notific
 private fun com.alarmcontrol.core.insights.ActionBreakdown.toUiModel(): ActionBreakdownUi =
     ActionBreakdownUi(cancelled, snoozed, loggedOnly, kept)
 
-private fun com.alarmcontrol.core.filtering.SemanticIntent.label(): UiText =
+internal fun com.alarmcontrol.core.filtering.SemanticIntent.toLabelUiText(): UiText =
     uiText(
         when (this) {
             com.alarmcontrol.core.filtering.SemanticIntent.MARKETING -> R.string.semantic_marketing

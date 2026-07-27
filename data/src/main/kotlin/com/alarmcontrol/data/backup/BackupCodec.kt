@@ -5,6 +5,9 @@ import com.alarmcontrol.core.backup.BackupCategoryFeedback
 import com.alarmcontrol.core.backup.BackupData
 import com.alarmcontrol.core.backup.BackupSemanticFeedback
 import com.alarmcontrol.core.filtering.Condition
+import com.alarmcontrol.core.filtering.MAX_RULE_CONDITION_DEPTH
+import com.alarmcontrol.core.filtering.MAX_RULE_CONDITION_NODES
+import com.alarmcontrol.core.filtering.MAX_SAVED_RULES
 import com.alarmcontrol.core.filtering.NotificationImportance
 import com.alarmcontrol.core.filtering.RateScope
 import com.alarmcontrol.core.filtering.Rule
@@ -20,6 +23,8 @@ import com.alarmcontrol.core.insights.HourInsightCount
 import com.alarmcontrol.core.insights.RuleTriggerCount
 import com.alarmcontrol.core.insights.SemanticIntentCount
 import com.alarmcontrol.core.profile.FilteringProfile
+import com.alarmcontrol.core.profile.MAX_PROFILE_RULE_IDS
+import com.alarmcontrol.core.profile.MAX_SAVED_PROFILES
 import com.alarmcontrol.core.settings.RetentionDefaults
 import com.alarmcontrol.core.settings.SemanticAnalysisScope
 import com.alarmcontrol.core.settings.SettingsSnapshot
@@ -49,6 +54,7 @@ object BackupCodec {
             .toString(PRETTY_INDENT)
 
     fun decode(serialized: String): BackupData {
+        serialized.requireSafeJsonNesting()
         val root = JSONObject(serialized)
         val version = root.getInt("version")
         require(version in LEGACY_FORMAT_VERSION..FORMAT_VERSION) {
@@ -58,32 +64,35 @@ object BackupCodec {
             root
                 .optJSONArray("adFeedback")
                 .orEmpty()
-                .objects()
+                .objects(MAX_FEEDBACK_ROWS)
                 .map { it.toAdFeedback() }
         return BackupData(
-            rules = root.getJSONArray("rules").objects().map { it.toRule() },
+            rules = root.getJSONArray("rules").objects(MAX_SAVED_RULES).map { it.toRule() },
             dailyInsights =
                 root
                     .optJSONArray("dailyInsights")
                     .orEmpty()
-                    .objects()
+                    .objects(MAX_INSIGHT_ROWS)
                     .map { it.toDailyInsight() },
             profiles =
                 root
                     .optJSONArray("profiles")
                     .orEmpty()
-                    .objects()
+                    .objects(MAX_SAVED_PROFILES)
                     .map { it.toProfile() },
             settings = root.optJSONObject("settings")?.toSettings(),
             categoryFeedback =
                 root
                     .optJSONArray("categoryFeedback")
                     .orEmpty()
-                    .objects()
+                    .objects(MAX_FEEDBACK_ROWS)
                     .map { it.toCategoryFeedback() },
             adFeedback = legacyAdFeedback,
             semanticFeedback =
-                root.optJSONArray("semanticFeedback")?.objects()?.map { it.toSemanticFeedback() }
+                root
+                    .optJSONArray("semanticFeedback")
+                    ?.objects(MAX_FEEDBACK_ROWS)
+                    ?.map { it.toSemanticFeedback() }
                     ?: legacyAdFeedback.map {
                         BackupSemanticFeedback(
                             packageName = it.packageName,
@@ -110,7 +119,7 @@ object BackupCodec {
         FilteringProfile(
             id = getString("id"),
             name = getString("name"),
-            ruleIds = getJSONArray("ruleIds").strings().toSet(),
+            ruleIds = getJSONArray("ruleIds").strings(MAX_PROFILE_RULE_IDS).toSet(),
         )
 
     // ---- rules ----
@@ -189,7 +198,7 @@ object BackupCodec {
         depth: Int,
         budget: ConditionDecodeBudget,
     ): Condition {
-        require(depth <= MAX_CONDITION_DEPTH) { "Backup condition tree is too deep" }
+        require(depth <= MAX_RULE_CONDITION_DEPTH) { "Backup condition tree is too deep" }
         budget.consume()
         return when (val type = getString("type")) {
             "PACKAGE" -> Condition.PackageEquals(getString("value"))
@@ -223,7 +232,7 @@ object BackupCodec {
         parentDepth: Int,
         budget: ConditionDecodeBudget,
     ): List<Condition> {
-        require(length() in 1..MAX_CONDITION_NODES) { "Invalid backup condition group size" }
+        require(length() in 1..MAX_RULE_CONDITION_NODES) { "Invalid backup condition group size" }
         return (0 until length()).map { getJSONObject(it).toCondition(parentDepth + 1, budget) }
     }
 
@@ -291,16 +300,16 @@ object BackupCodec {
             totalNotifications = getInt("totalNotifications"),
             mutedCount = getInt("mutedCount"),
             topRules =
-                getJSONArray("topRules").objects().map {
+                getJSONArray("topRules").objects(MAX_BREAKDOWN_ROWS).map {
                     RuleTriggerCount(it.getString("ruleId"), it.getInt("count"))
                 },
             topMonitoredRules =
                 optJSONArray("topMonitoredRules")
                     .orEmpty()
-                    .objects()
+                    .objects(MAX_BREAKDOWN_ROWS)
                     .map { RuleTriggerCount(it.getString("ruleId"), it.getInt("count")) },
             categoryBreakdown =
-                getJSONArray("categories").objects().map {
+                getJSONArray("categories").objects(MAX_BREAKDOWN_ROWS).map {
                     CategoryCount(if (it.isNull("category")) null else it.getString("category"), it.getInt("count"))
                 },
             generatedAtMillis = getLong("generatedAtMillis"),
@@ -321,12 +330,12 @@ object BackupCodec {
             channelBreakdown =
                 optJSONArray("channels")
                     .orEmpty()
-                    .objects()
+                    .objects(MAX_BREAKDOWN_ROWS)
                     .map { it.toChannelCount() },
             appBreakdown =
                 optJSONArray("apps")
                     .orEmpty()
-                    .objects()
+                    .objects(MAX_BREAKDOWN_ROWS)
                     .map {
                         AppInsightCount(
                             packageName = it.getString("packageName"),
@@ -337,7 +346,7 @@ object BackupCodec {
             hourBreakdown =
                 optJSONArray("hours")
                     .orEmpty()
-                    .objects()
+                    .objects(HOURS_PER_DAY)
                     .map {
                         HourInsightCount(
                             hour = it.getInt("hour"),
@@ -348,7 +357,7 @@ object BackupCodec {
             semanticBreakdown =
                 optJSONArray("semanticIntents")
                     .orEmpty()
-                    .objects()
+                    .objects(SEMANTIC_INTENT_COUNT)
                     .map {
                         SemanticIntentCount(
                             intent = SemanticIntent.valueOf(it.getString("intent")),
@@ -379,7 +388,7 @@ object BackupCodec {
         )
 
     private class ConditionDecodeBudget {
-        private var remaining = MAX_CONDITION_NODES
+        private var remaining = MAX_RULE_CONDITION_NODES
 
         fun consume() {
             require(remaining > 0) { "Backup condition tree is too large" }
@@ -387,13 +396,22 @@ object BackupCodec {
         }
     }
 
-    private const val MAX_CONDITION_DEPTH = 32
-    private const val MAX_CONDITION_NODES = 1_000
+    private const val MAX_INSIGHT_ROWS = 10_000
+    private const val MAX_FEEDBACK_ROWS = 25_000
+    private const val MAX_BREAKDOWN_ROWS = 1_000
+    private const val HOURS_PER_DAY = 24
+    private const val SEMANTIC_INTENT_COUNT = 7
 }
 
-private fun JSONArray.objects(): List<JSONObject> = (0 until length()).map { getJSONObject(it) }
+private fun JSONArray.objects(max: Int): List<JSONObject> {
+    require(length() <= max) { "Backup array is too large" }
+    return (0 until length()).map { getJSONObject(it) }
+}
 
-private fun JSONArray.strings(): List<String> = (0 until length()).map { getString(it) }
+private fun JSONArray.strings(max: Int): List<String> {
+    require(length() <= max) { "Backup array is too large" }
+    return (0 until length()).map { getString(it) }
+}
 
 private fun JSONArray?.orEmpty(): JSONArray = this ?: JSONArray()
 

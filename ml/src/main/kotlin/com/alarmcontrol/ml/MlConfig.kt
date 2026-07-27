@@ -26,6 +26,18 @@ internal object MlConfig {
      */
     const val LLM_MODEL_FILE = "llm/ad-context-model.task"
 
-    /** Upper bound on tokens the LLM may emit per analysis; keeps latency/memory bounded on-device. */
-    const val LLM_MAX_TOKENS = 128
+    /**
+     * Combined prompt + output context. This must match the KV-cache length used by
+     * `ml/llm-training/convert_to_litert.py`; MediaPipe's `maxTokens` is not an output-only limit.
+     */
+    const val LLM_CONTEXT_TOKENS = 4_096
+
+    /** Reserved inside [LLM_CONTEXT_TOKENS] for the compact JSON response and stop token. */
+    const val LLM_OUTPUT_TOKEN_RESERVE = 128
+
+    /** Greedy decoding keeps the classifier's strict JSON output deterministic. */
+    const val LLM_TOP_K = 1
+    const val LLM_TOP_P = 1.0f
+    const val LLM_TEMPERATURE = 0.0f
+    const val LLM_RANDOM_SEED = 20_260_727
 }

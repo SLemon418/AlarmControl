@@ -4,6 +4,8 @@ import com.alarmcontrol.core.feedback.AdFeedbackCounts
 import com.alarmcontrol.core.feedback.AdFeedbackRepository
 import com.alarmcontrol.core.feedback.AdObservation
 import com.alarmcontrol.core.filtering.SemanticIntent
+import com.alarmcontrol.data.db.TransactionRunner
+import com.alarmcontrol.data.db.dao.DailyInsightDao
 import com.alarmcontrol.data.db.dao.LlmObservationDao
 import com.alarmcontrol.data.mapper.toDomain
 import com.alarmcontrol.data.mapper.toEntity
@@ -15,6 +17,8 @@ class AdFeedbackRepositoryImpl
     @Inject
     constructor(
         private val dao: LlmObservationDao,
+        private val dailyInsightDao: DailyInsightDao,
+        private val transactionRunner: TransactionRunner,
     ) : AdFeedbackRepository {
         override suspend fun recordObservation(observation: AdObservation) {
             dao.upsert(observation.toEntity())
@@ -25,7 +29,10 @@ class AdFeedbackRepositoryImpl
             correctedIntent: SemanticIntent,
         ) {
             notificationEventId.toLongOrNull()?.let {
-                dao.setIntentCorrection(it, correctedIntent.name, correctedIntent.isAdvertisement)
+                transactionRunner.run {
+                    val changed = dao.setIntentCorrection(it, correctedIntent.name, correctedIntent.isAdvertisement)
+                    if (changed > 0) dailyInsightDao.deleteContainingEvent(it)
+                }
             }
         }
 

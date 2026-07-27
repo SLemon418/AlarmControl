@@ -1,7 +1,11 @@
 package com.alarmcontrol.service
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -9,6 +13,9 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class NotificationProcessingCoordinatorTest {
@@ -83,6 +90,50 @@ class NotificationProcessingCoordinatorTest {
         }
 
     @Test
+    fun `same key submission cannot overtake an in progress platform action`() {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val coordinator = NotificationProcessingCoordinator(scope)
+        val oldActionStarted = CountDownLatch(1)
+        val releaseOldAction = CountDownLatch(1)
+        val submitReturned = CountDownLatch(1)
+        val newActionCommitted = CountDownLatch(1)
+
+        try {
+            coordinator.submit("same", freshness = 1) { token ->
+                token.commit {
+                    oldActionStarted.countDown()
+                    check(releaseOldAction.await(TEST_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+                }
+            }
+            assertTrue(oldActionStarted.await(TEST_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+
+            val submitThread =
+                thread(name = "same-key-submit") {
+                    coordinator.submit("same", freshness = 2) { token ->
+                        token.commit(newActionCommitted::countDown)
+                    }
+                    submitReturned.countDown()
+                }
+            assertTrue(
+                awaitThreadBlockedOrReturned(
+                    thread = submitThread,
+                    returned = submitReturned,
+                ),
+            )
+            assertEquals(Thread.State.BLOCKED, submitThread.state)
+
+            releaseOldAction.countDown()
+            assertTrue(submitReturned.await(TEST_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+            assertTrue(newActionCommitted.await(TEST_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+            submitThread.join(TimeUnit.SECONDS.toMillis(TEST_TIMEOUT_SECONDS))
+            assertFalse(submitThread.isAlive)
+        } finally {
+            releaseOldAction.countDown()
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun `disconnect invalidates old work while allowing work after reconnect`() =
         runTest {
             val coordinator = NotificationProcessingCoordinator(this)
@@ -136,6 +187,95 @@ class NotificationProcessingCoordinatorTest {
         }
 
     @Test
+    fun `late callback for an older post cannot evict fresher waiting work`() =
+        runTest {
+            val coordinator =
+                NotificationProcessingCoordinator(
+                    scope = this,
+                    maxTrackedWork = 3,
+                    maxConcurrentWork = 1,
+                )
+            val runningStarted = CompletableDeferred<Unit>()
+            val releaseRunning = CompletableDeferred<Unit>()
+            val committed = mutableListOf<String>()
+
+            coordinator.submit("running", freshness = 0) { token ->
+                runningStarted.complete(Unit)
+                releaseRunning.await()
+                token.commit { committed += "running" }
+            }
+            runningStarted.await()
+            coordinator.submit("newest", freshness = 30) { token ->
+                token.commit { committed += "newest" }
+            }
+            coordinator.submit("newer", freshness = 20) { token ->
+                token.commit { committed += "newer" }
+            }
+            coordinator.submit("late-old", freshness = 10) { token ->
+                token.commit { committed += "late-old" }
+            }
+
+            releaseRunning.complete(Unit)
+            advanceUntilIdle()
+
+            assertEquals(listOf("running", "newest", "newer"), committed)
+            assertEquals(1L, coordinator.droppedSubmissionCount)
+        }
+
+    @Test
+    fun `older callback for the same key cannot replace a newer post`() =
+        runTest {
+            val coordinator = NotificationProcessingCoordinator(this)
+            val newerStarted = CompletableDeferred<Unit>()
+            val releaseNewer = CompletableDeferred<Unit>()
+            val committed = mutableListOf<String>()
+
+            coordinator.submit("same", freshness = 20) { token ->
+                newerStarted.complete(Unit)
+                releaseNewer.await()
+                token.commit { committed += "newer" }
+            }
+            newerStarted.await()
+            coordinator.submit("same", freshness = 10) { token ->
+                token.commit { committed += "older" }
+            }
+            releaseNewer.complete(Unit)
+            advanceUntilIdle()
+
+            assertEquals(listOf("newer"), committed)
+            assertEquals(1L, coordinator.droppedSubmissionCount)
+        }
+
+    @Test
+    fun `overflow never evicts work that is already running`() =
+        runTest {
+            val coordinator =
+                NotificationProcessingCoordinator(
+                    scope = this,
+                    maxTrackedWork = 1,
+                    maxConcurrentWork = 1,
+                )
+            val runningStarted = CompletableDeferred<Unit>()
+            val releaseRunning = CompletableDeferred<Unit>()
+            val committed = mutableListOf<String>()
+
+            coordinator.submit("running", freshness = 1) { token ->
+                runningStarted.complete(Unit)
+                releaseRunning.await()
+                token.commit { committed += "running" }
+            }
+            runningStarted.await()
+            coordinator.submit("overflow", freshness = 2) { token ->
+                token.commit { committed += "overflow" }
+            }
+            releaseRunning.complete(Unit)
+            advanceUntilIdle()
+
+            assertEquals(listOf("running"), committed)
+            assertEquals(1L, coordinator.droppedSubmissionCount)
+        }
+
+    @Test
     fun `only the configured number of distinct keys run concurrently`() =
         runTest {
             val coordinator =
@@ -185,4 +325,23 @@ class NotificationProcessingCoordinatorTest {
 
             assertFalse(committed)
         }
+
+    private fun awaitThreadBlockedOrReturned(
+        thread: Thread,
+        returned: CountDownLatch,
+    ): Boolean {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(TEST_TIMEOUT_SECONDS)
+        while (
+            thread.state != Thread.State.BLOCKED &&
+            returned.count > 0 &&
+            System.nanoTime() < deadline
+        ) {
+            Thread.yield()
+        }
+        return thread.state == Thread.State.BLOCKED || returned.count == 0L
+    }
+
+    private companion object {
+        const val TEST_TIMEOUT_SECONDS = 5L
+    }
 }

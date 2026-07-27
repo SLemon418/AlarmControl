@@ -1,7 +1,6 @@
 package com.alarmcontrol.ml.inference
 
 import android.content.Context
-import com.alarmcontrol.core.result.runCatchingPreservingCancellation
 import org.tensorflow.lite.Interpreter
 import java.io.FileInputStream
 import java.nio.channels.FileChannel
@@ -21,22 +20,30 @@ internal class BundledTfLiteBackend(
     private val outputSize: Int,
 ) : InferenceBackend {
     private val interpreter: Interpreter? by lazy { loadInterpreter() }
+    private var disabled = false
 
     @Synchronized
     override fun run(features: FloatArray): FloatArray? {
+        if (disabled) return null
         val model = interpreter ?: return null
         return try {
             val input = arrayOf(features)
             val output = Array(1) { FloatArray(outputSize) }
             model.run(input, output)
             output[0]
+        } catch (_: LinkageError) {
+            disable(model)
+            null
+        } catch (_: OutOfMemoryError) {
+            disable(model)
+            null
         } catch (_: Exception) {
             null
         }
     }
 
     private fun loadInterpreter(): Interpreter? =
-        runCatchingPreservingCancellation {
+        try {
             context.assets.openFd(modelAsset).use { descriptor ->
                 FileInputStream(descriptor.fileDescriptor).use { stream ->
                     val model =
@@ -48,5 +55,24 @@ internal class BundledTfLiteBackend(
                     Interpreter(model)
                 }
             }
-        }.getOrNull()
+        } catch (_: LinkageError) {
+            null
+        } catch (_: OutOfMemoryError) {
+            null
+        } catch (_: Exception) {
+            null
+        }
+
+    private fun disable(model: Interpreter) {
+        disabled = true
+        try {
+            model.close()
+        } catch (_: LinkageError) {
+            // The backend is already disabled; native teardown failure must not escape.
+        } catch (_: OutOfMemoryError) {
+            // The backend is already disabled; retain rule-only fallback.
+        } catch (_: Exception) {
+            // The backend is already disabled; retain rule-only fallback.
+        }
+    }
 }

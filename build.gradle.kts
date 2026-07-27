@@ -31,6 +31,44 @@ val androidLintAnalysisLock =
         maxParallelUsages.set(1)
     }
 
+val verifyCiActionPins by tasks.registering {
+    group = "verification"
+    description = "Fails when a remote GitHub Action or container is not immutably pinned."
+
+    val githubDirectory = layout.projectDirectory.dir(".github")
+    inputs.dir(githubDirectory)
+
+    doLast {
+        val usesPattern = Regex("""(?m)^\s*(?:-\s*)?uses:\s+([^\s#]+)""")
+        val immutableAction = Regex("""[^@\s]+@[0-9a-fA-F]{40}""")
+        val immutableContainer = Regex("""docker://[^@\s]+@sha256:[0-9a-fA-F]{64}""")
+        val yamlFiles =
+            githubDirectory.asFile
+                .walkTopDown()
+                .filter { file -> file.isFile && file.extension in setOf("yml", "yaml") }
+                .toList()
+        check(yamlFiles.any { file -> file.parentFile.name == "workflows" }) {
+            "No GitHub Actions workflows were found"
+        }
+        val unpinned =
+            yamlFiles.flatMap { yaml ->
+                usesPattern
+                    .findAll(yaml.readText())
+                    .map { match -> match.groupValues[1] }
+                    .filterNot { action ->
+                        action.startsWith("./") ||
+                            immutableContainer.matches(action) ||
+                            immutableAction.matches(action)
+                    }.map { action -> "${yaml.relativeTo(githubDirectory.asFile)}:$action" }
+                    .toList()
+            }
+        check(unpinned.isEmpty()) {
+            "GitHub Actions must use 40-character commit SHAs and containers must use SHA-256 digests: " +
+                unpinned.joinToString()
+        }
+    }
+}
+
 // Code quality is applied to every module from here so the rules are uniform and live in one place.
 // Both plugins auto-wire into `check` (and therefore `build`), so `./gradlew build` enforces them.
 subprojects {
@@ -53,5 +91,9 @@ subprojects {
         if (name.startsWith("lintAnalyze") || name.startsWith("lintVitalAnalyze")) {
             usesService(androidLintAnalysisLock)
         }
+    }
+
+    tasks.matching { it.name == "check" }.configureEach {
+        dependsOn(rootProject.tasks.named("verifyCiActionPins"))
     }
 }

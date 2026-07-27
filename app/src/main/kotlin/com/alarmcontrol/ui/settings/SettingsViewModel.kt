@@ -1,5 +1,6 @@
 package com.alarmcontrol.ui.settings
 
+import android.content.ClipboardManager
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
@@ -14,6 +15,7 @@ import com.alarmcontrol.core.backup.BackupSummary
 import com.alarmcontrol.core.backup.RestoreMode
 import com.alarmcontrol.core.backup.RestoreOptions
 import com.alarmcontrol.core.coroutines.AppDispatcher
+import com.alarmcontrol.core.coroutines.ApplicationScope
 import com.alarmcontrol.core.coroutines.Dispatcher
 import com.alarmcontrol.core.filtering.NotificationHistoryRepository
 import com.alarmcontrol.core.privacy.LocalDataRepository
@@ -23,23 +25,30 @@ import com.alarmcontrol.core.settings.SemanticAnalysisScope
 import com.alarmcontrol.core.settings.SettingsRepository
 import com.alarmcontrol.ml.llm.LlmFailure
 import com.alarmcontrol.ml.llm.LlmInitState
+import com.alarmcontrol.ml.llm.LlmModelInfo
 import com.alarmcontrol.ml.llm.OnDeviceLlmManager
 import com.alarmcontrol.service.AppHealthProvider
 import com.alarmcontrol.service.AppHealthSnapshot
 import com.alarmcontrol.ui.NotificationAccessUiState
 import com.alarmcontrol.ui.UiText
 import com.alarmcontrol.ui.app.AppIdentityResolver
+import com.alarmcontrol.ui.privacy.copySensitiveText
 import com.alarmcontrol.ui.uiText
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 
 // One public method per user intent keeps the screen's UDF callback surface explicit.
@@ -58,10 +67,14 @@ class SettingsViewModel
         private val appIdentityResolver: AppIdentityResolver,
         @ApplicationContext private val appContext: Context,
         @Dispatcher(AppDispatcher.IO) private val ioDispatcher: CoroutineDispatcher,
+        @ApplicationScope private val applicationScope: CoroutineScope,
     ) : ViewModel() {
         private val messages = MutableStateFlow<UiText?>(null)
         private val backupPreview = MutableStateFlow<BackupPreviewUi?>(null)
+        private val settingsMutationMutex = Mutex()
+        private val backupRestoreLock = Any()
         private var pendingRestore: PendingRestore? = null
+        private val backupImportGeneration = AtomicLong()
         private val appHealth = MutableStateFlow<AppHealthSnapshot?>(null)
 
         private val storedSettings =
@@ -95,25 +108,26 @@ class SettingsViewModel
                         settingsRepository.contentExcludedPackages,
                         notificationHistoryRepository.observeSources(CONTENT_SOURCE_LIMIT),
                     ) { enabled, excludedPackages, sources ->
+                        val sourcesByPackage = sources.groupBy { it.packageName }
                         ContentSettings(
                             enabled = enabled,
                             excludedPackages = excludedPackages,
                             sources =
-                                (sources.groupBy { it.packageName }.keys + excludedPackages)
+                                (sourcesByPackage.keys + excludedPackages)
                                     .map { packageName ->
                                         ContentSourceAppUi(
                                             packageName = packageName,
                                             appName = appIdentityResolver.resolve(packageName).label,
                                             excluded = packageName in excludedPackages,
                                         ) to
-                                            sources
-                                                .filter { it.packageName == packageName }
+                                            sourcesByPackage[packageName]
+                                                .orEmpty()
                                                 .maxOfOrNull { it.lastSeenMillis }
                                                 .orDefaultTimestamp()
                                     }.sortedByDescending { it.second }
                                     .map(Pair<ContentSourceAppUi, Long>::first),
                         )
-                    }
+                    }.flowOn(ioDispatcher)
                 combine(
                     generalSettings,
                     automationSettings,
@@ -143,15 +157,19 @@ class SettingsViewModel
                 HealthAndAudit(health, audit.map(AutomationAuditEntry::toUiModel))
             }
 
+        private val llmRuntime =
+            combine(llmManager.initState, llmManager.modelInfo, ::LlmRuntime)
+
         val uiState: StateFlow<SettingsUiState> =
             combine(
                 storedSettings,
-                llmManager.initState,
+                llmRuntime,
                 messages,
                 healthAndAudit,
                 backupPreview,
-            ) { settings, llmState, message, healthAndAudit, preview ->
+            ) { settings, llmRuntime, message, healthAndAudit, preview ->
                 val health = healthAndAudit.health
+                val llmState = llmRuntime.state
                 SettingsUiState(
                     filteringEnabled = settings.filtering,
                     externalAutomationEnabled = settings.automation,
@@ -170,6 +188,8 @@ class SettingsViewModel
                     llmModelCopiedBytes = (llmState as? LlmInitState.Installing)?.copiedBytes ?: 0,
                     llmModelTotalBytes = (llmState as? LlmInitState.Installing)?.totalBytes,
                     llmModelError = (llmState as? LlmInitState.Unavailable)?.failure?.toUiError(),
+                    llmModelSha256 = llmRuntime.info?.sha256,
+                    llmModelSizeBytes = llmRuntime.info?.sizeBytes,
                     notificationAccessGranted = health?.notificationAccessGranted == true,
                     notificationAccessState =
                         when (health?.notificationAccessGranted) {
@@ -193,6 +213,25 @@ class SettingsViewModel
 
         fun rotateExternalAutomationToken() {
             launchSettingUpdate { settingsRepository.rotateExternalAutomationToken() }
+        }
+
+        /** Keeps delayed token removal alive when the Settings destination leaves composition. */
+        fun copyAutomationToken(token: String) {
+            if (token.isBlank()) return
+            appContext
+                .getSystemService(ClipboardManager::class.java)
+                ?.let { clipboard ->
+                    if (
+                        !copySensitiveText(
+                            clipboard = clipboard,
+                            label = appContext.getString(R.string.settings_automation_token),
+                            value = token,
+                            scope = applicationScope,
+                        )
+                    ) {
+                        messages.value = uiText(R.string.message_clipboard_unavailable)
+                    }
+                }
         }
 
         fun setFilteringEnabled(enabled: Boolean) {
@@ -273,33 +312,38 @@ class SettingsViewModel
 
         fun clearAllData() {
             viewModelScope.launch(ioDispatcher) {
-                val failures = mutableListOf<Throwable>()
+                settingsMutationMutex.withLock {
+                    val failures = mutableListOf<Throwable>()
 
-                suspend fun attempt(block: suspend () -> Unit) {
-                    runCatchingPreservingCancellation { block() }.onFailure(failures::add)
-                }
+                    suspend fun attempt(block: suspend () -> Unit) {
+                        runCatchingPreservingCancellation { block() }.onFailure(failures::add)
+                    }
 
-                // Disable future sensitive capture/entry points before deleting existing state.
-                attempt { settingsRepository.setNotificationContentStorageEnabled(false) }
-                attempt { settingsRepository.setLlmAutoActionsEnabled(false) }
-                attempt { settingsRepository.setLlmAnalysisEnabled(false) }
-                attempt { settingsRepository.setExternalAutomationEnabled(false) }
-                attempt { llmManager.close() }
-                attempt {
-                    when (val removal = llmManager.removeModel()) {
-                        is DataResult.Failure -> throw removal.throwable
-                        DataResult.Loading -> error("Model removal is busy")
-                        is DataResult.Success -> Unit
+                    // Disable every side-effecting entry point before deleting independent stores.
+                    // Keeping filtering off is essential when the database clear fails and old
+                    // cancel/snooze rules survive.
+                    attempt { settingsRepository.setFilteringEnabled(false) }
+                    attempt { settingsRepository.setNotificationContentStorageEnabled(false) }
+                    attempt { settingsRepository.setLlmAutoActionsEnabled(false) }
+                    attempt { settingsRepository.setLlmAnalysisEnabled(false) }
+                    attempt { settingsRepository.setExternalAutomationEnabled(false) }
+                    attempt { llmManager.close() }
+                    attempt {
+                        when (val removal = llmManager.removeModel()) {
+                            is DataResult.Failure -> throw removal.throwable
+                            DataResult.Loading -> error("Model removal is busy")
+                            is DataResult.Success -> Unit
+                        }
                     }
+                    attempt { localDataRepository.clearAllDatabaseData() }
+                    attempt { settingsRepository.reset() }
+                    messages.value =
+                        if (failures.isEmpty()) {
+                            uiText(R.string.message_clear_all_done)
+                        } else {
+                            uiText(R.string.message_clear_failed)
+                        }
                 }
-                attempt { localDataRepository.clearAllDatabaseData() }
-                attempt { settingsRepository.reset() }
-                messages.value =
-                    if (failures.isEmpty()) {
-                        uiText(R.string.message_clear_all_done)
-                    } else {
-                        uiText(R.string.message_clear_failed)
-                    }
             }
         }
 
@@ -308,7 +352,9 @@ class SettingsViewModel
                 messages.value =
                     when (llmManager.removeModel()) {
                         is DataResult.Success -> {
-                            settingsRepository.setLlmAnalysisEnabled(false)
+                            settingsMutationMutex.withLock {
+                                settingsRepository.setLlmAnalysisEnabled(false)
+                            }
                             uiText(R.string.message_model_removed)
                         }
                         is DataResult.Failure -> uiText(R.string.message_model_remove_failed)
@@ -354,7 +400,7 @@ class SettingsViewModel
                                     passphrase = passphrase?.takeIf { it.isNotEmpty() },
                                     includeLearningFeedback = includeLearningFeedback,
                                 )
-                            appContext.contentResolver.openOutputStream(uri)?.use { it.write(json.toByteArray()) }
+                            appContext.contentResolver.openOutputStream(uri)?.use { it.writeBackupText(json) }
                                 ?: error("Backup destination unavailable")
                         }.fold(
                             onSuccess = { uiText(R.string.message_backup_exported) },
@@ -371,8 +417,10 @@ class SettingsViewModel
             uri: Uri,
             passphrase: CharArray?,
         ) {
+            val generation = beginBackupImport()
             viewModelScope.launch(ioDispatcher) {
                 val retainedPassphrase = passphrase?.takeIf { it.isNotEmpty() }?.copyOf()
+                var retainedByPendingRestore = false
                 try {
                     val read =
                         runCatchingPreservingCancellation {
@@ -381,54 +429,77 @@ class SettingsViewModel
                                 ?.use { it.readBackupText() }
                                 ?: error("Backup source unavailable")
                         }
+                    if (generation != backupImportGeneration.get()) {
+                        return@launch
+                    }
                     read.fold(
                         onSuccess = { text ->
-                            when (val result = backupRepository.preview(text, retainedPassphrase)) {
+                            when (val result = previewBackup(text, retainedPassphrase)) {
                                 is DataResult.Success -> {
-                                    clearPendingRestore()
-                                    pendingRestore = PendingRestore(text, retainedPassphrase)
-                                    backupPreview.value = result.data.toUiModel()
+                                    retainedByPendingRestore =
+                                        storePendingRestoreIfCurrent(
+                                            generation = generation,
+                                            restore = PendingRestore(text, retainedPassphrase),
+                                            preview = result.data.toUiModel(),
+                                        )
                                 }
                                 is DataResult.Failure -> {
-                                    retainedPassphrase?.fill('\u0000')
-                                    messages.value = uiText(R.string.message_backup_restore_failed)
+                                    if (generation == backupImportGeneration.get()) {
+                                        messages.value = uiText(R.string.message_backup_restore_failed)
+                                    }
                                 }
-                                DataResult.Loading -> messages.value = uiText(R.string.message_backup_restoring)
+                                DataResult.Loading -> {
+                                    if (generation == backupImportGeneration.get()) {
+                                        messages.value = uiText(R.string.message_backup_restoring)
+                                    }
+                                }
                             }
                         },
                         onFailure = {
-                            retainedPassphrase?.fill('\u0000')
-                            messages.value = uiText(R.string.message_backup_read_failed)
+                            if (generation == backupImportGeneration.get()) {
+                                messages.value = uiText(R.string.message_backup_read_failed)
+                            }
                         },
                     )
                 } finally {
+                    if (!retainedByPendingRestore) retainedPassphrase?.fill('\u0000')
                     passphrase?.fill('\u0000')
                 }
             }
         }
 
         fun updateRestoreSelection(selection: RestoreSelectionUi) {
-            backupPreview.value = backupPreview.value?.copy(selection = selection)
+            synchronized(backupRestoreLock) {
+                backupPreview.value =
+                    backupPreview.value?.let { preview ->
+                        preview.copy(
+                            selection =
+                                selection.copy(
+                                    learningFeedback =
+                                        selection.learningFeedback &&
+                                            preview.canRestoreLearningFeedback,
+                                ),
+                        )
+                    }
+            }
         }
 
         fun cancelRestore() {
-            clearPendingRestore()
+            invalidateBackupImport()
         }
 
         fun confirmRestore() {
-            val pending = pendingRestore ?: return
-            val preview = backupPreview.value ?: return
-            if (!preview.selection.hasSelection) return
-            pendingRestore = null
-            backupPreview.value = null
+            val (pending, preview) = takePendingRestore() ?: return
             viewModelScope.launch(ioDispatcher) {
                 try {
                     val result =
-                        backupRepository.restore(
-                            serialized = pending.serialized,
-                            passphrase = pending.passphrase,
-                            options = preview.selection.toDomain(),
-                        )
+                        settingsMutationMutex.withLock {
+                            backupRepository.restore(
+                                serialized = pending.serialized,
+                                passphrase = pending.passphrase,
+                                options = preview.selection.toDomain(),
+                            )
+                        }
                     messages.value = result.restoreMessage()
                     if (result is DataResult.Success && result.data.settingsRestored) {
                         if (settingsRepository.llmAnalysisEnabled.first()) {
@@ -448,20 +519,69 @@ class SettingsViewModel
         }
 
         override fun onCleared() {
-            clearPendingRestore()
+            invalidateBackupImport()
             super.onCleared()
         }
 
-        private fun clearPendingRestore() {
+        private fun clearPendingRestoreLocked() {
             pendingRestore?.passphrase?.fill('\u0000')
             pendingRestore = null
             backupPreview.value = null
         }
 
+        private fun beginBackupImport(): Long =
+            synchronized(backupRestoreLock) {
+                val generation = backupImportGeneration.incrementAndGet()
+                clearPendingRestoreLocked()
+                generation
+            }
+
+        private fun invalidateBackupImport() {
+            synchronized(backupRestoreLock) {
+                backupImportGeneration.incrementAndGet()
+                clearPendingRestoreLocked()
+            }
+        }
+
+        private fun storePendingRestoreIfCurrent(
+            generation: Long,
+            restore: PendingRestore,
+            preview: BackupPreviewUi,
+        ): Boolean =
+            synchronized(backupRestoreLock) {
+                if (generation != backupImportGeneration.get()) {
+                    false
+                } else {
+                    pendingRestore = restore
+                    backupPreview.value = preview
+                    true
+                }
+            }
+
+        private fun takePendingRestore(): Pair<PendingRestore, BackupPreviewUi>? =
+            synchronized(backupRestoreLock) {
+                val pending = pendingRestore ?: return@synchronized null
+                val preview = backupPreview.value ?: return@synchronized null
+                if (!preview.selection.hasSelection) return@synchronized null
+                pendingRestore = null
+                backupPreview.value = null
+                pending to preview
+            }
+
+        private suspend fun previewBackup(
+            serialized: String,
+            passphrase: CharArray?,
+        ): DataResult<BackupPreview> =
+            runCatchingPreservingCancellation {
+                backupRepository.preview(serialized, passphrase)
+            }.getOrElse { error -> DataResult.Failure(error) }
+
         private fun launchSettingUpdate(block: suspend () -> Unit) {
             viewModelScope.launch(ioDispatcher) {
-                runCatchingPreservingCancellation { block() }
-                    .onFailure { messages.value = uiText(R.string.message_setting_update_failed) }
+                settingsMutationMutex.withLock {
+                    runCatchingPreservingCancellation { block() }
+                        .onFailure { messages.value = uiText(R.string.message_setting_update_failed) }
+                }
             }
         }
 
@@ -470,9 +590,11 @@ class SettingsViewModel
             block: suspend () -> Unit,
         ) {
             viewModelScope.launch(ioDispatcher) {
-                runCatchingPreservingCancellation { block() }
-                    .onSuccess { messages.value = uiText(successMessage) }
-                    .onFailure { messages.value = uiText(R.string.message_clear_failed) }
+                settingsMutationMutex.withLock {
+                    runCatchingPreservingCancellation { block() }
+                        .onSuccess { messages.value = uiText(successMessage) }
+                        .onFailure { messages.value = uiText(R.string.message_clear_failed) }
+                }
             }
         }
 
@@ -528,6 +650,11 @@ class SettingsViewModel
             val audit: List<AutomationAuditUi>,
         )
 
+        private data class LlmRuntime(
+            val state: LlmInitState,
+            val info: LlmModelInfo?,
+        )
+
         private companion object {
             const val STOP_TIMEOUT_MS = 5_000L
             const val CONTENT_SOURCE_LIMIT = 200
@@ -550,6 +677,7 @@ private fun LlmFailure.toUiError(): LlmModelErrorUi =
     when (this) {
         LlmFailure.MODEL_MISSING -> LlmModelErrorUi.MISSING
         LlmFailure.MODEL_INVALID -> LlmModelErrorUi.INVALID
+        LlmFailure.MODEL_INTEGRITY_FAILED -> LlmModelErrorUi.INTEGRITY_FAILED
         LlmFailure.LOAD_FAILED -> LlmModelErrorUi.LOAD_FAILED
         LlmFailure.STORAGE_FAILURE -> LlmModelErrorUi.STORAGE_FAILURE
     }

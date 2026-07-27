@@ -1,13 +1,21 @@
 package com.alarmcontrol.ui.settings
 
 import android.app.Application
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.unit.Density
 import com.alarmcontrol.ui.NotificationAccessUiState
+import com.alarmcontrol.ui.privacy.LocalSensitiveWindowController
+import com.alarmcontrol.ui.privacy.SensitiveWindowController
 import com.alarmcontrol.ui.theme.AlarmControlTheme
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -27,13 +35,28 @@ class SettingsScreenTest {
     @Test
     fun `local LLM controls render from presentation state`() {
         setScreen(
-            SettingsUiState(llmModelStatus = LlmModelUiStatus.READY),
+            SettingsUiState(
+                llmModelStatus = LlmModelUiStatus.READY,
+                llmModelSha256 = "a".repeat(64),
+                llmModelSizeBytes = 1_024,
+            ),
             destination = SettingsDestination.LOCAL_AI,
         )
 
         composeRule.onNodeWithText("Use local LLM ad analysis").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Model status: ready").performScrollTo().assertIsDisplayed()
+        composeRule
+            .onNodeWithText(
+                "Local file integrity verified",
+                substring = true,
+            ).performScrollTo()
+            .assertIsDisplayed()
+        composeRule.onNodeWithText("SHA-256: ${"a".repeat(64)}").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Choose local model").performScrollTo().assertIsDisplayed()
+        composeRule
+            .onNodeWithText("Import models only from a source you trust", substring = true)
+            .performScrollTo()
+            .assertIsDisplayed()
     }
 
     @Test
@@ -79,6 +102,22 @@ class SettingsScreenTest {
 
         composeRule
             .onNodeWithText("incompatible or invalid model", substring = true)
+            .performScrollTo()
+            .assertIsDisplayed()
+    }
+
+    @Test
+    fun `model integrity failure asks the user to reimport`() {
+        setScreen(
+            SettingsUiState(
+                llmModelStatus = LlmModelUiStatus.UNAVAILABLE,
+                llmModelError = LlmModelErrorUi.INTEGRITY_FAILED,
+            ),
+            destination = SettingsDestination.LOCAL_AI,
+        )
+
+        composeRule
+            .onNodeWithText("changed or its integrity record is missing", substring = true)
             .performScrollTo()
             .assertIsDisplayed()
     }
@@ -133,6 +172,56 @@ class SettingsScreenTest {
     }
 
     @Test
+    fun `restore preview protects capture outside the backup destination`() {
+        val protectionChanges = mutableListOf<Boolean>()
+        val controller = SensitiveWindowController(protectionChanges::add)
+
+        setScreen(
+            state =
+                SettingsUiState(
+                    backupPreview =
+                        BackupPreviewUi(
+                            encrypted = false,
+                            rules = 1,
+                            profiles = 0,
+                            dailyInsights = 0,
+                            hasSettings = false,
+                            categoryFeedback = 0,
+                            adFeedbackVotes = 0,
+                        ),
+                ),
+            destination = SettingsDestination.OVERVIEW,
+            sensitiveWindowController = controller,
+        )
+
+        composeRule.onNodeWithText("Review restore").assertIsDisplayed()
+        assertTrue(protectionChanges.lastOrNull() == true)
+    }
+
+    @Test
+    fun `backup warns about plaintext and validates only new encrypted exports`() {
+        setScreen(
+            state = SettingsUiState(),
+            destination = SettingsDestination.BACKUP,
+        )
+
+        composeRule
+            .onNodeWithText("Without a password", substring = true)
+            .performScrollTo()
+            .assertIsDisplayed()
+        composeRule
+            .onNodeWithText("Backup password (optional)")
+            .performScrollTo()
+            .performTextInput("short")
+        composeRule
+            .onNodeWithText("New encrypted backups require at least 8 characters", substring = true)
+            .performScrollTo()
+            .assertIsDisplayed()
+        composeRule.onNodeWithText("Back up").performScrollTo().assertIsNotEnabled()
+        composeRule.onNodeWithText("Restore").performScrollTo().assertIsEnabled()
+    }
+
+    @Test
     fun `automation token and local audit are visible only after opt in`() {
         var copied = ""
         setScreen(
@@ -181,6 +270,32 @@ class SettingsScreenTest {
         assertTrue(destination == SettingsDestination.AUTOMATION)
     }
 
+    @Test
+    fun `large font stacks setting switches below their full text`() {
+        setScreen(
+            state = SettingsUiState(filteringEnabled = true),
+            fontScale = 2f,
+        )
+
+        val subtitleBounds =
+            composeRule
+                .onNodeWithText(
+                    "Pause or resume filtering without changing individual rule switches.",
+                    substring = true,
+                ).fetchSemanticsNode()
+                .boundsInRoot
+        val switchBounds =
+            composeRule
+                .onNodeWithContentDescription("Filtering enabled")
+                .fetchSemanticsNode()
+                .boundsInRoot
+
+        assertTrue(
+            "The switch must be placed below the full subtitle at large font scales.",
+            subtitleBounds.bottom <= switchBounds.top,
+        )
+    }
+
     private fun setScreen(
         state: SettingsUiState,
         destination: SettingsDestination = SettingsDestination.OVERVIEW,
@@ -191,26 +306,38 @@ class SettingsScreenTest {
         onCopyAutomationToken: (String) -> Unit = {},
         onDynamicColorChange: (Boolean) -> Unit = {},
         onNavigate: (SettingsDestination) -> Unit = {},
+        sensitiveWindowController: SensitiveWindowController? = null,
+        fontScale: Float? = null,
     ) {
         composeRule.setContent {
-            AlarmControlTheme(dynamicColor = false) {
-                SettingsScreen(
-                    state = state,
-                    destination = destination,
-                    onNavigate = onNavigate,
-                    onFilteringChange = {},
-                    onExternalAutomationChange = {},
-                    onLlmAnalysisChange = onLlmAnalysisChange,
-                    onImportLlmModel = {},
-                    onExport = { _, _, _ -> },
-                    onImport = { _, _ -> },
-                    onUserMessageShown = {},
-                    onOpenNotificationAccess = onOpenNotificationAccess,
-                    onOpenBatterySettings = onOpenBatterySettings,
-                    onRestoreSelectionChange = onRestoreSelectionChange,
-                    onCopyAutomationToken = onCopyAutomationToken,
-                    onDynamicColorChange = onDynamicColorChange,
-                )
+            val currentDensity = LocalDensity.current
+            val density =
+                fontScale?.let {
+                    Density(density = currentDensity.density, fontScale = it)
+                } ?: currentDensity
+            CompositionLocalProvider(
+                LocalSensitiveWindowController provides sensitiveWindowController,
+                LocalDensity provides density,
+            ) {
+                AlarmControlTheme(dynamicColor = false) {
+                    SettingsScreen(
+                        state = state,
+                        destination = destination,
+                        onNavigate = onNavigate,
+                        onFilteringChange = {},
+                        onExternalAutomationChange = {},
+                        onLlmAnalysisChange = onLlmAnalysisChange,
+                        onImportLlmModel = {},
+                        onExport = { _, _, _ -> },
+                        onImport = { _, _ -> },
+                        onUserMessageShown = {},
+                        onOpenNotificationAccess = onOpenNotificationAccess,
+                        onOpenBatterySettings = onOpenBatterySettings,
+                        onRestoreSelectionChange = onRestoreSelectionChange,
+                        onCopyAutomationToken = onCopyAutomationToken,
+                        onDynamicColorChange = onDynamicColorChange,
+                    )
+                }
             }
         }
     }

@@ -36,11 +36,19 @@ interface CategoryFeedbackDao {
     @Query("DELETE FROM category_feedback WHERE notification_event_id IS NOT NULL")
     suspend fun deleteLinkedToEvents(): Int
 
+    @Query(
+        "DELETE FROM category_feedback WHERE id NOT IN (" +
+            "SELECT id FROM category_feedback ORDER BY id DESC LIMIT :max)",
+    )
+    suspend fun trimToMostRecent(max: Int): Int
+
     /** Keeps one current correction per linked event; legacy unlinked feedback remains additive. */
     @Transaction
     suspend fun record(feedback: CategoryFeedbackEntity): Long {
         feedback.notificationEventId?.let { deleteForEvent(it) }
-        return insert(feedback)
+        val id = insert(feedback)
+        trimToMostRecent(MAX_RETAINED_ROWS)
+        return id
     }
 
     /**
@@ -73,6 +81,11 @@ interface CategoryFeedbackDao {
             "GROUP BY notification_event_id)",
     )
     fun observeLatestEventCorrections(): Flow<List<EventCorrection>>
+
+    companion object {
+        /** Bounds local learning history and reactive query payloads without storing content. */
+        const val MAX_RETAINED_ROWS = 25_000
+    }
 }
 
 /** Projection for [CategoryFeedbackDao.observeLabelCounts]: one corrected label and its tally. */

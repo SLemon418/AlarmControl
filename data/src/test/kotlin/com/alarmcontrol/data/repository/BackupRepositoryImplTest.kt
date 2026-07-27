@@ -1,12 +1,14 @@
 package com.alarmcontrol.data.repository
 
 import com.alarmcontrol.core.backup.BackupData
+import com.alarmcontrol.core.backup.BackupSemanticFeedback
 import com.alarmcontrol.core.backup.BackupSummary
 import com.alarmcontrol.core.backup.RestoreMode
 import com.alarmcontrol.core.backup.RestoreOptions
 import com.alarmcontrol.core.filtering.Condition
 import com.alarmcontrol.core.filtering.Rule
 import com.alarmcontrol.core.filtering.RuleAction
+import com.alarmcontrol.core.filtering.SemanticIntent
 import com.alarmcontrol.core.insights.CategoryCount
 import com.alarmcontrol.core.insights.DailyInsight
 import com.alarmcontrol.core.insights.RuleTriggerCount
@@ -16,12 +18,14 @@ import com.alarmcontrol.core.settings.SettingsRepository
 import com.alarmcontrol.core.settings.SettingsSnapshot
 import com.alarmcontrol.data.backup.BackupCodec
 import com.alarmcontrol.data.backup.BackupCryptor
+import com.alarmcontrol.data.db.TransactionRunner
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -34,7 +38,7 @@ class BackupRepositoryImplTest {
     private val settings = InMemoryBackupSettingsRepository()
     private val transactionRunner = ImmediateTransactionRunner()
     private val ruleRepository = RuleRepositoryImpl(ruleDao)
-    private val dailyRepository = DailyInsightRepositoryImpl(dailyDao)
+    private val dailyRepository = DailyInsightRepositoryImpl(dailyDao, transactionRunner)
     private val profileRepository = ProfileRepositoryImpl(profileDao)
     private val backup =
         BackupRepositoryImpl(
@@ -169,6 +173,35 @@ class BackupRepositoryImplTest {
         }
 
     @Test
+    fun `preview vote totals saturate instead of wrapping negative`() =
+        runTest {
+            val password = "password".toCharArray()
+            val payload =
+                BackupCryptor.encrypt(
+                    BackupCodec.encode(
+                        BackupData(
+                            rules = emptyList(),
+                            dailyInsights = emptyList(),
+                            semanticFeedback =
+                                List(2_148) { index ->
+                                    BackupSemanticFeedback(
+                                        packageName = "com.example.$index",
+                                        intent = SemanticIntent.MARKETING,
+                                        count = 1_000_000,
+                                    )
+                                },
+                        ),
+                    ),
+                    password,
+                )
+
+            val result = backup.preview(payload, password)
+
+            assertTrue(result is DataResult.Success)
+            assertEquals(Int.MAX_VALUE, (result as DataResult.Success).data.adFeedbackVotes)
+        }
+
+    @Test
     fun `merge keeps existing rules and reuses an identical imported rule`() =
         runTest {
             val existing =
@@ -231,6 +264,10 @@ class BackupRepositoryImplTest {
 
             assertTrue(result is DataResult.Success)
             assertEquals(1, feedbackDao.getEffectiveFeedback().size)
+            assertEquals(
+                com.alarmcontrol.data.db.dao.CategoryFeedbackDao.MAX_RETAINED_ROWS,
+                feedbackDao.lastTrimMaximum,
+            )
             assertEquals(3, llmObservationDao.getSemanticFeedbackCounts().single().count)
         }
 
@@ -300,11 +337,127 @@ class BackupRepositoryImplTest {
             assertEquals(listOf("keep me"), ruleRepository.observeRules().first().map { it.name })
             assertEquals(0, transactionRunner.invocations)
         }
+
+    @Test
+    fun `rule restore pauses destructive settings until the database transaction commits`() =
+        runTest {
+            val checkpoints = mutableListOf<SettingsSnapshot>()
+            val runner =
+                object : TransactionRunner {
+                    override suspend fun <T> run(block: suspend () -> T): T {
+                        checkpoints += settings.current
+                        return block()
+                    }
+                }
+            val repository =
+                BackupRepositoryImpl(
+                    runner,
+                    ruleDao,
+                    dailyDao,
+                    profileDao,
+                    feedbackDao,
+                    llmObservationDao,
+                    settings,
+                )
+            val desired =
+                SettingsSnapshot(
+                    filteringEnabled = true,
+                    externalAutomationEnabled = true,
+                    llmAnalysisEnabled = true,
+                    llmAutoActionsEnabled = true,
+                )
+            val payload =
+                BackupCodec.encode(
+                    BackupData(
+                        rules =
+                            listOf(
+                                Rule(
+                                    id = "restored",
+                                    name = "Restored",
+                                    condition = Condition.PackageEquals("com.example"),
+                                    action = RuleAction.Cancel,
+                                ),
+                            ),
+                        dailyInsights = emptyList(),
+                        settings = desired,
+                    ),
+                )
+
+            val result = repository.restore(payload)
+
+            assertTrue(result is DataResult.Success)
+            assertFalse(checkpoints.single().filteringEnabled)
+            assertFalse(checkpoints.single().externalAutomationEnabled)
+            assertFalse(checkpoints.single().llmAutoActionsEnabled)
+            assertEquals(desired, settings.current)
+        }
+
+    @Test
+    fun `failed database restore puts the original settings back`() =
+        runTest {
+            val original =
+                SettingsSnapshot(
+                    filteringEnabled = true,
+                    externalAutomationEnabled = true,
+                    llmAnalysisEnabled = true,
+                    llmAutoActionsEnabled = true,
+                )
+            settings.restore(original)
+            val runner =
+                object : TransactionRunner {
+                    override suspend fun <T> run(block: suspend () -> T): T = error("database unavailable")
+                }
+            val repository =
+                BackupRepositoryImpl(
+                    runner,
+                    ruleDao,
+                    dailyDao,
+                    profileDao,
+                    feedbackDao,
+                    llmObservationDao,
+                    settings,
+                )
+            val payload = BackupCodec.encode(BackupData(emptyList(), emptyList()))
+
+            val result = repository.restore(payload)
+
+            assertTrue(result is DataResult.Failure)
+            assertEquals(original, settings.current)
+        }
+
+    @Test
+    fun `settings activation failure after database commit leaves destructive gates off`() =
+        runTest {
+            val desired =
+                SettingsSnapshot(
+                    filteringEnabled = true,
+                    externalAutomationEnabled = true,
+                    llmAnalysisEnabled = true,
+                    llmAutoActionsEnabled = true,
+                )
+            settings.failEnabledRestore = true
+            val payload =
+                BackupCodec.encode(
+                    BackupData(
+                        rules = emptyList(),
+                        dailyInsights = emptyList(),
+                        settings = desired,
+                    ),
+                )
+
+            val result = backup.restore(payload)
+
+            assertTrue(result is DataResult.Failure)
+            assertFalse(settings.current.filteringEnabled)
+            assertFalse(settings.current.externalAutomationEnabled)
+            assertFalse(settings.current.llmAutoActionsEnabled)
+        }
 }
 
 private class InMemoryBackupSettingsRepository : SettingsRepository {
     private val state = MutableStateFlow(SettingsSnapshot())
     val current: SettingsSnapshot get() = state.value
+    var failEnabledRestore = false
 
     override val filteringEnabled: Flow<Boolean> = state.mapValue(SettingsSnapshot::filteringEnabled)
     override val llmAnalysisEnabled: Flow<Boolean> = state.mapValue(SettingsSnapshot::llmAnalysisEnabled)
@@ -343,6 +496,9 @@ private class InMemoryBackupSettingsRepository : SettingsRepository {
     override suspend fun snapshot(): SettingsSnapshot = state.value
 
     override suspend fun restore(snapshot: SettingsSnapshot) {
+        if (failEnabledRestore && snapshot.filteringEnabled) {
+            error("settings unavailable")
+        }
         state.value = snapshot
     }
 

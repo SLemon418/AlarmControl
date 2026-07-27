@@ -222,6 +222,8 @@ data class EventListItem(
     val actionLabel: UiText,
     val action: EventActionUi = EventActionUi.OTHER,
     val recordedAtMillis: Long,
+    val postedAtMillis: Long = recordedAtMillis,
+    val postedEpochDay: Long? = null,
     val undone: Boolean,
     val canUndo: Boolean,
     /** Latest persisted correction for this exact activity event. */

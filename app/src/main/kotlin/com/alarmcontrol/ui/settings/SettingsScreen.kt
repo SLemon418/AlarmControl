@@ -1,6 +1,5 @@
 package com.alarmcontrol.ui.settings
 
-import android.content.ClipboardManager
 import android.net.Uri
 import android.text.format.DateUtils
 import android.text.format.Formatter
@@ -48,11 +47,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
@@ -60,6 +59,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.SecureFlagPolicy
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -74,7 +75,6 @@ import com.alarmcontrol.ui.designsystem.ExpressiveHeroCard
 import com.alarmcontrol.ui.designsystem.MaxWidthContent
 import com.alarmcontrol.ui.designsystem.StatusPill
 import com.alarmcontrol.ui.privacy.ProtectSensitiveWindow
-import com.alarmcontrol.ui.privacy.copySensitiveText
 
 @Composable
 fun SettingsRoute(
@@ -85,12 +85,15 @@ fun SettingsRoute(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    val clipboardScope = rememberCoroutineScope()
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer =
             LifecycleEventObserver { _, event ->
-                if (event == Lifecycle.Event.ON_RESUME) viewModel.refreshAppHealth()
+                when (event) {
+                    Lifecycle.Event.ON_RESUME -> viewModel.refreshAppHealth()
+                    Lifecycle.Event.ON_STOP -> viewModel.cancelRestore()
+                    else -> Unit
+                }
             }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
@@ -104,18 +107,7 @@ fun SettingsRoute(
         onDynamicColorChange = viewModel::setDynamicColorEnabled,
         onExternalAutomationChange = viewModel::setExternalAutomationEnabled,
         onRotateAutomationToken = viewModel::rotateExternalAutomationToken,
-        onCopyAutomationToken = { token ->
-            context
-                .getSystemService(ClipboardManager::class.java)
-                ?.let { clipboard ->
-                    copySensitiveText(
-                        clipboard = clipboard,
-                        label = context.getString(R.string.settings_automation_token),
-                        value = token,
-                        scope = clipboardScope,
-                    )
-                }
-        },
+        onCopyAutomationToken = viewModel::copyAutomationToken,
         onLlmAnalysisChange = viewModel::setLlmAnalysisEnabled,
         onLlmAutoActionsChange = viewModel::setLlmAutoActionsEnabled,
         onSemanticAnalysisScopeChange = viewModel::setSemanticAnalysisScope,
@@ -221,8 +213,10 @@ fun SettingsScreen(
         backupPassword = backupPassword,
         includeLearningFeedback = includeLearningFeedback,
         onPasswordChange = {
-            backupPassword = it
-            if (it.isEmpty()) includeLearningFeedback = false
+            if (it.length <= MAX_BACKUP_PASSWORD_CHARS) {
+                backupPassword = it
+                if (it.length < MIN_NEW_BACKUP_PASSWORD_CHARS) includeLearningFeedback = false
+            }
         },
         onIncludeLearningFeedbackChange = { includeLearningFeedback = it },
         onFilteringChange = onFilteringChange,
@@ -835,7 +829,13 @@ private fun LlmSettingsSection(
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
+    Text(
+        stringResource(R.string.settings_model_trust_warning),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.tertiary,
+    )
     Text(text = state.llmStatusText(), style = MaterialTheme.typography.bodySmall)
+    LlmModelIntegrity(state)
     LlmInstallProgress(state)
     val controlsEnabled =
         state.llmModelStatus != LlmModelUiStatus.LOADING &&
@@ -854,6 +854,33 @@ private fun LlmSettingsSection(
     ) {
         Text(stringResource(R.string.settings_remove_model))
     }
+}
+
+@Composable
+private fun LlmModelIntegrity(state: SettingsUiState) {
+    val fingerprint = state.llmModelSha256 ?: return
+    val size = state.llmModelSizeBytes ?: return
+    val context = LocalContext.current
+    Text(
+        stringResource(
+            R.string.settings_model_integrity_verified,
+            Formatter.formatShortFileSize(context, size),
+        ),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(top = 8.dp),
+    )
+    SelectionContainer {
+        Text(
+            stringResource(R.string.settings_model_fingerprint, fingerprint),
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
+    Text(
+        stringResource(R.string.settings_model_fingerprint_note),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 @Composable
@@ -881,29 +908,53 @@ private fun BackupSettingsSection(
     onRestore: () -> Unit,
 ) {
     ProtectSensitiveWindow()
+    val canCreateEncryptedBackup = password.length >= MIN_NEW_BACKUP_PASSWORD_CHARS
+    val canExport = password.isEmpty() || canCreateEncryptedBackup
     Text(stringResource(R.string.settings_backup_summary), style = MaterialTheme.typography.bodySmall)
     OutlinedTextField(
         value = password,
         onValueChange = onPasswordChange,
         label = { Text(stringResource(R.string.settings_backup_password)) },
-        supportingText = { Text(stringResource(R.string.settings_backup_password_summary)) },
+        supportingText = {
+            Text(
+                stringResource(
+                    if (password.isNotEmpty() && !canCreateEncryptedBackup) {
+                        R.string.settings_backup_password_too_short
+                    } else {
+                        R.string.settings_backup_password_summary
+                    },
+                ),
+            )
+        },
         visualTransformation = PasswordVisualTransformation(),
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
         singleLine = true,
         modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
     )
+    if (password.isEmpty()) {
+        Text(
+            text = stringResource(R.string.settings_backup_plaintext_warning),
+            color = MaterialTheme.colorScheme.tertiary,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
     SettingSwitchRow(
         title = stringResource(R.string.settings_backup_feedback),
         subtitle = stringResource(R.string.settings_backup_feedback_summary),
         checked = includeLearningFeedback,
         onCheckedChange = onIncludeLearningFeedbackChange,
-        enabled = password.isNotEmpty(),
+        enabled = canCreateEncryptedBackup,
     )
     Column(
         modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        OutlinedButton(onClick = onBackup, modifier = Modifier.fillMaxWidth()) {
+        OutlinedButton(
+            onClick = onBackup,
+            enabled = canExport,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
             Text(stringResource(R.string.settings_backup))
         }
         OutlinedButton(onClick = onRestore, modifier = Modifier.fillMaxWidth()) {
@@ -919,9 +970,11 @@ private fun BackupRestorePreviewDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    ProtectSensitiveWindow()
     val selection = preview.selection
     AlertDialog(
         onDismissRequest = onDismiss,
+        properties = DialogProperties(securePolicy = SecureFlagPolicy.SecureOn),
         title = { Text(stringResource(R.string.settings_restore_preview_title)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -963,9 +1016,7 @@ private fun BackupRestorePreviewDialog(
                 RestoreOptionRow(
                     title = stringResource(R.string.settings_restore_feedback),
                     checked = selection.learningFeedback,
-                    enabled =
-                        preview.encrypted &&
-                            preview.categoryFeedback + preview.adFeedbackVotes > 0,
+                    enabled = preview.canRestoreLearningFeedback,
                 ) { onSelectionChange(selection.copy(learningFeedback = it)) }
             }
         },
@@ -1112,6 +1163,8 @@ private val INSIGHT_RETENTION_OPTIONS = listOf(30, 90, 365, 730)
 private fun String.toPassphrase(): CharArray? = takeIf { it.isNotEmpty() }?.toCharArray()
 
 private const val CONTENT_SEARCH_MAX_CHARS = 100
+private const val MIN_NEW_BACKUP_PASSWORD_CHARS = 8
+private const val MAX_BACKUP_PASSWORD_CHARS = 1_024
 
 @Composable
 private fun SettingsUiState.llmStatusText(): String {
@@ -1139,6 +1192,7 @@ private fun SettingsUiState.llmStatusText(): String {
             when (llmModelError) {
                 LlmModelErrorUi.MISSING -> stringResource(R.string.settings_model_missing)
                 LlmModelErrorUi.INVALID -> stringResource(R.string.settings_model_invalid)
+                LlmModelErrorUi.INTEGRITY_FAILED -> stringResource(R.string.settings_model_integrity_failed)
                 LlmModelErrorUi.LOAD_FAILED -> stringResource(R.string.settings_model_load_failed)
                 LlmModelErrorUi.STORAGE_FAILURE -> stringResource(R.string.settings_model_storage_failed)
                 null -> stringResource(R.string.settings_model_unavailable)
@@ -1154,19 +1208,49 @@ private fun SettingSwitchRow(
     enabled: Boolean = true,
     onCheckedChange: (Boolean) -> Unit,
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(Modifier.weight(1f)) {
+    val useStackedLayout = LocalDensity.current.fontScale >= LARGE_FONT_SCALE
+    if (useStackedLayout) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             Text(title, style = MaterialTheme.typography.titleMedium)
-            Text(subtitle, style = MaterialTheme.typography.bodySmall)
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Switch(
+                checked = checked,
+                onCheckedChange = onCheckedChange,
+                enabled = enabled,
+                modifier =
+                    Modifier
+                        .align(Alignment.End)
+                        .semantics { contentDescription = title },
+            )
         }
-        Switch(
-            checked = checked,
-            onCheckedChange = onCheckedChange,
-            enabled = enabled,
-            modifier = Modifier.semantics { contentDescription = title },
-        )
+    } else {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleMedium)
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(
+                checked = checked,
+                onCheckedChange = onCheckedChange,
+                enabled = enabled,
+                modifier = Modifier.semantics { contentDescription = title },
+            )
+        }
     }
 }
+
+private const val LARGE_FONT_SCALE = 1.5f

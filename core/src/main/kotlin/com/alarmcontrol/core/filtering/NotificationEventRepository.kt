@@ -31,13 +31,15 @@ interface NotificationEventRepository {
     fun observeActionBreakdownSince(sinceMillis: Long): Flow<ActionBreakdown>
 
     /**
-     * Observes actions posted on [epochDay]. Implementations should use [legacyStartMillis] only
-     * for rows written before a posted-day key was available.
+     * Observes actions posted on [epochDay]. Implementations should use
+     * `[legacyStartMillis, legacyEndMillis)` only for rows written before a posted-day key was
+     * available.
      */
     fun observeActionBreakdownForDay(
         epochDay: Long,
         legacyStartMillis: Long,
-    ): Flow<ActionBreakdown> = observeActionBreakdownSince(legacyStartMillis)
+        legacyEndMillis: Long,
+    ): Flow<ActionBreakdown>
 
     /** Excludes [eventId] from local statistics; it cannot restore a dismissed notification. */
     suspend fun undo(eventId: String)
@@ -55,7 +57,10 @@ interface NotificationEventRepository {
     /** Removes diagnostic child rows outside the newest [max] events while retaining event metadata. */
     suspend fun trimDecisionTracesToMostRecent(max: Int): Int = 0
 
-    /** Oldest/newest retained post timestamps, or `null` when the event log is empty. */
+    /**
+     * Oldest/newest retained post boundaries, or `null` when the event log is empty. Stored epoch
+     * days preserve the local date at post time across later device time-zone changes.
+     */
     suspend fun postedAtBounds(): NotificationEventTimeBounds? = null
 
     /**
@@ -77,4 +82,6 @@ interface NotificationEventRepository {
 data class NotificationEventTimeBounds(
     val oldestPostedAtMillis: Long,
     val newestPostedAtMillis: Long,
+    val oldestPostedEpochDay: Long? = null,
+    val newestPostedEpochDay: Long? = null,
 )

@@ -2,11 +2,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!--
-      Automation entry point (CLAUDE.md §7). Exported so Samsung Modes & Routines (via Good Lock
-      RoutinePlus) can toggle filtering by broadcasting a documented action (see AutomationContract).
+      Automation entry point (CLAUDE.md §7). Exported so Tasker, MacroDroid, and compatible tools
+      can toggle filtering by broadcasting a documented action (see AutomationContract). Samsung
+      Modes & Routines uses the first-party App Shortcut path below instead.
 
-      Deliberately NOT permission-guarded: RoutinePlus/Tasker run as their own apps and cannot hold a
-      custom permission, so a sender-permission would block the very automation this enables. The
+      Deliberately NOT permission-guarded: external automation tools run as their own apps and cannot
+      hold a custom permission, so a sender-permission would block the very automation this enables. The
       receiver only changes the local filtering gate or one named profile — no data access, no
       network (HARD RULE §1 untouched). It is guarded by the explicit in-app opt-in, a per-install
       token, rate limiting, and a content-free local audit. No INTERNET permission is declared here.

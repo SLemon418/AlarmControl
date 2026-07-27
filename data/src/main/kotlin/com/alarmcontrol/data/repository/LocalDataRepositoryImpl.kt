@@ -11,6 +11,7 @@ import com.alarmcontrol.data.db.dao.NotificationEventDao
 import com.alarmcontrol.data.db.dao.ProfileDao
 import com.alarmcontrol.data.db.dao.RuleDao
 import com.alarmcontrol.data.db.dao.RuleSuggestionDao
+import com.alarmcontrol.data.security.NotificationContentAccessGuard
 import com.alarmcontrol.data.security.NotificationContentCipher
 import javax.inject.Inject
 
@@ -27,70 +28,88 @@ class LocalDataRepositoryImpl
         private val automationAuditDao: AutomationAuditDao,
         private val ruleSuggestionDao: RuleSuggestionDao,
         private val contentCipher: NotificationContentCipher,
+        private val contentAccessGuard: NotificationContentAccessGuard,
     ) : LocalDataRepository {
         override suspend fun clearActivityHistory(): ClearedDataCounts =
-            transactionRunner.run {
-                val feedback = feedbackDao.deleteLinkedToEvents() + llmObservationDao.countCorrections()
-                llmObservationDao.deleteAll()
-                val events = eventDao.deleteAll()
-                ClearedDataCounts(events = events, feedback = feedback)
+            contentAccessGuard.withLock {
+                transactionRunner.run {
+                    val feedback = feedbackDao.deleteLinkedToEvents() + llmObservationDao.countCorrections()
+                    llmObservationDao.deleteAll()
+                    val events = eventDao.deleteAll()
+                    ClearedDataCounts(events = events, feedback = feedback)
+                }
             }
 
         override suspend fun clearFeedback(): ClearedDataCounts =
             transactionRunner.run {
-                val importedVotes = llmObservationDao.countSemanticImportedPriorVotes()
+                val corrections = llmObservationDao.countCorrections()
+                val importedVotes =
+                    llmObservationDao.countImportedPriorVotes() +
+                        llmObservationDao.countSemanticImportedPriorVotes()
+                val categoryFeedback = feedbackDao.deleteAll()
+                llmObservationDao.clearSemanticCorrections()
+                llmObservationDao.deleteImportedPriors()
+                llmObservationDao.deleteSemanticImportedPriors()
                 ClearedDataCounts(
-                    feedback = feedbackDao.deleteAll() + llmObservationDao.clearCorrections() + importedVotes,
-                ).also {
-                    llmObservationDao.clearSemanticCorrections()
-                    llmObservationDao.deleteImportedPriors()
-                    llmObservationDao.deleteSemanticImportedPriors()
-                }
+                    feedback = saturatedCount(categoryFeedback.toLong(), corrections.toLong(), importedVotes),
+                )
             }
 
         override suspend fun clearDailyInsights(): ClearedDataCounts =
             transactionRunner.run { ClearedDataCounts(insightDays = dailyInsightDao.deleteAll()) }
 
-        override suspend fun clearStoredNotificationContent(): ClearedDataCounts {
-            val count = transactionRunner.run { eventDao.deleteAllEncryptedContents() }
-            contentCipher.deleteKey()
-            return ClearedDataCounts(encryptedContents = count)
-        }
+        override suspend fun clearStoredNotificationContent(): ClearedDataCounts =
+            contentAccessGuard.withLock {
+                val count = transactionRunner.run { eventDao.deleteAllEncryptedContents() }
+                contentCipher.deleteKey()
+                ClearedDataCounts(encryptedContents = count)
+            }
 
         override suspend fun clearStoredNotificationContentForPackage(packageName: String): ClearedDataCounts {
             require(packageName.isNotBlank()) { "Package name is blank" }
-            val count = transactionRunner.run { eventDao.deleteEncryptedContentsForPackage(packageName) }
-            return ClearedDataCounts(encryptedContents = count)
+            return contentAccessGuard.withLock {
+                val count = transactionRunner.run { eventDao.deleteEncryptedContentsForPackage(packageName) }
+                ClearedDataCounts(encryptedContents = count)
+            }
         }
 
-        override suspend fun clearAllDatabaseData(): ClearedDataCounts {
-            val result =
-                transactionRunner.run {
-                    val counts =
-                        ClearedDataCounts(
-                            rules = ruleDao.countAll(),
-                            profiles = profileDao.countAll(),
-                            events = eventDao.countAll(),
-                            feedback =
-                                feedbackDao.countAll() +
-                                    llmObservationDao.countCorrections() +
-                                    llmObservationDao.countSemanticImportedPriorVotes(),
-                            insightDays = dailyInsightDao.countAll(),
-                            encryptedContents = eventDao.countEncryptedContents(),
-                        )
-                    feedbackDao.deleteAll()
-                    llmObservationDao.deleteAll()
-                    llmObservationDao.deleteImportedPriors()
-                    llmObservationDao.deleteSemanticImportedPriors()
-                    ruleSuggestionDao.deleteAllDismissals()
-                    eventDao.deleteAll()
-                    dailyInsightDao.deleteAll()
-                    profileDao.deleteAll()
-                    ruleDao.deleteAllRules()
-                    automationAuditDao.deleteAll()
-                    counts
-                }
-            contentCipher.deleteKey()
-            return result
-        }
+        override suspend fun clearAllDatabaseData(): ClearedDataCounts =
+            contentAccessGuard.withLock {
+                val result =
+                    transactionRunner.run {
+                        val counts =
+                            ClearedDataCounts(
+                                rules = ruleDao.countAll(),
+                                profiles = profileDao.countAll(),
+                                events = eventDao.countAll(),
+                                feedback =
+                                    saturatedCount(
+                                        feedbackDao.countAll().toLong(),
+                                        llmObservationDao.countCorrections().toLong(),
+                                        llmObservationDao.countImportedPriorVotes(),
+                                        llmObservationDao.countSemanticImportedPriorVotes(),
+                                    ),
+                                insightDays = dailyInsightDao.countAll(),
+                                encryptedContents = eventDao.countEncryptedContents(),
+                            )
+                        feedbackDao.deleteAll()
+                        llmObservationDao.deleteAll()
+                        llmObservationDao.deleteImportedPriors()
+                        llmObservationDao.deleteSemanticImportedPriors()
+                        ruleSuggestionDao.deleteAllDismissals()
+                        eventDao.deleteAll()
+                        dailyInsightDao.deleteAll()
+                        profileDao.deleteAll()
+                        ruleDao.deleteAllRules()
+                        automationAuditDao.deleteAll()
+                        counts
+                    }
+                contentCipher.deleteKey()
+                result
+            }
     }
+
+private fun saturatedCount(vararg counts: Long): Int =
+    counts
+        .fold(0L) { total, count -> (total + count).coerceAtMost(Int.MAX_VALUE.toLong()) }
+        .toInt()

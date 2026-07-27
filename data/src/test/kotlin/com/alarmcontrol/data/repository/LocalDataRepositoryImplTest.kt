@@ -1,11 +1,15 @@
 package com.alarmcontrol.data.repository
 
+import com.alarmcontrol.data.db.entity.AdFeedbackPriorEntity
 import com.alarmcontrol.data.db.entity.CategoryFeedbackEntity
 import com.alarmcontrol.data.db.entity.DailyInsightEntity
+import com.alarmcontrol.data.db.entity.LlmObservationEntity
 import com.alarmcontrol.data.db.entity.NotificationEventEntity
 import com.alarmcontrol.data.db.entity.RuleEntity
 import com.alarmcontrol.data.db.entity.RuleSuggestionDismissalEntity
+import com.alarmcontrol.data.db.entity.SemanticFeedbackPriorEntity
 import com.alarmcontrol.data.db.model.StoredRuleAction
+import com.alarmcontrol.data.security.NotificationContentAccessGuard
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -33,6 +37,7 @@ class LocalDataRepositoryImplTest {
             automationAudit,
             suggestions,
             contentCipher,
+            NotificationContentAccessGuard(),
         )
 
     @Test
@@ -166,6 +171,43 @@ class LocalDataRepositoryImplTest {
 
             assertEquals(1, events.countAll())
             assertEquals(0, feedback.countAll())
+        }
+
+    @Test
+    fun `clear feedback reports semantic and legacy imported votes without double counting`() =
+        runTest {
+            feedback.insert(
+                CategoryFeedbackEntity(
+                    packageName = "com.example",
+                    predictedLabel = "promotion",
+                    correctedLabel = "social",
+                    recordedAtMillis = 1L,
+                ),
+            )
+            llmObservations.upsert(
+                LlmObservationEntity(
+                    notificationEventId = 1,
+                    packageName = "com.example",
+                    predictedIsAdvertisement = true,
+                    predictedIntent = "MARKETING",
+                    confidenceScore = 0.8f,
+                    correctedIsAdvertisement = false,
+                    correctedIntent = "TRANSACTIONAL",
+                    analyzedAtMillis = 1,
+                ),
+            )
+            llmObservations.upsertImportedPriors(
+                listOf(AdFeedbackPriorEntity("com.example", true, 2)),
+            )
+            llmObservations.upsertSemanticImportedPriors(
+                listOf(SemanticFeedbackPriorEntity("com.example", "MARKETING", 3)),
+            )
+
+            val counts = repository.clearFeedback()
+
+            assertEquals(7, counts.feedback)
+            assertEquals(emptyList<Any>(), llmObservations.getFeedbackCounts())
+            assertEquals(emptyList<Any>(), llmObservations.getSemanticFeedbackCounts())
         }
 
     private fun sampleEvent() =

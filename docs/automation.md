@@ -1,17 +1,41 @@
-# Automation: controlling AlarmControl from Samsung Galaxy Routines
+# Automation: Samsung Routines, Tasker, and MacroDroid
 
 **English** | [한국어](automation.ko.md)
 
-AlarmControl exposes a single exported `BroadcastReceiver`
-(`com.alarmcontrol.automation.ProfileToggleReceiver`) so a Routine can turn notification filtering
-on or off. This is the documented, stable contract (CLAUDE.md §7) — the action/extra names won't
-change casually.
+AlarmControl provides two separate local automation paths:
 
-Everything stays on-device: the receiver changes either the independent filtering master switch or
-one matching named profile. It declares no `INTERNET` permission and makes no network calls (HARD
-RULE §1/§3).
+1. **Samsung Modes and Routines (recommended):** select AlarmControl's dynamic App Shortcuts. This
+   first-party path needs no automation token and works while external automation is disabled.
+2. **Tasker, MacroDroid, and compatible tools:** send an explicit, authenticated broadcast to
+   `com.alarmcontrol.automation.ProfileToggleReceiver`.
 
-## The contract
+Both paths delegate to the same `ProfileController` and stay entirely on-device. AlarmControl
+declares no `INTERNET` permission and makes no network calls.
+
+## Samsung Modes and Routines setup
+
+1. Open AlarmControl once so it publishes its dynamic shortcuts.
+2. Open **Settings → Modes and Routines → Routines**, then create a routine.
+3. Under **If**, choose a trigger. Use **Run manually** for a safe first test.
+4. Under **Then**, choose **Applications → Open an app or do an app action**.
+5. Expand **AlarmControl**, then choose:
+   - **Enable filtering**
+   - **Pause filtering**
+   - a named-profile shortcut, when one is published
+6. Save the routine. For a stateful trigger such as work hours, create a matching routine for the
+   opposite action.
+
+This path invokes AlarmControl's non-exported shortcut trampoline through Android's
+`ShortcutManager`; it does **not** require **Allow external automation** or `AUTH_TOKEN`.
+
+Verified on 2026-07-27 with a Galaxy Note20 5G (Android 13, One UI 5.1), Samsung Modes and Routines,
+and Routine+ 1.0.60: a manual **Pause filtering** routine changed the master switch from on to off,
+and **Enable filtering** changed it back on. Routine+ on this device did not expose a generic
+**Send broadcast** action; it is not required for the App Shortcut route.
+
+## Authenticated Intent contract
+
+Use this route only for Tasker, MacroDroid, or another tool that can send explicit broadcasts.
 
 | | Value |
 |---|---|
@@ -19,11 +43,13 @@ RULE §1/§3).
 | Disable filtering | action `com.alarmcontrol.automation.action.DISABLE_PROFILE` |
 | Required extra | `com.alarmcontrol.automation.extra.AUTH_TOKEN` (String) |
 | Optional target | `com.alarmcontrol.automation.extra.PROFILE_ID` (String) |
-| Target component | `com.alarmcontrol/com.alarmcontrol.automation.ProfileToggleReceiver` |
+| Required destination | package `com.alarmcontrol` **or** component `com.alarmcontrol/com.alarmcontrol.automation.ProfileToggleReceiver` |
 
 The per-install `AUTH_TOKEN` is shown only after enabling **Settings → Allow external automation**.
 Copy it exactly as a String extra. Regenerating it immediately invalidates every existing Routine or
 Tasker task that still uses the old token; the token is never included in backup files or audit rows.
+The destination is mandatory: AlarmControl rejects implicit broadcasts so another app cannot
+subscribe to the public action and observe the token.
 
 **`PROFILE_ID` behavior**
 - **Omitted / blank → independent master switch** (the usual Routines setup). Pausing filtering
@@ -35,26 +61,9 @@ Tasker task that still uses the old token; the token is never included in backup
 Unknown actions, malformed targets, missing/wrong tokens, and unmatched ids never crash the caller.
 Accepted external requests are limited to 12 per rolling minute to contain broadcast storms.
 
-## Samsung Modes & Routines setup (via Good Lock → RoutinePlus)
-
-Samsung's "Modes and Routines" has no built-in "send custom intent" action, so use the **RoutinePlus
-(Routines+)** module from **Good Lock**:
-
-1. Install **Good Lock** (Galaxy Store) → open **RoutinePlus**.
-2. In AlarmControl, enable **Settings → Allow external automation** and copy the displayed token.
-3. Create/edit a Routine. Under **Then**, add a RoutinePlus custom action → **Send broadcast**.
-4. Set:
-   - **Action**: `com.alarmcontrol.automation.action.DISABLE_PROFILE` (or `…ENABLE_PROFILE`)
-   - **Package** (optional but recommended for reliable delivery): `com.alarmcontrol`
-   - **Extra** (required): key `com.alarmcontrol.automation.extra.AUTH_TOKEN`, type String, value =
-     the token copied from AlarmControl.
-   - **Extra** (optional): key `com.alarmcontrol.automation.extra.PROFILE_ID`, type String, value =
-     the profile name or id (e.g. `Work`). Leave it out to control the master switch.
-5. Add the matching **If** trigger (e.g. "When connected to Work Wi-Fi") and a paired Routine to
-   re-`ENABLE_PROFILE` when it ends.
-
-Example: *At work → DISABLE_PROFILE (no extra)* pauses filtering without rewriting rule states;
-*Leaving work → ENABLE_PROFILE* resumes it.
+Enable **AlarmControl → Settings → Allow external automation**, reveal the per-install token, and
+configure the sender with the action, explicit package/component, and String extras shown above.
+Never put the token in an implicit broadcast, logs, screenshots, or a shared automation export.
 
 ## Quick test with adb
 
@@ -89,10 +98,13 @@ opt-in.
 
 ## Security note
 
-The receiver is exported **without** a custom permission, because RoutinePlus (like Tasker) runs as
-its own app and cannot hold one — a signature permission would block the integration. It is instead
-protected by three local controls: the off-by-default opt-in, a cryptographically random per-install
-token compared in constant time, and a 12-request-per-minute process-local rate limit.
+The receiver is exported **without** a custom permission because third-party automation tools run as
+separate apps and cannot hold AlarmControl's signature permission. It is instead protected by four
+local controls: an explicit package/component destination, the off-by-default opt-in, a
+cryptographically random per-install token compared in constant time, and a 12-request-per-minute
+process-local rate limit. Existing automations created without a Package must add
+`com.alarmcontrol` after upgrading. Samsung's App Shortcut route does not use this exported receiver
+or token.
 
 AlarmControl keeps at most 200 content-free audit outcomes (time, source, operation, target *type*,
 result, and changed count). It never records the token, profile/rule name, or notification content.

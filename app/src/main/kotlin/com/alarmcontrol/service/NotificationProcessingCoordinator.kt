@@ -29,54 +29,94 @@ internal class NotificationProcessingCoordinator(
     private val droppedSource = AtomicLong(0)
     private val workPermits = Semaphore(maxConcurrentWork)
     private val entries = linkedMapOf<String, WorkEntry>()
+    private val actionGates = Array(ACTION_GATE_COUNT) { Any() }
 
     internal val droppedSubmissionCount: Long
         get() = droppedSource.get()
 
     fun submit(
         key: String,
+        freshness: Long? = null,
         block: suspend (ProcessingToken) -> Unit,
     ): Job {
         lateinit var job: Job
         val tokenId = tokenSource.incrementAndGet()
+        val workFreshness = freshness ?: tokenId
         val generation = generationSource.get()
         val token = ProcessingToken(key, tokenId, generation, this)
         val replacedAndEvicted = mutableListOf<Job>()
-        synchronized(lock) {
-            entries.remove(key)?.job?.let(replacedAndEvicted::add)
-            if (entries.size >= maxTrackedWork) {
-                val evicted =
-                    entries.entries.firstOrNull { !it.value.running }
-                        ?: entries.entries.first()
-                entries.remove(evicted.key)
-                evicted.value.job?.let(replacedAndEvicted::add)
-                droppedSource.incrementAndGet()
-            }
-            val entry = WorkEntry(tokenId, generation)
-            job =
-                scope.launch(start = CoroutineStart.LAZY) {
-                    try {
-                        workPermits.withPermit {
-                            if (markRunningIfCurrent(key, tokenId, generation)) {
-                                block(token)
-                            }
+        var accepted = false
+        job =
+            scope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    workPermits.withPermit {
+                        if (markRunningIfCurrent(key, tokenId, generation)) {
+                            block(token)
                         }
-                    } finally {
-                        releaseIfCurrent(key, tokenId, generation, job)
+                    }
+                } finally {
+                    releaseIfCurrent(key, tokenId, generation, job)
+                }
+            }
+        synchronized(actionGate(key)) {
+            synchronized(lock) {
+                val sameKey = entries[key]
+                val staleForSameKey =
+                    sameKey != null &&
+                        compareFreshness(workFreshness, tokenId, sameKey) < 0
+                if (!staleForSameKey) {
+                    entries.remove(key)?.job?.let(replacedAndEvicted::add)
+                    var hasCapacity = entries.size < maxTrackedWork
+                    if (!hasCapacity) {
+                        val oldestWaiting =
+                            entries.entries
+                                .asSequence()
+                                .filterNot { it.value.running }
+                                .minWithOrNull(
+                                    compareBy<Map.Entry<String, WorkEntry>> { it.value.freshness }
+                                        .thenBy { it.value.tokenId },
+                                )
+                        if (
+                            oldestWaiting != null &&
+                            compareFreshness(workFreshness, tokenId, oldestWaiting.value) > 0
+                        ) {
+                            entries.remove(oldestWaiting.key)
+                            oldestWaiting.value.job?.let(replacedAndEvicted::add)
+                            droppedSource.incrementAndGet()
+                            hasCapacity = true
+                        }
+                    }
+                    if (hasCapacity) {
+                        entries[key] =
+                            WorkEntry(
+                                tokenId = tokenId,
+                                generation = generation,
+                                freshness = workFreshness,
+                                job = job,
+                            )
+                        accepted = true
                     }
                 }
-            entry.job = job
-            entries[key] = entry
+                if (!accepted) {
+                    droppedSource.incrementAndGet()
+                }
+            }
         }
         replacedAndEvicted.forEach(Job::cancel)
-        job.start()
+        if (accepted) {
+            job.start()
+        } else {
+            job.cancel()
+        }
         return job
     }
 
     fun invalidate(key: String) {
         val job =
-            synchronized(lock) {
-                entries.remove(key)?.job
+            synchronized(actionGate(key)) {
+                synchronized(lock) {
+                    entries.remove(key)?.job
+                }
             }
         job?.cancel()
     }
@@ -116,24 +156,26 @@ internal class NotificationProcessingCoordinator(
         tokenId: Long,
         generation: Long,
         action: () -> Unit,
-    ): Boolean {
-        val claimed =
-            synchronized(lock) {
-                val entry = entries[key]
-                if (entry?.canCommit(tokenId, generation) != true) {
-                    false
-                } else {
-                    entry.claimed = true
-                    entries.remove(key)
-                    true
+    ): Boolean =
+        synchronized(actionGate(key)) {
+            val claimed =
+                synchronized(lock) {
+                    val entry = entries[key]
+                    if (entry?.canCommit(tokenId, generation) != true) {
+                        false
+                    } else {
+                        entry.claimed = true
+                        entries.remove(key)
+                        true
+                    }
                 }
-            }
-        if (!claimed) return false
+            if (!claimed) return@synchronized false
 
-        // Binder calls can be slow. Never hold the coordinator's global lock across platform work.
-        action()
-        return true
-    }
+            // Binder calls can be slow. The global lock remains free; only a new callback for the
+            // same notification key waits until this atomic platform action has returned.
+            action()
+            true
+        }
 
     private fun releaseIfCurrent(
         key: String,
@@ -161,9 +203,21 @@ internal class NotificationProcessingCoordinator(
         return this.tokenId == tokenId && this.generation == generation && !claimed
     }
 
+    private fun compareFreshness(
+        freshness: Long,
+        tokenId: Long,
+        other: WorkEntry,
+    ): Int {
+        val freshnessComparison = freshness.compareTo(other.freshness)
+        return if (freshnessComparison != 0) freshnessComparison else tokenId.compareTo(other.tokenId)
+    }
+
+    private fun actionGate(key: String): Any = actionGates[(key.hashCode() and Int.MAX_VALUE) % actionGates.size]
+
     private data class WorkEntry(
         val tokenId: Long,
         val generation: Long,
+        val freshness: Long,
         var job: Job? = null,
         var running: Boolean = false,
         var claimed: Boolean = false,
@@ -172,6 +226,7 @@ internal class NotificationProcessingCoordinator(
     private companion object {
         const val DEFAULT_MAX_TRACKED_WORK = 64
         const val DEFAULT_MAX_CONCURRENT_WORK = 4
+        const val ACTION_GATE_COUNT = 256
     }
 
     internal class ProcessingToken internal constructor(

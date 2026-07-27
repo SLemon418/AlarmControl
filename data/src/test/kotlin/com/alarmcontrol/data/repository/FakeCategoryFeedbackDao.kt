@@ -16,6 +16,8 @@ import kotlinx.coroutines.flow.map
 class FakeCategoryFeedbackDao : CategoryFeedbackDao {
     private val rows = mutableListOf<CategoryFeedbackEntity>()
     val inserted: List<CategoryFeedbackEntity> get() = rows
+    var lastTrimMaximum: Int? = null
+        private set
     private var nextId = 1L
     private val revision = MutableStateFlow(0)
 
@@ -52,6 +54,17 @@ class FakeCategoryFeedbackDao : CategoryFeedbackDao {
         rows.removeAll { it.notificationEventId != null }
         revision.value++
         return before - rows.size
+    }
+
+    override suspend fun trimToMostRecent(max: Int): Int {
+        require(max >= 0)
+        lastTrimMaximum = max
+        val retainedIds = rows.sortedByDescending { it.id }.take(max).mapTo(mutableSetOf()) { it.id }
+        val before = rows.size
+        rows.removeAll { it.id !in retainedIds }
+        val removed = before - rows.size
+        if (removed > 0) revision.value++
+        return removed
     }
 
     override fun observeLabelCounts(packageName: String): Flow<List<LabelCount>> =

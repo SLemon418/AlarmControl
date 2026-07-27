@@ -13,6 +13,7 @@ class FakeProfileDao : ProfileDao {
     private val links = mutableListOf<ProfileRuleEntity>()
     private val state = MutableStateFlow<List<ProfileWithRules>>(emptyList())
     private var nextId = 1L
+    var countOverride: Int? = null
 
     private fun refresh() {
         state.value =
@@ -64,7 +65,7 @@ class FakeProfileDao : ProfileDao {
         return count
     }
 
-    override suspend fun countAll(): Int = profiles.size
+    override suspend fun countAll(): Int = countOverride ?: profiles.size
 
     override suspend fun countByNameExcluding(
         name: String,

@@ -2,6 +2,7 @@ package com.alarmcontrol.data.repository
 
 import com.alarmcontrol.core.profile.FilteringProfile
 import com.alarmcontrol.core.profile.MAX_PROFILE_NAME_CHARS
+import com.alarmcontrol.core.profile.MAX_PROFILE_RULE_IDS
 import com.alarmcontrol.core.profile.ProfileRepository
 import com.alarmcontrol.data.db.dao.ProfileDao
 import com.alarmcontrol.data.mapper.toDomain
@@ -24,13 +25,11 @@ class ProfileRepositoryImpl
             require(name.length <= MAX_PROFILE_NAME_CHARS) { "Profile name is too long" }
             val id =
                 if (profile.id.isBlank()) {
-                    0
+                    0L
                 } else {
                     requireNotNull(profile.id.toLongOrNull()?.takeIf { it > 0 }) { "Invalid profile id" }
                 }
-            require(profileDao.countByNameExcluding(name, id.toLong()) == 0) {
-                "A profile with this name already exists"
-            }
+            require(profile.ruleIds.size <= MAX_PROFILE_RULE_IDS) { "Profile contains too many rules" }
             val ruleIds =
                 profile.ruleIds.mapTo(mutableSetOf()) { ruleId ->
                     requireNotNull(ruleId.toLongOrNull()?.takeIf { it > 0 }) { "Invalid rule id" }

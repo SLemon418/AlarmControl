@@ -15,10 +15,10 @@ import com.alarmcontrol.automation.ProfileShortcuts
 import com.alarmcontrol.core.coroutines.ApplicationScope
 import com.alarmcontrol.core.profile.ProfileRepository
 import com.alarmcontrol.core.result.runCatchingPreservingCancellation
-import com.alarmcontrol.core.settings.SettingsRepository
 import com.alarmcontrol.work.NotificationInsightsWorker
 import dagger.hilt.android.HiltAndroidApp
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
@@ -30,12 +30,10 @@ class AlarmControlApplication :
     Configuration.Provider {
     @Inject lateinit var workerFactory: HiltWorkerFactory
 
-    @Inject @field:ApplicationScope
+    @Inject @ApplicationScope
     lateinit var applicationScope: CoroutineScope
 
     @Inject lateinit var profileRepository: ProfileRepository
-
-    @Inject lateinit var settingsRepository: SettingsRepository
 
     // On-demand WorkManager initialization so Hilt can inject worker dependencies (the default
     // startup initializer is removed in the manifest).
@@ -48,21 +46,26 @@ class AlarmControlApplication :
 
     override fun onCreate() {
         super.onCreate()
-        schedulePeriodicInsightsWork()
         applicationScope.launch {
             runCatchingPreservingCancellation {
-                if (settingsRepository.claimInsightsBootstrap(BuildConfig.VERSION_CODE)) {
-                    scheduleBootstrapInsightsWork()
-                }
+                schedulePeriodicInsightsWork()
+            }.onFailure { Log.w(TAG, "Couldn't schedule periodic insights") }
+            runCatchingPreservingCancellation {
+                scheduleBootstrapInsightsWork()
             }.onFailure { Log.w(TAG, "Couldn't schedule insights bootstrap") }
         }
         // Publish dynamic launcher shortcuts off the main thread (light disk I/O).
         applicationScope.launch {
-            profileRepository.observeProfiles().collectLatest { profiles ->
-                runCatchingPreservingCancellation {
-                    ProfileShortcuts.publish(this@AlarmControlApplication, profiles)
-                }.onFailure { Log.w(TAG, "Couldn't publish launcher shortcuts") }
-            }
+            profileRepository
+                .observeProfiles()
+                .catch {
+                    Log.w(TAG, "Couldn't load launcher shortcut profiles")
+                    emit(emptyList())
+                }.collectLatest { profiles ->
+                    runCatchingPreservingCancellation {
+                        ProfileShortcuts.publish(this@AlarmControlApplication, profiles)
+                    }.onFailure { Log.w(TAG, "Couldn't publish launcher shortcuts") }
+                }
         }
     }
 
@@ -86,10 +89,13 @@ class AlarmControlApplication :
         )
     }
 
-    /** Runs once per installed app version so first use and upgrades fill missing completed days. */
+    /**
+     * Re-submits the idempotent per-version bootstrap on every process start. WorkManager's unique
+     * work policy prevents duplication while still allowing a failed enqueue to recover later.
+     */
     private fun scheduleBootstrapInsightsWork() {
         WorkManager.getInstance(this).enqueueUniqueWork(
-            "$INSIGHTS_BOOTSTRAP_WORK_NAME-${BuildConfig.VERSION_CODE}",
+            insightsBootstrapWorkName(BuildConfig.VERSION_CODE),
             ExistingWorkPolicy.KEEP,
             OneTimeWorkRequestBuilder<NotificationInsightsWorker>()
                 .setConstraints(insightsConstraints())
@@ -110,8 +116,11 @@ class AlarmControlApplication :
     private companion object {
         const val TAG = "AlarmControl"
         const val INSIGHTS_WORK_NAME = "notification-insights"
-        const val INSIGHTS_BOOTSTRAP_WORK_NAME = "notification-insights-bootstrap"
         const val INSIGHTS_REPEAT_HOURS = 24L
         const val INSIGHTS_BACKOFF_MINUTES = 30L
     }
 }
+
+internal fun insightsBootstrapWorkName(versionCode: Int): String = "$INSIGHTS_BOOTSTRAP_WORK_NAME-$versionCode"
+
+private const val INSIGHTS_BOOTSTRAP_WORK_NAME = "notification-insights-bootstrap"

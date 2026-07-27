@@ -333,6 +333,20 @@ interface DailyInsightDao {
     @Query("DELETE FROM daily_insights")
     suspend fun deleteAll(): Int
 
+    /**
+     * Removes a completed-day rollup whose category/semantic correction just changed. The next
+     * bounded housekeeping backfill rebuilds it from raw local events instead of showing stale
+     * historical analytics.
+     */
+    @Query(
+        "DELETE FROM daily_insights WHERE EXISTS (" +
+            "SELECT 1 FROM notification_events AS event WHERE event.id = :eventId AND (" +
+            "(event.posted_epoch_day IS NOT NULL AND event.posted_epoch_day = daily_insights.epoch_day) OR " +
+            "(event.posted_epoch_day IS NULL AND event.posted_at_millis >= daily_insights.window_start_millis " +
+            "AND event.posted_at_millis < daily_insights.window_end_millis)))",
+    )
+    suspend fun deleteContainingEvent(eventId: Long): Int
+
     /** Most recent days first, with breakdowns attached, for the history UI. */
     @Transaction
     @Query("SELECT * FROM daily_insights ORDER BY epoch_day DESC LIMIT :limit")

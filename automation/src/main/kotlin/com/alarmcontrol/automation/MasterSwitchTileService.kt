@@ -19,7 +19,7 @@ import javax.inject.Inject
 
 /**
  * Quick Settings tile for the filtering master switch (CLAUDE.md §7): the user pauses/resumes the
- * engine without changing any rule. A first-party action, so it uses [ProfileController.setEnabled]
+ * engine without changing any rule. A first-party action, so it uses [ProfileController.toggle]
  * directly — it is **not** gated by the external-automation opt-in. Reads/writes go through `:core`
  * (`:data` persists). The tile mirrors the independent master setting.
  */
@@ -30,7 +30,7 @@ class MasterSwitchTileService : TileService() {
     @Inject lateinit var settingsRepository: SettingsRepository
 
     @Inject
-    @field:Dispatcher(AppDispatcher.IO)
+    @Dispatcher(AppDispatcher.IO)
     lateinit var dispatcher: CoroutineDispatcher
 
     private val scope by lazy { CoroutineScope(SupervisorJob() + dispatcher) }
@@ -43,10 +43,8 @@ class MasterSwitchTileService : TileService() {
     override fun onClick() {
         super.onClick()
         launchSafely {
-            val enabled = settingsRepository.filteringEnabled.first()
-            profileController.setEnabled(
+            profileController.toggle(
                 profileId = null,
-                enabled = !enabled,
                 source = AutomationSource.QUICK_SETTINGS,
             )
             refreshTile()

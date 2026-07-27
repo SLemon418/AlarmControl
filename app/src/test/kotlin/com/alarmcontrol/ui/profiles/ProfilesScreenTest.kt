@@ -2,6 +2,7 @@ package com.alarmcontrol.ui.profiles
 
 import android.app.Application
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -31,6 +32,15 @@ class ProfilesScreenTest {
         setContent(ProfilesUiState(isLoading = false))
 
         composeRule.onNodeWithText("No profiles yet.", substring = true).assertIsDisplayed()
+    }
+
+    @Test
+    fun `add profile fab has an accessible name`() {
+        setContent(ProfilesUiState(isLoading = false))
+
+        composeRule
+            .onNodeWithContentDescription("Add profile")
+            .assertHasClickAction()
     }
 
     @Test

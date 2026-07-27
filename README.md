@@ -69,6 +69,15 @@ your phone.
 - It is explicitly **opt-in and off by default**. The user selects a compatible quantized local model
   through Android's Storage Access Framework; the app atomically copies it into private storage and
   never downloads one.
+- A reproducible Gemma 3 fine-tuning, held-out evaluation, dynamic-INT8 conversion, and MediaPipe
+  bundling kit lives in **[ml/llm-training](ml/llm-training/README.md)**. Base weights and generated
+  artifacts remain external because access requires user-accepted terms and the model must pass
+  physical-device validation before release.
+- Import records a SHA-256 sidecar atomically with the model. Every later initialization verifies the
+  complete local file before native loading; Settings shows the full fingerprint and clearly notes
+  that integrity-after-import is not publisher certification. If the process stops midway through a
+  replacement, the next initialization restores the last verified model; an incompatible activated
+  replacement is also rolled back before inference resumes.
 - Inference runs only when an enabled rule actually needs the advertisement signal. Missing/corrupt
   models, malformed output, low confidence, or an opted-out setting all resolve to "no signal", so
   the classical classifier and deterministic rule engine continue to work.
@@ -97,20 +106,24 @@ your phone.
   never auto-saved or auto-enabled and dismissed suggestions stay dismissed locally.
 
 ### 🤖 External automation with secure gating
-- An exported `BroadcastReceiver` lets **Samsung Galaxy Routines** (via Good Lock RoutinePlus),
-  Tasker, MacroDroid, etc. enable/disable filtering through a documented intent contract. Users can
-  create named profiles that group several rules; `ENABLE_PROFILE` / `DISABLE_PROFILE` target a
-  profile id or name through the optional `PROFILE_ID` extra. Omitting it controls the independent
-  master switch while preserving every individual rule state.
+- **Samsung Modes and Routines** directly invokes AlarmControl's dynamic App Shortcuts through
+  **Applications → Open an app or do an app action**. Enable/Pause filtering and published profile
+  shortcuts use the first-party path, so they need no external-automation opt-in or token.
+- A separate exported `BroadcastReceiver` lets Tasker, MacroDroid, and compatible tools
+  enable/disable filtering through a documented intent contract. Users can create named profiles
+  that group several rules; `ENABLE_PROFILE` / `DISABLE_PROFILE` target a profile id or name through
+  the optional `PROFILE_ID` extra. Omitting it controls the independent master switch while
+  preserving every individual rule state.
 - **Hardened external boundary:** the receiver is inert until the user enables *Settings → "Allow
   external automation"* (off by default), and every request must carry the random per-install
-  `AUTH_TOKEN` shown there. Requests are rate-limited to 12 per minute; the token can be rotated at
-  any time and is never backed up.
+  `AUTH_TOKEN` shown there. The sender must explicitly target the AlarmControl package/component so
+  the token is never placed on an implicit broadcast. Requests are rate-limited to 12 per minute;
+  the token can be rotated at any time and is never backed up.
 - A bounded, content-free local audit shows recent source/action/result/count metadata for
   troubleshooting. It never records tokens, target names, or notification content.
 - **Quick Settings tile** for a first-party master switch straight from the notification shade,
   plus dynamic launcher shortcuts for the master switch and the available named profiles.
-- Full setup (including the exact RoutinePlus steps and an `adb` smoke test): see
+- Full Samsung Shortcut and authenticated-Intent setup (including an `adb` smoke test): see
   **[docs/automation.md](docs/automation.md)**.
 
 ### 🔁 Local backup & restore
@@ -118,9 +131,10 @@ your phone.
   JSON file — or restore from one — through a **local-only Storage Access Framework** request.
   AlarmControl itself never uploads it.
 - Backups can optionally be protected with **PBKDF2-HMAC-SHA256 + AES-256-GCM**. Plain JSON remains
-  available for portability. Package-level category/ad learning votes may be included only when
-  encryption is enabled; notification text, LLM reasoning, passwords, and automation tokens are
-  never exported.
+  available for portability and must be treated as readable. New encrypted exports require an
+  8-character password; shorter legacy passwords remain accepted for restore. Package-level
+  category/ad learning votes may be included only when encryption is enabled; notification text,
+  LLM reasoning, passwords, and automation tokens are never exported.
 - Restore first presents a validated preview, then supports merge or replacement and section-level
   selection. Rules/profiles remain one referential unit, and malformed or unauthenticated input is
   rejected before any local state changes.
@@ -191,9 +205,10 @@ Privacy isn't a policy here — it's enforced by the build:
   per-install token, rate-limits request storms, and changes only the local master switch or an
   explicitly targeted profile/rule.
 
-The on-device model is produced by an **offline training pipeline** (`ml/training/`, a build-time
-dev tool — not shipped and not part of the Gradle build). It's deterministic and re-runnable; see
-that folder's README.
+The bundled compact model is produced by an **offline training pipeline** (`ml/training/`, a
+build-time dev tool — not shipped and not part of the Gradle build). The optional LLM has a separate
+local-only model pipeline in [`ml/llm-training/`](ml/llm-training/README.md); neither its base weights
+nor generated artifacts are committed or packaged in the app.
 
 ---
 
@@ -206,11 +221,14 @@ Full local setup (JDK 17 and Android SDK 36; the Gradle wrapper is included) is 
 export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
 
 ./gradlew assembleDebug        # build the universal local debug APK
-./gradlew :app:bundleRelease   # preferred release artifact (Play performs ABI delivery)
-./gradlew test                 # all modules' 425 JVM unit and Robolectric test methods
+./gradlew :app:bundleRelease   # release-shape compile check; may be unsigned
+./gradlew test                 # all modules' 564 JVM unit and Robolectric test methods
 ./gradlew check                # tests + detekt + ktlint (also run as part of `build`)
 ./gradlew build                # complete device-independent build and quality gate
 ```
+
+For a distributable, signed bundle, configure the four `ALARMCONTROL_*` signing environment
+variables documented in [BUILD.md](BUILD.md) and run `./gradlew :app:releaseCandidate`.
 
 ### Tests run entirely on the local JVM — no emulator required
 
@@ -227,22 +245,32 @@ export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
   They use `@RunWith(RobolectricTestRunner::class)` with `@GraphicsMode(NATIVE)` and a pinned
   `@Config(application = Application::class, sdk = [34])` so Compose lays out without booting Hilt.
 - **ML determinism:** classification tests pin the bundled model + fixtures and assert exact labels.
-- **425 local JVM test methods** across the runtime modules, plus **11 API 34 Managed Device tests**
-  (Room/data 6, real TFLite 4, app/Hilt/navigation 1); CI requires both suites to stay green.
+- **564 local JVM test methods** across the runtime modules, plus **19 instrumented tests**
+  (Room/data 7, real TFLite 4, app runtime 8); they pass on the connected Galaxy and CI runs the
+  same suite on an API 34 Managed Device.
 - **Instrumented tests** (run on a device/emulator) cover the paths the JVM can't:
   - `:ml/src/androidTest` validates the real TensorFlow Lite runtime against the bundled model.
   - `:data/src/androidTest` contains **Room migration tests** that upgrade seeded v1, v2, v3, v10,
     and v12 databases to v13 and assert rules/events/feedback survive while
     daily-history, profiles, local LLM observations, imported priors, and automation audit tables
     remain usable.
-  - `:app/src/androidTest` launches the real Activity and verifies the Hilt/resources/navigation
-    smoke path.
+  - `:app/src/androidTest` launches the real Activity, verifies the Hilt/resources/navigation smoke
+    path, exercises monitor/cancel/snooze decisions, a rapid 20-post burst, and forced Doze through
+    the real notification listener, confirms Android Ranking importance and the Hilt WorkManager
+    rollup path, exercises authenticated exported automation without exposing its token, and checks
+    that a missing user-imported LLM fails open through the production DI graph.
 
   ```sh
   ./gradlew :ml:connectedDebugAndroidTest
   ./gradlew :data:connectedDebugAndroidTest
   ./gradlew :app:connectedDebugAndroidTest
   ```
+
+  Run `connectedDebugAndroidTest` only on a dedicated test device/profile: AGP may uninstall the
+  target debug package after the run and erase its local data. Back up valued data first, or install
+  the built APKs manually and invoke `adb shell am instrument` so only the `.test` package is removed
+  afterward. Listener tests use controlled `com.android.shell` notifications, so neither APK requests
+  `POST_NOTIFICATIONS`.
 
 - **Baseline Profile and startup benchmark:** `:baselineprofile` compiles as part of normal builds
   without requiring a device. Generate/refresh the real profile on a connected API 33+ device with
@@ -303,8 +331,8 @@ making changes — the offline and on-device guarantees are the reason this proj
 
 - **MediaPipe LLM foundation.** A user-supplied local quantized model is loaded asynchronously and
   exposes explicit idle/installing/loading/ready/unavailable state. Import is size-bounded,
-  progress-aware, atomically activated, and rolled back if compatibility loading fails. The model
-  is never fetched by the app.
+  progress-aware, atomically activated, SHA-256 verified before later loads, and rolled back if
+  compatibility loading fails. The model is never fetched by the app.
 - **Safe ad signal.** Bounded, injection-resistant prompts and strict JSON parsing produce a
   confidence-gated advertisement signal only when a rule requests it and the user has opted in.
 - **Production hardening.** R8/resource shrinking, app bundles with Play-managed ABI delivery,
@@ -317,6 +345,9 @@ making changes — the offline and on-device guarantees are the reason this proj
 - **Offline gate at every release path.** Unit tests plus the Gradle `offlineGuard` task scan both
   debug/release merged manifests and runtime dependency graphs during `check`, APK assembly, and
   bundle creation.
+- **Immutable CI inputs.** `verifyCiActionPins` scans workflow, reusable-workflow, and local
+  composite-action YAML. Remote actions must use full commit SHAs and container actions must use
+  SHA-256 image digests.
 
 ## Milestone 5 — advanced local control and explainability
 
@@ -376,25 +407,36 @@ Detailed behavior and privacy fields are documented in the
   collapsed until requested.
 - **Release gates.** The release AAB must remain at or below 60 MiB, and detekt, ktlint, all local
   tests, migration/test APK compilation, dependency verification, and offline guards remain
-  mandatory.
+  mandatory. `bundleRelease` may intentionally be unsigned for CI compilation; the publishable
+  path is `:app:releaseCandidate`, which requires the complete signing configuration and
+  cryptographically verifies signed AAB payload entries.
 
 ## Physical Galaxy validation
 
-On 2026-07-22, a Galaxy Note20 5G (`SM-N981N`, Android 13 / API 33, One UI 5.1) completed:
+On 2026-07-27, a Galaxy Note20 5G (`SM-N981N`, Android 13 / API 33, One UI 5.1) completed:
 
-- all seven physical-device instrumentation tests (`:data` 2, `:ml` 4, `:app` 1);
-- real notification-listener binding, active cancellation, independent monitor prediction, stored
-  decision traces, and the exact One UI channel-settings deep link using content-free test posts;
-- release APK/AAB offline gates and generated Baseline/Startup Profiles (24,551 rules each); and
-- the offline connected startup test: 10 cold launches, 168 ms minimum, 190 ms median, 188.7 ms
-  mean, and 204 ms maximum. These figures describe this device/run, not all supported devices.
+- all 19 physical-device instrumentation tests (`:data` 7, `:ml` 4, `:app` 8);
+- real notification-listener binding, independent monitor prediction, active cancellation, Samsung
+  snooze storage, stored decision traces, and the exact One UI channel-settings deep link using
+  content-free test posts;
+- notification-listener permission removal, immediate unbinding, re-grant, and automatic service
+  recreation after the app process was stopped;
+- a rapid 20-notification burst and active cancellation while the device was forced into deep idle;
+- Android Ranking importance reaching a real protection condition, authenticated profile automation
+  rejecting a bad token without throttling the next valid request, and missing-LLM fail-open behavior;
+- Samsung Modes and Routines with Routine+ 1.0.60 discovering the real AlarmControl App Shortcuts,
+  with manual Pause/Enable routines changing the master switch off and back on;
+- the Hilt-created WorkManager aggregation path and persisted `DailyInsight`;
+- release APK/AAB offline gates and generated Baseline/Startup Profiles (25,859 rules each); and
+- the offline connected startup test: 10 cold launches, 206 ms minimum, 213 ms median, 215.4 ms
+  mean, and 233 ms maximum. These figures describe this device/run, not all supported devices.
 
 The temporary test rule and activity records were removed after validation.
 
 ## Roadmap
 
-- Validate Doze/battery behavior, Tasker/RoutinePlus end-to-end contracts, and notification ranking
-  across additional One UI/API versions.
+- Validate Doze/battery behavior and notification ranking across additional One UI/API versions, and
+  run the authenticated exported-Intent contract from actual Tasker/MacroDroid sender apps.
 - Run the new v13 migration, guided editor, range analysis, Records detail, retention, and Keystore
   deletion scenarios on the connected Galaxy before publishing this milestone.
 - Validate representative MediaPipe quantized models and latency/thermal behavior across a physical

@@ -13,7 +13,7 @@ import com.alarmcontrol.core.filtering.RateSignal
 class NotificationRateTracker {
     private val packageEvents = mutableMapOf<String, MutableList<Long>>()
     private val channelEvents = mutableMapOf<ChannelKey, MutableList<Long>>()
-    private val livePostsByKey = mutableMapOf<String, NotificationRateEvent>()
+    private val livePostsByKey = linkedMapOf<String, NotificationRateEvent>()
     private var initialized = false
     private var newestTimestampMillis = Long.MIN_VALUE
 
@@ -27,10 +27,9 @@ class NotificationRateTracker {
         packageEvents.clear()
         channelEvents.clear()
         val cutoff = nowMillis - MAX_RATE_WINDOW_MILLIS
-        (events + livePosts)
+        mergeSeedAndLive(events, livePosts)
             .asSequence()
             .filter { it.postedAtMillis in cutoff..nowMillis }
-            .distinct()
             .sortedBy { it.postedAtMillis }
             .forEach(::append)
         newestTimestampMillis = maxOf(nowMillis, livePosts.maxOfOrNull { it.postedAtMillis } ?: Long.MIN_VALUE)
@@ -58,12 +57,38 @@ class NotificationRateTracker {
         key: String,
     ) {
         val event = NotificationRateEvent(snapshot.packageName, snapshot.channelId, snapshot.postedAtMillis)
-        val previous = livePostsByKey.put(key, event)
+        val previous = livePostsByKey[key]
         if (previous == event) return
-        previous?.let(::remove)
-        append(event)
+        if (previous != null && event.postedAtMillis < previous.postedAtMillis) return
+        if (previous == null && livePostsByKey.size >= MAX_LIVE_KEYS) {
+            // Losing update identity could otherwise over-count a later repost and trigger a
+            // destructive rate rule. Degrade all rate signals to UNKNOWN until the next seed.
+            initialized = false
+            packageEvents.clear()
+            channelEvents.clear()
+            livePostsByKey.entries.iterator().let { iterator ->
+                if (iterator.hasNext()) {
+                    iterator.next()
+                    iterator.remove()
+                }
+            }
+        }
+        livePostsByKey[key] = event
+        if (initialized) {
+            previous?.let(::remove)
+            append(event)
+        }
         newestTimestampMillis = maxOf(newestTimestampMillis, event.postedAtMillis)
         prune(newestTimestampMillis - MAX_RATE_WINDOW_MILLIS)
+    }
+
+    /**
+     * Stops treating a later post with [key] as an update while retaining this post in historical
+     * frequency counts. A notification removed and subsequently reposted is a new occurrence.
+     */
+    @Synchronized
+    fun markRemoved(key: String) {
+        livePostsByKey.remove(key)
     }
 
     /** Returns requested counts at the snapshot's post time without recording another event. */
@@ -111,7 +136,9 @@ class NotificationRateTracker {
                     }
                 if (timestamps != null) {
                     val cutoff = nowMillis - signal.windowMillis
-                    put(signal, timestamps.count { it >= cutoff && it <= nowMillis })
+                    val first = timestamps.lowerBound(cutoff)
+                    val afterLast = timestamps.upperBound(nowMillis)
+                    put(signal, (afterLast - first).coerceAtLeast(0))
                 } else {
                     put(signal, 0)
                 }
@@ -119,11 +146,19 @@ class NotificationRateTracker {
         }
 
     private fun append(event: NotificationRateEvent) {
-        packageEvents.getOrPut(event.packageName, ::mutableListOf).insertSorted(event.postedAtMillis)
+        packageEvents
+            .getOrPut(event.packageName, ::mutableListOf)
+            .also { timestamps ->
+                timestamps.insertSorted(event.postedAtMillis)
+                timestamps.retainNewest()
+            }
         event.channelId?.let { channelId ->
             channelEvents
                 .getOrPut(ChannelKey(event.packageName, channelId), ::mutableListOf)
-                .insertSorted(event.postedAtMillis)
+                .also { timestamps ->
+                    timestamps.insertSorted(event.postedAtMillis)
+                    timestamps.retainNewest()
+                }
         }
     }
 
@@ -144,15 +179,39 @@ class NotificationRateTracker {
         val iterator = entries.iterator()
         while (iterator.hasNext()) {
             val timestamps = iterator.next().value
-            val firstRetained = timestamps.binarySearch(cutoffMillis).let { if (it < 0) -it - 1 else it }
+            val firstRetained = timestamps.lowerBound(cutoffMillis)
             if (firstRetained > 0) timestamps.subList(0, firstRetained).clear()
             if (timestamps.isEmpty()) iterator.remove()
         }
     }
 
     private fun MutableList<Long>.insertSorted(timestamp: Long) {
-        val index = binarySearch(timestamp).let { if (it < 0) -it - 1 else it + 1 }
-        add(index, timestamp)
+        add(upperBound(timestamp), timestamp)
+    }
+
+    private fun MutableList<Long>.retainNewest() {
+        val overflow = size - MAX_POSTS_PER_SCOPE
+        if (overflow > 0) subList(0, overflow).clear()
+    }
+
+    private fun List<Long>.lowerBound(value: Long): Int {
+        var low = 0
+        var high = size
+        while (low < high) {
+            val middle = (low + high).ushr(1)
+            if (this[middle] < value) low = middle + 1 else high = middle
+        }
+        return low
+    }
+
+    private fun List<Long>.upperBound(value: Long): Int {
+        var low = 0
+        var high = size
+        while (low < high) {
+            val middle = (low + high).ushr(1)
+            if (this[middle] <= value) low = middle + 1 else high = middle
+        }
+        return low
     }
 
     private fun <K> MutableMap<K, MutableList<Long>>.removeTimestamp(
@@ -169,4 +228,29 @@ class NotificationRateTracker {
         val packageName: String,
         val channelId: String,
     )
+
+    private fun mergeSeedAndLive(
+        seed: List<NotificationRateEvent>,
+        live: List<NotificationRateEvent>,
+    ): List<NotificationRateEvent> {
+        val remainingSeedMatches = seed.groupingBy { it }.eachCount().toMutableMap()
+        val additionalLive =
+            live.filter { event ->
+                val matches = remainingSeedMatches[event] ?: 0
+                if (matches > 0) {
+                    remainingSeedMatches[event] = matches - 1
+                    false
+                } else {
+                    true
+                }
+            }
+        return seed + additionalLive
+    }
+
+    private companion object {
+        // RuleDefinitionValidator caps rate thresholds at 1,000. Retaining the newest 1,000
+        // timestamps therefore preserves every possible RateAtLeast result without unbounded memory.
+        const val MAX_POSTS_PER_SCOPE = 1_000
+        const val MAX_LIVE_KEYS = 4_096
+    }
 }

@@ -73,12 +73,33 @@ class LiteRTNotificationClassifierTest {
         }
 
     @Test
+    fun `native backend linkage failure degrades to null`() =
+        runTest {
+            val backend = FakeInferenceBackend(scores = null, error = UnsatisfiedLinkError("unsupported ABI"))
+            assertNull(classifier(backend).classify(snapshot()))
+        }
+
+    @Test
+    fun `native backend memory failure degrades to null`() =
+        runTest {
+            val backend = FakeInferenceBackend(scores = null, error = OutOfMemoryError("native allocation"))
+            assertNull(classifier(backend).classify(snapshot()))
+        }
+
+    @Test
     fun `non-finite model scores degrade to null`() =
         runTest {
             assertNull(classifier(FakeInferenceBackend(floatArrayOf(Float.NaN, 0.8f, 0.2f))).classify(snapshot()))
             assertNull(
                 classifier(FakeInferenceBackend(floatArrayOf(Float.POSITIVE_INFINITY, 0.1f, 0f))).classify(snapshot()),
             )
+        }
+
+    @Test
+    fun `incompatible output shape or probability range degrades to null`() =
+        runTest {
+            assertNull(classifier(FakeInferenceBackend(floatArrayOf(0.8f, 0.2f))).classify(snapshot()))
+            assertNull(classifier(FakeInferenceBackend(floatArrayOf(1.2f, -0.1f, -0.1f))).classify(snapshot()))
         }
 
     @Test

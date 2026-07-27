@@ -1,0 +1,5 @@
+# Keep conversion isolated from the training and MediaPipe bundler environments.
+# Run this environment on Linux; the macOS native libraries register conflicting
+# LLVM command-line options when TensorFlow and LiteRT Converter load together.
+tensorflow==2.21.0
+litert-torch==0.9.1

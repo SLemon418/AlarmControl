@@ -8,14 +8,31 @@ class AutomationRateLimiter
     @Inject
     constructor() {
         private val accepted = ArrayDeque<Long>()
+        private val rejected = ArrayDeque<Long>()
 
         @Synchronized
-        fun tryAcquire(nowMillis: Long): Boolean {
-            while (accepted.isNotEmpty() && nowMillis - accepted.first() >= WINDOW_MILLIS) {
-                accepted.removeFirst()
+        fun tryAcquire(nowMillis: Long): Boolean = tryAcquire(accepted, nowMillis)
+
+        /**
+         * Bounds audit writes for disabled, unauthorized, malformed, and throttled requests without
+         * consuming the independent allowance for authenticated operations.
+         */
+        @Synchronized
+        fun tryAcquireRejected(nowMillis: Long): Boolean = tryAcquire(rejected, nowMillis)
+
+        private fun tryAcquire(
+            requests: ArrayDeque<Long>,
+            nowMillis: Long,
+        ): Boolean {
+            if (requests.peekLast()?.let { nowMillis < it } == true) {
+                // Wall-clock corrections must not lock valid local automation out for an arbitrary time.
+                requests.clear()
             }
-            if (accepted.size >= MAX_REQUESTS) return false
-            accepted.addLast(nowMillis)
+            while (requests.isNotEmpty() && nowMillis - requests.first() >= WINDOW_MILLIS) {
+                requests.removeFirst()
+            }
+            if (requests.size >= MAX_REQUESTS) return false
+            requests.addLast(nowMillis)
             return true
         }
 

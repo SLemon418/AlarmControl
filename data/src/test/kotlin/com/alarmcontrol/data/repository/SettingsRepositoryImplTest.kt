@@ -5,8 +5,11 @@ import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.stringPreferencesKey
 import com.alarmcontrol.core.settings.SettingsSnapshot
+import com.alarmcontrol.data.security.NotificationContentAccessGuard
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -15,6 +18,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
+import java.io.IOException
 
 class SettingsRepositoryImplTest {
     @get:Rule
@@ -25,7 +29,7 @@ class SettingsRepositoryImplTest {
             PreferenceDataStoreFactory.create(
                 produceFile = { File(tempFolder.root, "settings.preferences_pb") },
             )
-        return SettingsRepositoryImpl(dataStore)
+        return SettingsRepositoryImpl(dataStore, NotificationContentAccessGuard())
     }
 
     @Test
@@ -58,21 +62,68 @@ class SettingsRepositoryImplTest {
         }
 
     @Test
+    fun `malformed persisted automation token is hidden and regenerated`() =
+        runTest {
+            val dataStore =
+                PreferenceDataStoreFactory.create {
+                    File(tempFolder.root, "invalid-token.preferences_pb")
+                }
+            dataStore.edit { preferences ->
+                preferences[stringPreferencesKey("external_automation_token")] = "not a valid token"
+            }
+            val repository = SettingsRepositoryImpl(dataStore, NotificationContentAccessGuard())
+
+            assertEquals("", repository.externalAutomationToken.first())
+
+            val regenerated = repository.ensureExternalAutomationToken()
+
+            assertEquals(43, regenerated.length)
+            assertEquals(regenerated, repository.externalAutomationToken.first())
+        }
+
+    @Test
     fun `restoring portable settings never overwrites the local automation token`() =
         runTest {
             val repository = repository()
             repository.setExternalAutomationEnabled(true)
             val token = repository.externalAutomationToken.first()
 
-            repository.restore(SettingsSnapshot(externalAutomationEnabled = false))
+            repository.restore(SettingsSnapshot(externalAutomationEnabled = true))
 
             assertEquals(token, repository.externalAutomationToken.first())
+        }
+
+    @Test
+    fun `restoring enabled automation creates the omitted per-install token`() =
+        runTest {
+            val repository = repository()
+
+            repository.restore(SettingsSnapshot(externalAutomationEnabled = true))
+
+            assertTrue(repository.externalAutomationEnabled.first())
+            assertEquals(43, repository.externalAutomationToken.first().length)
         }
 
     @Test
     fun `filtering defaults to true`() =
         runTest {
             assertTrue(repository().filteringEnabled.first())
+        }
+
+    @Test
+    fun `DataStore read failure pauses filtering instead of using the fresh install default`() =
+        runTest {
+            val failingStore =
+                object : DataStore<Preferences> {
+                    override val data = flow<Preferences> { throw IOException("unreadable") }
+
+                    override suspend fun updateData(transform: suspend (t: Preferences) -> Preferences): Preferences =
+                        throw IOException("unwritable")
+                }
+            val repository = SettingsRepositoryImpl(failingStore, NotificationContentAccessGuard())
+
+            assertFalse(repository.filteringEnabled.first())
+            assertFalse(repository.snapshot().filteringEnabled)
         }
 
     @Test
@@ -165,6 +216,20 @@ class SettingsRepositoryImplTest {
         }
 
     @Test
+    fun `disabling LLM analysis also revokes automatic actions`() =
+        runTest {
+            val repository = repository()
+            repository.setLlmAnalysisEnabled(true)
+            repository.setLlmAutoActionsEnabled(true)
+
+            repository.setLlmAnalysisEnabled(false)
+
+            assertFalse(repository.llmAnalysisEnabled.first())
+            assertFalse(repository.llmAutoActionsEnabled.first())
+            assertTrue(runCatching { repository.setLlmAutoActionsEnabled(true) }.isFailure)
+        }
+
+    @Test
     fun `retention defaults can be changed and reset`() =
         runTest {
             val repository = repository()
@@ -179,20 +244,18 @@ class SettingsRepositoryImplTest {
             repository.reset()
             assertEquals(30, repository.eventRetentionDays.first())
             assertEquals(365, repository.dailyInsightRetentionDays.first())
-            assertTrue(repository.filteringEnabled.first())
+            assertFalse(repository.filteringEnabled.first())
         }
 
     @Test
-    fun `insights bootstrap is claimed once per app version and resettable`() =
+    fun `reset keeps filtering paused even though a fresh install defaults to enabled`() =
         runTest {
             val repository = repository()
-
-            assertTrue(repository.claimInsightsBootstrap(100))
-            assertFalse(repository.claimInsightsBootstrap(100))
-            assertTrue(repository.claimInsightsBootstrap(101))
+            assertTrue(repository.filteringEnabled.first())
 
             repository.reset()
-            assertTrue(repository.claimInsightsBootstrap(101))
+
+            assertFalse(repository.filteringEnabled.first())
         }
 
     @Test
@@ -206,7 +269,7 @@ class SettingsRepositoryImplTest {
                 preferences[intPreferencesKey("event_retention_days")] = 0
                 preferences[intPreferencesKey("daily_insight_retention_days")] = 10_000
             }
-            val repository = SettingsRepositoryImpl(dataStore)
+            val repository = SettingsRepositoryImpl(dataStore, NotificationContentAccessGuard())
 
             assertEquals(30, repository.eventRetentionDays.first())
             assertEquals(365, repository.dailyInsightRetentionDays.first())

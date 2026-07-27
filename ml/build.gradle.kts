@@ -49,9 +49,8 @@ dependencies {
 
     implementation(libs.kotlinx.coroutines.core)
 
-    // Compact on-device inference runtime. Its classifier model ships in assets.
-    implementation(libs.tensorflow.lite)
-    implementation(libs.tensorflow.lite.support)
+    // Compact official LiteRT Interpreter runtime. Its classifier model ships in assets.
+    implementation(libs.litert)
 
     // On-device generative LLM inference (Milestone 4). Runs a LOCAL model; no network (§3) — the
     // offline guard in :app enforces no INTERNET permission or networking client comes with it.
@@ -66,7 +65,7 @@ dependencies {
     // Real org.json for parsing tests (production uses the Android platform's org.json).
     testImplementation(libs.json)
 
-    // Instrumented tests: load and run the real bundled .tflite under the Android TFLite runtime.
+    // Instrumented tests: load and run the real bundled .tflite under the Android LiteRT runtime.
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.androidx.test.core)
     androidTestImplementation(libs.androidx.test.runner)

@@ -85,7 +85,7 @@ class FakeLlmObservationDao : LlmObservationDao {
     override suspend fun deleteSemanticImportedPriors(): Int =
         semanticPriors.value.size.also { semanticPriors.value = emptyList() }
 
-    override suspend fun countSemanticImportedPriorVotes(): Int = semanticPriors.value.sumOf { it.count }
+    override suspend fun countSemanticImportedPriorVotes(): Long = semanticPriors.value.sumOf { it.count.toLong() }
 
     override suspend fun getImportedPriors(): List<AdFeedbackPriorEntity> = importedPriors.value
 
@@ -98,7 +98,7 @@ class FakeLlmObservationDao : LlmObservationDao {
     override suspend fun deleteImportedPriors(): Int =
         importedPriors.value.size.also { importedPriors.value = emptyList() }
 
-    override suspend fun countImportedPriorVotes(): Int = importedPriors.value.sumOf { it.count }
+    override suspend fun countImportedPriorVotes(): Long = importedPriors.value.sumOf { it.count.toLong() }
 
     override suspend fun clearCorrections(): Int {
         val count = rows.value.count { it.correctedIsAdvertisement != null }

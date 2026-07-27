@@ -17,6 +17,7 @@ class FakeSettingsRepository(
     dynamicColor: Boolean = false,
 ) : SettingsRepository {
     val operationLog = mutableListOf<String>()
+    var beforeSetContentExcludedPackages: suspend (Set<String>) -> Unit = {}
     private val state = MutableStateFlow(enabled)
     private val filteringState = MutableStateFlow(filtering)
     private val llmState = MutableStateFlow(llmEnabled)
@@ -46,6 +47,7 @@ class FakeSettingsRepository(
     override val contentExcludedPackages: Flow<Set<String>> = excludedPackagesState
 
     override suspend fun setFilteringEnabled(enabled: Boolean) {
+        operationLog += "filtering:$enabled"
         filteringState.value = enabled
     }
 
@@ -85,6 +87,7 @@ class FakeSettingsRepository(
     }
 
     override suspend fun setContentExcludedPackages(packageNames: Set<String>) {
+        beforeSetContentExcludedPackages(packageNames)
         operationLog += "excluded-packages:${packageNames.sorted().joinToString()}"
         excludedPackagesState.value = packageNames
     }
@@ -111,7 +114,7 @@ class FakeSettingsRepository(
     override suspend fun reset() {
         operationLog += "reset"
         state.value = false
-        filteringState.value = true
+        filteringState.value = false
         llmState.value = false
         llmAutoActionsState.value = false
         eventRetentionState.value = RetentionDefaults.EVENT_DAYS

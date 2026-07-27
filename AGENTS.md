@@ -162,7 +162,9 @@ Boundaries exist to keep features small and to make the offline rule structurall
 - Enabled rules are compiled into independent **ACTIVE** and **MONITOR** lanes. The first active
   match alone may perform a platform action; the first monitor match records an expected action and
   can never shadow or block an active rule.
-- Listener work is bounded to 64 tracked notifications and four concurrent evaluations. Newer posts
+- Listener work is bounded to 64 tracked notifications and four concurrent evaluations. Queue
+  freshness follows the notification's actual post time, so a late callback for an older post
+  cannot evict fresher waiting work; running work is never an overflow victim. Newer posts
   invalidate older work for the same notification, and rule or permission changes revoke stale
   actions before their Binder commit. An unavailable startup cache fails open after two seconds.
 - Frequency conditions are package or package+channel scoped, include the current post, and support
@@ -198,16 +200,21 @@ Boundaries exist to keep features small and to make the offline rule structurall
 
 ## 7. Automation & Samsung Routines rules
 
-- **There is no public Samsung "Modes and Routines" third-party action SDK.** Integration is:
-  exported intents + a Tasker/Locale plugin (which Samsung Routines can invoke via Tasker / Good
-  Lock RoutinePlus). Don't claim or build against a native Samsung API.
+- **There is no public Samsung "Modes and Routines" third-party action SDK.** Direct Samsung
+  integration uses AlarmControl's dynamic App Shortcuts through **Applications → Open an app or do
+  an app action**. On the validated One UI 5.1 / Routine+ 1.0.60 device, Routine+ does not expose a
+  generic "send broadcast" action. Tasker, MacroDroid, and Locale-compatible tools use the separate
+  authenticated exported-intent contract. Don't claim or build against a native Samsung API.
 - Exported intents are a **documented, stable contract** (e.g. `ENABLE_PROFILE` / `DISABLE_PROFILE`
   with a `profileId` extra). Treat them like a public API: require the explicit in-app automation
   opt-in **and the per-install `AUTH_TOKEN` extra**, validate actions/extras, rate-limit broadcast
   storms, and don't break them casually. A custom Android permission is intentionally not used
-  because Tasker/RoutinePlus cannot hold an app-defined signature permission. Keep only a bounded,
+  because external automation tools cannot hold an app-defined signature permission. Keep only a bounded,
   content-free local audit (source/operation/target type/outcome/count; never target names or tokens).
-- Provide Quick Settings tiles + App Shortcuts for manual toggles of the same actions.
+  Require senders to target the AlarmControl package or receiver component explicitly; reject
+  implicit broadcasts so another app cannot subscribe to the public action and observe the token.
+- Provide Quick Settings tiles + App Shortcuts for manual toggles of the same actions. Samsung
+  Routines invokes these first-party shortcuts without the external-automation opt-in or token.
 - Named profiles are persisted groups of rule ids. UI, launcher shortcuts, and automation must all
   delegate to the same `ProfileController`; do not duplicate profile-toggle semantics.
 
@@ -243,14 +250,28 @@ Turn tasks into verifiable goals and loop until green (see §10).
   including legacy binary-ad feedback migration to semantic intents.
   Instrumented tests run on a device/emulator (`./gradlew :data:connectedDebugAndroidTest`),
   complementing the JVM unit suite — they are **not** part of the default `./gradlew test` run.
-- **Android runtime smoke tests** in `:app` verify the real Activity/Hilt/navigation setup; `:ml`
-  validates the bundled TFLite runtime and assets. Compile all test APKs when no device is available.
+- Run AGP `connectedDebugAndroidTest` tasks only on a dedicated test device/profile: their teardown
+  may uninstall the target debug package and erase its local data. Back up valued data first, or
+  install the built APKs manually and invoke `adb shell am instrument`; remove only the `.test`
+  package afterward. Listener tests use controlled `com.android.shell` notifications, so neither
+  product nor test APK requests `POST_NOTIFICATIONS`.
+- **Android runtime smoke tests** in `:app` verify the real Activity/Hilt/navigation setup,
+  notification actions under burst/Doze, Android Ranking importance, authenticated exported
+  automation, missing-LLM fail-open behavior, and WorkManager persistence; `:ml` validates the
+  bundled TFLite runtime and assets. Compile all test APKs when no device is available.
 - **CI has two tiers.** Every pull request runs JVM/Robolectric, quality/offline gates, release
-  APK/AAB, all instrumented-test APKs, and Baseline Profile variant compilation. Main changes,
-  nightly runs, and manual dispatch additionally execute the `pixel2Api34` `aosp-atd` Gradle Managed
-  Device tests for `:data`, `:ml`, and `:app`.
+  APK/AAB compilation, all instrumented-test APKs, and Baseline Profile variant compilation. Main
+  changes, nightly runs, and manual dispatch additionally execute the `pixel2Api34` `aosp-atd`
+  Gradle Managed Device tests for `:data`, `:ml`, and `:app`.
+- **A compiled release bundle is not automatically distributable.** CI may run the intentionally
+  unsigned `bundleRelease` path. A bundle intended for distribution must instead pass
+  `:app:releaseCandidate`, which requires all four release-signing environment variables, runs the
+  device-independent gates, enforces the AAB size limit, and cryptographically validates signed
+  payload entries. Never commit a keystore or signing credentials.
 - **Supply-chain verification is mandatory.** CI validates the Gradle wrapper and resolves artifacts
-  with strict SHA-256 checks from `gradle/verification-metadata.xml`; never bypass or weaken it.
+  with strict SHA-256 checks from `gradle/verification-metadata.xml`. `verifyCiActionPins` scans
+  workflow, reusable-workflow, and composite-action YAML; remote actions require a full 40-character
+  commit SHA and container actions require a SHA-256 digest. Never bypass or weaken these gates.
 - **Startup performance** uses the build-only `:baselineprofile` generator and a socket-free
   connected benchmark that records ActivityManager `TotalTime`. AndroidX trace-processor metrics
   are intentionally excluded because they require `INTERNET` for localhost HTTP even in the test

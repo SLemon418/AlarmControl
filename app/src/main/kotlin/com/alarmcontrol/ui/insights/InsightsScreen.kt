@@ -62,6 +62,7 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
@@ -101,7 +102,10 @@ fun InsightsRoute(
                 }
             }
         lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            viewModel.closeEventDetail()
+        }
     }
     InsightsScreen(
         state = state,
@@ -951,13 +955,20 @@ private fun EventDetails(
             textDecoration = if (event.undone) TextDecoration.LineThrough else null,
         )
         if (event.appName != event.packageName) {
-            Text(event.packageName, style = MaterialTheme.typography.labelSmall)
+            Text(
+                text = event.packageName,
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
         Text(event.subtitle(), style = MaterialTheme.typography.bodySmall)
         event.channelId?.let { channelId ->
             Text(
                 stringResource(R.string.insights_channel, channelId),
                 style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
         event.correctedCategory?.let { corrected ->

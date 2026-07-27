@@ -39,7 +39,8 @@ class ProfileController
         /**
          * Sets [enabled] on every member of an id/name-matched profile. For compatibility with
          * automation configured before named profiles existed, an unmatched value falls back to an
-         * id-matched rule or all rules sharing a name. A blank value changes the master gate.
+         * id-matched rule or exactly one case-insensitive rule-name match. Duplicate names are
+         * rejected as ambiguous. A blank value changes the master gate.
          *
          * @param profileId a profile id/name, or legacy rule id/name; blank targets the master gate.
          */
@@ -49,7 +50,13 @@ class ProfileController
             source: AutomationSource = AutomationSource.IN_APP,
         ): Int =
             operationMutex.withLock {
-                val result = applyEnabled(profileId.normalizedTarget(), enabled)
+                val target = profileId.normalizedTarget()
+                val result =
+                    if (profileId.isInvalidTarget(target)) {
+                        ApplyResult(AutomationOutcome.INVALID, 0)
+                    } else {
+                        applyEnabled(target, enabled)
+                    }
                 record(
                     source,
                     if (enabled) AutomationOperation.ENABLE else AutomationOperation.DISABLE,
@@ -67,7 +74,9 @@ class ProfileController
             operationMutex.withLock {
                 val target = profileId.normalizedTarget()
                 val result =
-                    if (target == null) {
+                    if (profileId.isInvalidTarget(target)) {
+                        ApplyResult(AutomationOutcome.INVALID, 0)
+                    } else if (target == null) {
                         applyEnabled(null, enabled = !settingsRepository.filteringEnabled.first())
                     } else {
                         when (val resolution = resolveRuleIds(target)) {
@@ -104,18 +113,31 @@ class ProfileController
             operationMutex.withLock {
                 val operation = if (enabled) AutomationOperation.ENABLE else AutomationOperation.DISABLE
                 val target = profileId.normalizedTarget()
+                val now = clock.millis()
+                var shouldRecord = true
                 val result =
                     when {
-                        profileId != null && target == null && profileId.isNotBlank() ->
-                            ApplyResult(AutomationOutcome.INVALID, 0)
                         !settingsRepository.externalAutomationEnabled.first() ->
-                            ApplyResult(AutomationOutcome.DISABLED, 0)
+                            ApplyResult(AutomationOutcome.DISABLED, 0).also {
+                                shouldRecord = rateLimiter.tryAcquireRejected(now)
+                            }
                         !token.isAuthorized(settingsRepository.externalAutomationToken.first()) ->
-                            ApplyResult(AutomationOutcome.UNAUTHORIZED, 0)
-                        !rateLimiter.tryAcquire(clock.millis()) -> ApplyResult(AutomationOutcome.THROTTLED, 0)
+                            ApplyResult(AutomationOutcome.UNAUTHORIZED, 0).also {
+                                shouldRecord = rateLimiter.tryAcquireRejected(now)
+                            }
+                        profileId.isInvalidTarget(target) ->
+                            ApplyResult(AutomationOutcome.INVALID, 0).also {
+                                shouldRecord = rateLimiter.tryAcquireRejected(now)
+                            }
+                        !rateLimiter.tryAcquire(now) ->
+                            ApplyResult(AutomationOutcome.THROTTLED, 0).also {
+                                shouldRecord = rateLimiter.tryAcquireRejected(now)
+                            }
                         else -> applyEnabled(target, enabled)
                     }
-                record(AutomationSource.EXTERNAL, operation, profileId, result)
+                if (shouldRecord) {
+                    record(AutomationSource.EXTERNAL, operation, profileId, result)
+                }
                 result.changedCount
             }
 
@@ -217,12 +239,22 @@ class ProfileController
             return trimmed
         }
 
+        private fun String?.isInvalidTarget(normalized: String?): Boolean =
+            this != null && isNotBlank() && normalized == null
+
         private fun String?.isAuthorized(expected: String): Boolean {
             if (this == null) return false
             if (isEmpty()) return false
             if (length > MAX_TOKEN_CHARS) return false
             if (expected.isEmpty()) return false
-            return MessageDigest.isEqual(toByteArray(Charsets.UTF_8), expected.toByteArray(Charsets.UTF_8))
+            val suppliedBytes = toByteArray(Charsets.UTF_8)
+            val expectedBytes = expected.toByteArray(Charsets.UTF_8)
+            return try {
+                MessageDigest.isEqual(suppliedBytes, expectedBytes)
+            } finally {
+                suppliedBytes.fill(0)
+                expectedBytes.fill(0)
+            }
         }
     }
 

@@ -6,6 +6,8 @@ import com.alarmcontrol.core.filtering.Condition
 import com.alarmcontrol.core.filtering.MAX_CONDITION_VALUE_CHARS
 import com.alarmcontrol.core.filtering.MAX_RATE_THRESHOLD
 import com.alarmcontrol.core.filtering.MAX_RATE_WINDOW_MILLIS
+import com.alarmcontrol.core.filtering.MAX_RULE_CONDITION_DEPTH
+import com.alarmcontrol.core.filtering.MAX_RULE_CONDITION_NODES
 import com.alarmcontrol.core.filtering.MIN_RATE_THRESHOLD
 import com.alarmcontrol.core.filtering.MIN_RATE_WINDOW_MILLIS
 import com.alarmcontrol.core.filtering.NotificationImportance
@@ -169,9 +171,16 @@ private fun Condition.toNode(): ConditionNode =
 
 /** Converts a completely valid tree to a domain condition; any invalid descendant makes it `null`. */
 internal fun ConditionNode.toConditionOrNull(): Condition? =
-    when (this) {
-        is GroupNode -> toGroupConditionOrNull()
-        is NotNode -> child.toConditionOrNull()?.let { Condition.Not(it) }
+    toConditionOrNull(depth = 1, budget = ConditionTreeBudget())
+
+private fun ConditionNode.toConditionOrNull(
+    depth: Int,
+    budget: ConditionTreeBudget,
+): Condition? {
+    if (!budget.consume(depth)) return null
+    return when (this) {
+        is GroupNode -> toGroupConditionOrNull(depth, budget)
+        is NotNode -> child.toConditionOrNull(depth + 1, budget)?.let { Condition.Not(it) }
         is LeafNode ->
             if (value.isBlank() || value.length > MAX_CONDITION_VALUE_CHARS) {
                 null
@@ -181,11 +190,26 @@ internal fun ConditionNode.toConditionOrNull(): Condition? =
         is TimeWindowNode -> toTimeConditionOrNull()
         is RateNode -> toRateConditionOrNull()
     }
+}
 
-private fun GroupNode.toGroupConditionOrNull(): Condition? {
+private fun GroupNode.toGroupConditionOrNull(
+    depth: Int,
+    budget: ConditionTreeBudget,
+): Condition? {
     if (children.isEmpty()) return null
-    val mapped = children.map { child -> child.toConditionOrNull() ?: return null }
+    val mapped = children.map { child -> child.toConditionOrNull(depth + 1, budget) ?: return null }
     return if (anyOf) Condition.AnyOf(mapped) else Condition.AllOf(mapped)
+}
+
+/** Rejects malformed or restored trees before recursion exceeds the domain persistence limits. */
+private class ConditionTreeBudget {
+    private var remaining = MAX_RULE_CONDITION_NODES
+
+    fun consume(depth: Int): Boolean {
+        if (depth > MAX_RULE_CONDITION_DEPTH || remaining <= 0) return false
+        remaining--
+        return true
+    }
 }
 
 private fun TimeWindowNode.toTimeConditionOrNull(): Condition? {

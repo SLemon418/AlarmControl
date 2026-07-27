@@ -28,7 +28,12 @@ class RuleRepositoryImpl
         override suspend fun saveRule(rule: Rule): String {
             RuleDefinitionValidator.requireValid(rule)
             val now = System.currentTimeMillis()
-            val existingId = rule.id.toLongOrNull()?.takeIf { it != 0L }
+            val existingId =
+                if (rule.id.isBlank()) {
+                    null
+                } else {
+                    requireNotNull(rule.id.toLongOrNull()?.takeIf { it > 0 }) { "Invalid rule id" }
+                }
             val entity =
                 rule.toRuleEntity(
                     id = existingId ?: 0,

@@ -7,6 +7,15 @@ data class ActionBreakdown(
     val loggedOnly: Int = 0,
     val kept: Int = 0,
 ) {
-    val total: Int get() = cancelled + snoozed + loggedOnly + kept
-    val silenced: Int get() = cancelled + snoozed
+    val total: Int
+        get() = saturatedCountSum(cancelled, snoozed, loggedOnly, kept)
+
+    val silenced: Int
+        get() = saturatedCountSum(cancelled, snoozed)
 }
+
+private fun saturatedCountSum(vararg values: Int): Int =
+    values
+        .fold(0L) { sum, value -> sum + value }
+        .coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong())
+        .toInt()

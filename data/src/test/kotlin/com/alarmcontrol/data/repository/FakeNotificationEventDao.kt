@@ -144,6 +144,8 @@ class FakeNotificationEventDao : NotificationEventDao {
                 oldestPostedAtMillis = events.minOfOrNull(NotificationEventEntity::postedAtMillis),
                 newestPostedAtMillis = events.maxOfOrNull(NotificationEventEntity::postedAtMillis),
                 traceEventCount = traces.map(NotificationDecisionTraceEntity::eventId).distinct().size,
+                traceEligibleEventCount =
+                    events.count { it.matchedRuleId != null || it.monitoredRuleId != null },
             )
         }
 
@@ -167,6 +169,7 @@ class FakeNotificationEventDao : NotificationEventDao {
     override fun observeActionCountsForDay(
         epochDay: Long,
         legacyStartMillis: Long,
+        legacyEndMillis: Long,
     ): Flow<List<ActionCountRow>> =
         revision.map {
             events
@@ -175,7 +178,8 @@ class FakeNotificationEventDao : NotificationEventDao {
                         if (event.postedEpochDay != null) {
                             event.postedEpochDay == epochDay
                         } else {
-                            event.postedAtMillis >= legacyStartMillis
+                            event.postedAtMillis >= legacyStartMillis &&
+                                event.postedAtMillis < legacyEndMillis
                         }
                 }.groupingBy(NotificationEventEntity::action)
                 .eachCount()
@@ -204,6 +208,21 @@ class FakeNotificationEventDao : NotificationEventDao {
         encryptedContents.clear()
         revision.value++
         return count
+    }
+
+    override suspend fun deleteForPackageChannels(
+        packageName: String,
+        channelIds: List<String>,
+    ): Int {
+        val removedIds =
+            events
+                .filter { it.packageName == packageName && it.channelId in channelIds }
+                .mapTo(mutableSetOf(), NotificationEventEntity::id)
+        events.removeAll { it.id in removedIds }
+        traces.removeAll { it.eventId in removedIds }
+        encryptedContents.removeAll { it.eventId in removedIds }
+        revision.value++
+        return removedIds.size
     }
 
     override suspend fun countEncryptedContents(): Int = encryptedContents.size
@@ -269,6 +288,8 @@ class FakeNotificationEventDao : NotificationEventDao {
         EventTimeBoundsRow(
             oldestPostedAtMillis = events.minOfOrNull(NotificationEventEntity::postedAtMillis),
             newestPostedAtMillis = events.maxOfOrNull(NotificationEventEntity::postedAtMillis),
+            oldestPostedEpochDay = events.mapNotNull(NotificationEventEntity::postedEpochDay).minOrNull(),
+            newestPostedEpochDay = events.mapNotNull(NotificationEventEntity::postedEpochDay).maxOrNull(),
         )
 
     override suspend fun countByPackageBetween(
@@ -290,8 +311,8 @@ class FakeNotificationEventDao : NotificationEventDao {
     override suspend fun rateHistorySince(sinceMillis: Long): List<RateHistoryRow> =
         events
             .filter { it.postedAtMillis >= sinceMillis }
-            .distinctBy { Triple(it.packageName, it.channelId, it.postedAtMillis) }
-            .sortedBy { it.postedAtMillis }
+            .sortedWith(compareByDescending<NotificationEventEntity> { it.postedAtMillis }.thenByDescending { it.id })
+            .take(10_000)
             .map { RateHistoryRow(it.packageName, it.channelId, it.postedAtMillis) }
 
     private fun filteredHistory(

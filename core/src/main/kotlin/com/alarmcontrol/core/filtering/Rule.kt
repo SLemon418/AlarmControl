@@ -23,6 +23,9 @@ sealed interface RuleAction {
 
 /** Maximum rule-name length accepted by editors, persistence, and portable backups. */
 const val MAX_RULE_NAME_CHARS = 200
+
+/** Maximum persisted rules; bounds hot-path evaluation and portable backup size. */
+const val MAX_SAVED_RULES = 1_000
 const val MIN_SNOOZE_DURATION_MILLIS = 60_000L
 const val MAX_SNOOZE_DURATION_MILLIS = 7L * 24 * 60 * 60 * 1_000
 

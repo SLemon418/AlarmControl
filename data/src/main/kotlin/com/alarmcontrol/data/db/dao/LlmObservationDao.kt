@@ -60,7 +60,7 @@ interface LlmObservationDao {
     suspend fun deleteSemanticImportedPriors(): Int
 
     @Query("SELECT COALESCE(SUM(count), 0) FROM semantic_feedback_priors")
-    suspend fun countSemanticImportedPriorVotes(): Int
+    suspend fun countSemanticImportedPriorVotes(): Long
 
     @Query("SELECT * FROM ad_feedback_priors")
     suspend fun getImportedPriors(): List<AdFeedbackPriorEntity>
@@ -72,7 +72,7 @@ interface LlmObservationDao {
     suspend fun deleteImportedPriors(): Int
 
     @Query("SELECT COALESCE(SUM(count), 0) FROM ad_feedback_priors")
-    suspend fun countImportedPriorVotes(): Int
+    suspend fun countImportedPriorVotes(): Long
 
     @Query("UPDATE llm_observations SET corrected_is_ad = NULL WHERE corrected_is_ad IS NOT NULL")
     suspend fun clearCorrections(): Int

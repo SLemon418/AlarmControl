@@ -2,7 +2,10 @@ package com.alarmcontrol.ui.insights
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -12,18 +15,28 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -33,7 +46,10 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.SecureFlagPolicy
 import com.alarmcontrol.R
 import com.alarmcontrol.core.filtering.SemanticIntent
 import com.alarmcontrol.ui.asString
@@ -335,6 +351,7 @@ internal fun NotificationDetailDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
+        properties = DialogProperties(securePolicy = SecureFlagPolicy.SecureOn),
         title = { Text(detail.appName) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -551,7 +568,14 @@ private fun TrendBars(
 private fun AppBreakdown(apps: List<AppAnalysisUi>) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         apps.take(DISPLAY_LIMIT).forEach { app ->
-            val percent = if (app.totalCount == 0) 0 else app.silencedCount * 100 / app.totalCount
+            val percent =
+                if (app.totalCount <= 0) {
+                    0
+                } else {
+                    ((app.silencedCount.toLong() * 100) / app.totalCount)
+                        .coerceIn(0, 100)
+                        .toInt()
+                }
             Column {
                 Text(app.appName, style = MaterialTheme.typography.bodyMedium)
                 Text(
@@ -708,6 +732,7 @@ private fun LearningCoverageCard(analysis: InsightsAnalysisUi) {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun RecordsFilters(
     query: String,
@@ -727,8 +752,11 @@ private fun RecordsFilters(
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(HistoryActionFilterUi.entries) { filter ->
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            HistoryActionFilterUi.entries.forEach { filter ->
                 FilterChip(
                     selected = selectedAction == filter,
                     onClick = { onFilterChange(filter) },
@@ -736,30 +764,74 @@ private fun RecordsFilters(
                 )
             }
         }
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            item {
-                FilterChip(
-                    selected = selectedPackage == null,
-                    onClick = { onSourceSelected(null) },
-                    label = { Text(stringResource(R.string.insights_all_apps)) },
-                )
-            }
-            items(sources, key = { "${it.packageName}:${it.channelId.orEmpty()}" }) { source ->
-                FilterChip(
-                    selected =
-                        selectedPackage == source.packageName &&
-                            selectedChannel == source.channelId,
-                    onClick = { onSourceSelected(source) },
-                    label = {
+        HistorySourceSelector(
+            sources = sources,
+            selectedPackage = selectedPackage,
+            selectedChannel = selectedChannel,
+            onSourceSelected = onSourceSelected,
+        )
+    }
+}
+
+@Composable
+private fun HistorySourceSelector(
+    sources: List<HistorySourceUi>,
+    selectedPackage: String?,
+    selectedChannel: String?,
+    onSourceSelected: (HistorySourceUi?) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val selectedSource =
+        sources.firstOrNull { source ->
+            selectedPackage == source.packageName && selectedChannel == source.channelId
+        }
+    val selectedLabel = selectedSource?.displayLabel() ?: stringResource(R.string.insights_all_apps)
+
+    Box(Modifier.fillMaxWidth()) {
+        OutlinedButton(
+            onClick = { expanded = true },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(
+                text = selectedLabel,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Icon(Icons.Filled.KeyboardArrowDown, contentDescription = null)
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.insights_all_apps)) },
+                onClick = {
+                    expanded = false
+                    onSourceSelected(null)
+                },
+            )
+            sources.forEach { source ->
+                DropdownMenuItem(
+                    text = {
                         Text(
-                            source.channelName?.let { "${source.appName} · $it" } ?: source.appName,
+                            source.displayLabel(),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                         )
+                    },
+                    onClick = {
+                        expanded = false
+                        onSourceSelected(source)
                     },
                 )
             }
         }
     }
 }
+
+private fun HistorySourceUi.displayLabel(): String = channelName?.let { "$appName · $it" } ?: appName
 
 private val InsightsTab.labelRes: Int
     get() =

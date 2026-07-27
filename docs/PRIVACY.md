@@ -63,8 +63,9 @@ profiles, selected settings, richer channel/app/hour/semantic daily summaries, a
 condition types, including semantic-analysis scope and breakdown-completeness metadata. It can
 optionally include package-level learning votes only inside a password-derived PBKDF2-HMAC-SHA256 +
 AES-256-GCM envelope. Plain backup is intentionally portable and should be treated as readable by
-anyone who receives the file. Restore previews and validates data before a transactional merge or
-replacement, and v1–v5 backups remain supported.
+anyone who receives the file. New encrypted exports require at least eight password characters;
+shorter legacy passwords remain accepted for restore. Restore previews and validates data before a
+transactional merge or replacement, and v1–v5 backups remain supported.
 
 The per-install automation token, imported LLM model, notification content, and LLM reasoning are
 never backed up. Android OS cloud backup is disabled for the app.

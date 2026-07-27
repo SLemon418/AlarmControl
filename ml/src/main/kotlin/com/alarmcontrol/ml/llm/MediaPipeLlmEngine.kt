@@ -1,5 +1,5 @@
-// MediaPipe 0.10.x deprecates the direct LlmInference#generateResponse API in favour of sessions.
-// This analyzer is intentionally stateless and single-turn, so the direct bounded call is retained.
+// The project pins MediaPipe Tasks GenAI for this milestone even though the 0.10.x Java API is
+// maintenance-only and deprecated. Keep that warning localized to this backend.
 @file:Suppress("DEPRECATION")
 
 package com.alarmcontrol.ml.llm
@@ -8,6 +8,8 @@ import android.content.Context
 import com.alarmcontrol.ml.MlConfig
 import com.google.mediapipe.tasks.genai.llminference.LlmInference
 import com.google.mediapipe.tasks.genai.llminference.LlmInference.LlmInferenceOptions
+import com.google.mediapipe.tasks.genai.llminference.LlmInferenceSession
+import com.google.mediapipe.tasks.genai.llminference.LlmInferenceSession.LlmInferenceSessionOptions
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.io.File
 import java.util.concurrent.Executor
@@ -37,25 +39,42 @@ internal class MediaPipeLlmEngine(
             LlmInferenceOptions
                 .builder()
                 .setModelPath(modelFile.absolutePath)
-                .setMaxTokens(MlConfig.LLM_MAX_TOKENS)
+                .setMaxTokens(MlConfig.LLM_CONTEXT_TOKENS)
                 .build()
         inference = LlmInference.createFromOptions(context, options)
     }
 
     override suspend fun analyze(text: String): LlmAnalysisResult {
         val engine = inference ?: return LlmAnalysisResult.UNAVAILABLE
-        val future = engine.generateResponseAsync(LlmPrompt.build(text))
+        val prompt =
+            LlmPrompt.buildFitting(
+                text = text,
+                maxPromptTokens = MlConfig.LLM_CONTEXT_TOKENS - MlConfig.LLM_OUTPUT_TOKEN_RESERVE,
+                countTokens = engine::sizeInTokens,
+            ) ?: return LlmAnalysisResult.UNAVAILABLE
+        val sessionOptions =
+            LlmInferenceSessionOptions
+                .builder()
+                .setTopK(MlConfig.LLM_TOP_K)
+                .setTopP(MlConfig.LLM_TOP_P)
+                .setTemperature(MlConfig.LLM_TEMPERATURE)
+                .setRandomSeed(MlConfig.LLM_RANDOM_SEED)
+                .build()
         val response =
-            suspendCancellableCoroutine { continuation ->
-                future.addListener(
-                    {
-                        runCatching { future.get() }
-                            .onSuccess(continuation::resume)
-                            .onFailure(continuation::resumeWithException)
-                    },
-                    DIRECT_EXECUTOR,
-                )
-                continuation.invokeOnCancellation { future.cancel(true) }
+            LlmInferenceSession.createFromOptions(engine, sessionOptions).use { session ->
+                session.addQueryChunk(prompt)
+                val future = session.generateResponseAsync()
+                suspendCancellableCoroutine { continuation ->
+                    future.addListener(
+                        {
+                            runCatching { future.get() }
+                                .onSuccess(continuation::resume)
+                                .onFailure(continuation::resumeWithException)
+                        },
+                        DIRECT_EXECUTOR,
+                    )
+                    continuation.invokeOnCancellation { future.cancel(true) }
+                }
             }
         return LlmResponseParser.parse(response)
     }

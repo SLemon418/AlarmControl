@@ -18,7 +18,8 @@
         android:localeConfig="@xml/locales_config"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.AlarmControl">
+        android:theme="@style/Theme.AlarmControl"
+        tools:targetApi="tiramisu">
 
         <activity
             android:name=".MainActivity"

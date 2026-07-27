@@ -2,6 +2,7 @@ package com.alarmcontrol.data.repository
 
 import com.alarmcontrol.core.filtering.Condition
 import com.alarmcontrol.core.filtering.MAX_RULE_NAME_CHARS
+import com.alarmcontrol.core.filtering.MAX_SAVED_RULES
 import com.alarmcontrol.core.filtering.Rule
 import com.alarmcontrol.core.filtering.RuleAction
 import kotlinx.coroutines.flow.first
@@ -103,5 +104,19 @@ class RuleRepositoryImplTest {
             val result = runCatching { repository.saveRule(newRule(name = "x".repeat(MAX_RULE_NAME_CHARS + 1))) }
 
             assertTrue(result.exceptionOrNull() is IllegalArgumentException)
+        }
+
+    @Test
+    fun `saving rejects malformed ids and new rules beyond the evaluation bound`() =
+        runTest {
+            assertTrue(
+                runCatching { repository.saveRule(newRule().copy(id = "not-an-id")) }.exceptionOrNull() is
+                    IllegalArgumentException,
+            )
+            dao.countOverride = MAX_SAVED_RULES
+
+            assertTrue(
+                runCatching { repository.saveRule(newRule()) }.exceptionOrNull() is IllegalArgumentException,
+            )
         }
 }

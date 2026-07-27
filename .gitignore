@@ -14,6 +14,13 @@ local.properties
 # ML training pipeline (build-time dev tool; not shipped). The generated assets
 # under :ml/src/main/assets ARE committed — only the local toolchain is ignored.
 ml/training/.venv/
+ml/llm-training/.venv*/
+ml/llm-training/artifacts/
+ml/llm-training/release/
+ml/llm-training/base-model/
+ml/llm-training/**/*.safetensors
+ml/llm-training/**/*.task
+ml/llm-training/**/*.tflite
 __pycache__/
 *.pyc
 

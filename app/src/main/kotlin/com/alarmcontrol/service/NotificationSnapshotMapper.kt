@@ -3,9 +3,13 @@ package com.alarmcontrol.service
 import android.app.Notification
 import android.app.NotificationManager
 import android.os.Build
+import android.os.Bundle
 import android.service.notification.NotificationListenerService.Ranking
 import android.service.notification.StatusBarNotification
 import androidx.annotation.ChecksSdkIntAtLeast
+import com.alarmcontrol.core.filtering.MAX_NOTIFICATION_METADATA_CHARS
+import com.alarmcontrol.core.filtering.MAX_NOTIFICATION_TEXT_CHARS
+import com.alarmcontrol.core.filtering.MAX_NOTIFICATION_TITLE_CHARS
 import com.alarmcontrol.core.filtering.NotificationContentVisibility
 import com.alarmcontrol.core.filtering.NotificationImportance
 import com.alarmcontrol.core.filtering.NotificationSnapshot
@@ -31,18 +35,20 @@ fun StatusBarNotification.toSnapshot(
     return NotificationSnapshot(
         packageName = packageName,
         title =
-            (
-                extras.getCharSequence(Notification.EXTRA_TITLE_BIG)
-                    ?: extras.getCharSequence(Notification.EXTRA_TITLE)
-            )?.toString(),
+            extras.boundedNotificationExtra(
+                MAX_NOTIFICATION_TITLE_CHARS,
+                Notification.EXTRA_TITLE_BIG,
+                Notification.EXTRA_TITLE,
+            ),
         text =
-            (
-                extras.getCharSequence(Notification.EXTRA_BIG_TEXT)
-                    ?: extras.getCharSequence(Notification.EXTRA_TEXT)
-            )?.toString(),
-        category = notification.category,
-        channelId = notification.channelId,
-        channelName = ranking?.channel?.name?.toString(),
+            extras.boundedNotificationExtra(
+                MAX_NOTIFICATION_TEXT_CHARS,
+                Notification.EXTRA_BIG_TEXT,
+                Notification.EXTRA_TEXT,
+            ),
+        category = notification.category.boundedNotificationText(MAX_NOTIFICATION_METADATA_CHARS),
+        channelId = notification.channelId.boundedNotificationText(MAX_NOTIFICATION_METADATA_CHARS),
+        channelName = ranking?.channel?.name.boundedNotificationText(MAX_NOTIFICATION_METADATA_CHARS),
         postedAtMillis = postTime,
         isOngoing = isOngoing,
         importance = ranking?.importance?.toNotificationImportance(),
@@ -63,6 +69,44 @@ internal fun Ranking?.conversationSignal(): Boolean? =
 private fun supportsConversationRanking(): Boolean = supportsConversationRanking(Build.VERSION.SDK_INT)
 
 internal fun supportsConversationRanking(sdkInt: Int): Boolean = sdkInt >= Build.VERSION_CODES.S
+
+/**
+ * Copies only the bounded prefix at the Android boundary. Avoiding `toString()` on the full
+ * CharSequence keeps one oversized notification from being multiplied across the processing queue,
+ * ML tokenization, and optional semantic analysis.
+ */
+internal fun CharSequence?.boundedNotificationText(maxChars: Int): String? {
+    if (this == null) return null
+    require(maxChars >= 0)
+    return try {
+        var end = minOf(length, maxChars)
+        if (end > 0 && Character.isHighSurrogate(this[end - 1])) end -= 1
+        subSequence(0, end).toString()
+    } catch (_: RuntimeException) {
+        // Notification extras are controlled by another app. Ignore only the malformed field so
+        // package/category/channel rules can still evaluate and the listener process stays alive.
+        null
+    }
+}
+
+internal fun Bundle.boundedNotificationExtra(
+    maxChars: Int,
+    vararg keys: String,
+): String? {
+    keys.forEach { key ->
+        val value =
+            try {
+                getCharSequence(key)
+            } catch (_: RuntimeException) {
+                null
+            }
+        value
+            .boundedNotificationText(maxChars)
+            ?.takeIf(String::isNotBlank)
+            ?.let { return it }
+    }
+    return null
+}
 
 private fun Int.toNotificationImportance(): NotificationImportance? =
     when {

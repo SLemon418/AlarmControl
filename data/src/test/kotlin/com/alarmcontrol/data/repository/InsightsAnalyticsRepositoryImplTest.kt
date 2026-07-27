@@ -57,6 +57,33 @@ class InsightsAnalyticsRepositoryImplTest {
             assertEquals(InsightsDateRange(3, 9), repository.observeAvailableRange().first())
         }
 
+    @Test
+    fun `large retained counts saturate instead of wrapping negative`() =
+        runTest {
+            val maximumDay =
+                day(11, total = Int.MAX_VALUE, cancelled = Int.MAX_VALUE, kept = Int.MAX_VALUE)
+                    .copy(
+                        topRules = listOf(RuleTriggerCount("1", Int.MAX_VALUE)),
+                        semanticBreakdown =
+                            listOf(
+                                SemanticIntentCount(SemanticIntent.MARKETING, Int.MAX_VALUE),
+                            ),
+                    )
+            store(maximumDay)
+            store(maximumDay.copy(epochDay = 12))
+
+            val analytics = repository.observe(InsightsDateRange(0, 31)).first()
+
+            assertEquals(Int.MAX_VALUE, analytics.totalNotifications)
+            assertEquals(Int.MAX_VALUE, analytics.actionBreakdown.cancelled)
+            assertEquals(Int.MAX_VALUE, analytics.actionBreakdown.total)
+            assertEquals(Int.MAX_VALUE, analytics.apps.single().totalCount)
+            assertEquals(Int.MAX_VALUE, analytics.rules.first { it.ruleId == "1" }.actualCount)
+            assertEquals(Int.MAX_VALUE, analytics.semanticTotal)
+            assertEquals(100, analytics.silencedPercent)
+            assertEquals(Int.MAX_VALUE, analytics.trend.single().totalCount)
+        }
+
     private suspend fun store(insight: DailyInsight) {
         dao.store(insight.toWrite())
     }

@@ -63,7 +63,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.Clock
 import java.time.Instant
+import java.time.LocalDate
 import java.time.ZoneOffset
+import kotlin.coroutines.resume
+import kotlin.coroutines.suspendCoroutine
 
 @OptIn(ExperimentalCoroutinesApi::class)
 @Suppress("LargeClass")
@@ -120,7 +123,7 @@ class InsightsViewModelTest {
         every { eventRepository.observeRecent(any()) } returns recent
         every { eventRepository.observeActionBreakdownSince(any()) } returns actionBreakdownFlow
         every {
-            eventRepository.observeActionBreakdownForDay(any(), any())
+            eventRepository.observeActionBreakdownForDay(any(), any(), any())
         } returns actionBreakdownFlow
         every { feedbackRepository.observeEventCorrections() } returns correctionsFlow
         every { adFeedbackRepository.observeByEvent() } returns adObservationsFlow
@@ -302,6 +305,68 @@ class InsightsViewModelTest {
         }
 
     @Test
+    fun `undo refreshes the captured daily rollup after the event leaves the feed`() =
+        runTest {
+            val day = LocalDate.of(2026, 6, 21)
+            recent.value =
+                listOf(
+                    NotificationEvent(
+                        packageName = "com.example.clock",
+                        category = "alarm",
+                        postedAtMillis = day.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli(),
+                        postedEpochDay = day.toEpochDay(),
+                        action = RuleAction.Cancel,
+                        matchedRuleId = "1",
+                        recordedAtMillis = clock.millis(),
+                        id = "5",
+                    ),
+                )
+            coEvery { eventRepository.undo("5") } answers {
+                recent.value = emptyList()
+            }
+            coEvery {
+                dailyInsightRepository.aggregateAndStore(any(), any(), any(), any(), any())
+            } returns
+                DailyInsight(
+                    epochDay = day.toEpochDay(),
+                    windowStartMillis = 0,
+                    windowEndMillis = 1,
+                    totalNotifications = 0,
+                    mutedCount = 0,
+                    topRules = emptyList(),
+                    categoryBreakdown = emptyList(),
+                    generatedAtMillis = clock.millis(),
+                )
+            val vm = viewModel()
+
+            vm.uiState.test {
+                awaitUntil { it.events.singleOrNull()?.id == "5" }
+                vm.onUndo("5")
+                awaitUntil { it.userMessage != null }
+                assertTrue(
+                    vm.uiState.value.events
+                        .isEmpty(),
+                )
+                cancelAndIgnoreRemainingEvents()
+            }
+
+            coVerify {
+                dailyInsightRepository.aggregateAndStore(
+                    epochDay = day.toEpochDay(),
+                    startMillis = day.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli(),
+                    endMillis =
+                        day
+                            .plusDays(1)
+                            .atStartOfDay(ZoneOffset.UTC)
+                            .toInstant()
+                            .toEpochMilli(),
+                    generatedAtMillis = clock.millis(),
+                    topRules = 50,
+                )
+            }
+        }
+
+    @Test
     fun `correctCategory records feedback and confirms`() =
         runTest {
             coEvery { feedbackRepository.recordCorrection(any()) } just Runs
@@ -382,7 +447,10 @@ class InsightsViewModelTest {
                 awaitUntil { !it.isLoading }
                 vm.correctSemanticIntent("7", SemanticIntent.SECURITY)
                 val confirmed = awaitUntil { it.userMessage != null }
-                assertEquals(uiText(R.string.message_semantic_corrected, "SECURITY"), confirmed.userMessage)
+                assertEquals(
+                    uiText(R.string.message_semantic_corrected, uiText(R.string.semantic_security)),
+                    confirmed.userMessage,
+                )
                 cancelAndIgnoreRemainingEvents()
             }
 
@@ -693,6 +761,62 @@ class InsightsViewModelTest {
         }
 
     @Test
+    fun `a late detail result cannot replace the latest selected event`() =
+        runTest {
+            var resumeFirst: ((NotificationEventDetail?) -> Unit)? = null
+            coEvery { notificationHistoryRepository.getDetail("first") } coAnswers {
+                suspendCoroutine { continuation ->
+                    resumeFirst = continuation::resume
+                }
+            }
+            coEvery { notificationHistoryRepository.getDetail("second") } returns
+                notificationDetail("second", "Latest detail")
+            val vm = viewModel()
+
+            vm.uiState.test {
+                awaitUntil { !it.isLoading }
+                vm.openEventDetail("first")
+                vm.openEventDetail("second")
+                awaitUntil { it.selectedEventDetail?.eventId == "second" }
+
+                requireNotNull(resumeFirst).invoke(notificationDetail("first", "Stale detail"))
+                mainDispatcherRule.dispatcher.scheduler.runCurrent()
+
+                assertEquals(
+                    "second",
+                    vm.uiState.value
+                        .selectedEventDetail
+                        ?.eventId,
+                )
+                cancelAndIgnoreRemainingEvents()
+            }
+        }
+
+    @Test
+    fun `closing detail prevents an uncancellable late result from reopening sensitive content`() =
+        runTest {
+            var resumeDetail: ((NotificationEventDetail?) -> Unit)? = null
+            coEvery { notificationHistoryRepository.getDetail("late") } coAnswers {
+                suspendCoroutine { continuation ->
+                    resumeDetail = continuation::resume
+                }
+            }
+            val vm = viewModel()
+
+            vm.uiState.test {
+                awaitUntil { !it.isLoading }
+                vm.openEventDetail("late")
+                vm.closeEventDetail()
+
+                requireNotNull(resumeDetail).invoke(notificationDetail("late", "Must stay hidden"))
+                mainDispatcherRule.dispatcher.scheduler.runCurrent()
+
+                assertEquals(null, vm.uiState.value.selectedEventDetail)
+                cancelAndIgnoreRemainingEvents()
+            }
+        }
+
+    @Test
     fun `records queries activate only on their tab and page size is capped at one thousand`() =
         runTest {
             val queries = mutableListOf<NotificationHistoryQuery>()
@@ -763,6 +887,25 @@ class InsightsViewModelTest {
         categoryBreakdown = emptyList(),
         generatedAtMillis = 2,
     )
+
+    private fun notificationDetail(
+        eventId: String,
+        title: String,
+    ): NotificationEventDetail =
+        NotificationEventDetail(
+            event =
+                NotificationEvent(
+                    packageName = "com.example.$eventId",
+                    category = null,
+                    postedAtMillis = 1,
+                    action = RuleAction.Keep,
+                    matchedRuleId = null,
+                    recordedAtMillis = 2,
+                    id = eventId,
+                    hadEncryptedContent = true,
+                ),
+            content = NotificationContentState.Available(title, null),
+        )
 
     private fun InsightsDateRange.toUiRange(): AvailableRangeUi = AvailableRangeUi(startEpochDay, endEpochDay)
 }

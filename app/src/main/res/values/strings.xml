@@ -7,7 +7,6 @@
     <string name="nav_profiles">Profiles</string>
     <string name="nav_settings">Settings</string>
 
-    <string name="profiles_title">Filtering profiles</string>
     <string name="profiles_add">Add profile</string>
     <string name="profiles_empty">No profiles yet. Group related rules to toggle them together from this screen, a launcher shortcut, or external automation.</string>
     <string name="profiles_empty_title">Create a focus profile</string>
@@ -53,15 +52,16 @@
     <string name="settings_battery_optimized">Battery policy: optimized. Daily insights may run later than scheduled, but filtering remains available.</string>
     <string name="settings_review_battery">Review battery settings</string>
     <string name="settings_filtering_enabled">Filtering enabled</string>
-    <string name="settings_filtering_summary">Pause or resume filtering without changing individual rule switches.</string>
+    <string name="settings_filtering_summary">Pause or resume filtering without changing individual rule switches. New activity history is not recorded while paused.</string>
     <string name="settings_external_automation">Allow external automation</string>
-    <string name="settings_external_automation_summary">Let Samsung Routines / Tasker control filtering with this device’s token. Off by default.</string>
+    <string name="settings_external_automation_summary">Allow authenticated Intent control from Tasker or MacroDroid. Samsung Routines can use AlarmControl app shortcuts without this setting. Off by default.</string>
     <string name="settings_automation_token">Automation token</string>
     <string name="settings_automation_token_copy">Copy</string>
+    <string name="message_clipboard_unavailable">Clipboard access is unavailable.</string>
     <string name="settings_automation_token_rotate">Regenerate</string>
     <string name="settings_token_rotate_confirm_title">Regenerate automation token?</string>
-    <string name="settings_token_rotate_confirm_message">Existing Samsung Routines, Tasker, and MacroDroid actions will stop working until they use the new token.</string>
-    <string name="settings_automation_token_summary">Add this as the AUTH_TOKEN string extra. Regenerating immediately rejects the old token.</string>
+    <string name="settings_token_rotate_confirm_message">Existing Tasker and MacroDroid Intent actions will stop working until they use the new token. Samsung app-shortcut routines are unaffected.</string>
+    <string name="settings_automation_token_summary">Target package com.alarmcontrol, then add this as the AUTH_TOKEN string extra. Implicit broadcasts are rejected. Regenerating immediately rejects the old token.</string>
     <string name="settings_automation_recent">Recent automation requests</string>
     <string name="settings_automation_audit_row">%1$s · %2$s · %3$s · %4$d changed · %5$s</string>
     <string name="automation_source_external">External</string>
@@ -97,12 +97,19 @@
     <string name="settings_model_unavailable">Model status: unavailable</string>
     <string name="settings_model_missing">Model status: no local model selected</string>
     <string name="settings_model_invalid">Model status: incompatible or invalid model; the previous model was preserved</string>
+    <string name="settings_model_integrity_failed">Model status: the local model changed or its integrity record is missing; re-import the model</string>
     <string name="settings_model_load_failed">Model status: this device could not load the selected model</string>
     <string name="settings_model_storage_failed">Model status: the model could not be copied to private storage</string>
+    <string name="settings_model_integrity_verified">Local file integrity verified · %1$s</string>
+    <string name="settings_model_fingerprint">SHA-256: %1$s</string>
+    <string name="settings_model_fingerprint_note">This detects changes after import; it does not certify the model publisher.</string>
+    <string name="settings_model_trust_warning">Import models only from a source you trust. A model file is processed by native on-device code; its hash detects later changes but does not certify its publisher.</string>
     <string name="settings_backup_section">Backup &amp; restore</string>
-    <string name="settings_backup_summary">Save your rules and history to a file, or restore from one. Everything stays on this device — nothing is uploaded.</string>
+    <string name="settings_backup_summary">Save your rules and history to a file, or restore from one. AlarmControl requests device-only storage and never uploads the file; choose a device storage location in the picker.</string>
     <string name="settings_backup_password">Backup password (optional)</string>
     <string name="settings_backup_password_summary">When set, exports use AES-256-GCM. Enter the same password before restoring an encrypted file.</string>
+    <string name="settings_backup_password_too_short">New encrypted backups require at least 8 characters. Short legacy passwords still work for restore.</string>
+    <string name="settings_backup_plaintext_warning">Without a password, rules, settings, and summary history are readable in the exported file. Notification text is never included.</string>
     <string name="settings_backup_feedback">Include learning feedback</string>
     <string name="settings_backup_feedback_summary">Available only with encryption. Includes package-level label and ad verdict votes, never notification text.</string>
     <string name="settings_backup">Back up</string>
@@ -139,22 +146,18 @@
     <string name="message_clear_failed">Couldn\'t delete the selected data</string>
     <string name="message_generic_error">Something went wrong</string>
     <string name="message_setting_update_failed">Couldn\'t update the setting</string>
-    <string name="message_model_open_failed">Couldn\'t open the model file</string>
     <string name="message_model_installed">Local model installed</string>
     <string name="message_model_install_failed">Couldn\'t install the model</string>
     <string name="message_model_removed">Removed the local LLM model</string>
     <string name="message_model_remove_failed">Couldn\'t remove the local model</string>
     <string name="message_model_installing">Installing model…</string>
-    <string name="message_backup_destination_failed">Couldn\'t open the destination file</string>
     <string name="message_backup_exported">Backup exported</string>
     <string name="message_backup_export_failed">Couldn\'t export backup</string>
-    <string name="message_backup_open_failed">Couldn\'t open the backup file</string>
     <string name="message_backup_read_failed">Couldn\'t read backup</string>
     <string name="message_backup_restored">Restored %1$d rules, %2$d profiles, %3$d days, and %4$d learning votes</string>
     <string name="message_backup_restore_failed">Couldn\'t restore backup</string>
     <string name="message_backup_restoring">Restoring…</string>
 
-    <string name="rules_title">Filtering rules</string>
     <string name="rules_add">Add rule</string>
     <string name="rules_empty_title">Build your first filter</string>
     <string name="rules_empty_body">Start with a template or create a rule that matches exactly what matters to you.</string>
@@ -168,8 +171,6 @@
     <string name="template_observe_ads_summary">Log likely ads without dismissing them. Requires the optional local LLM.</string>
     <string name="template_keep_alarms">Always keep alarm notifications</string>
     <string name="template_keep_alarms_summary">A high-priority safeguard for Android alarm-category notifications.</string>
-    <string name="rules_empty">No rules yet. Tap + to add one.</string>
-    <string name="rules_action_format">Action: %1$s</string>
     <string name="rules_delete">Delete rule</string>
     <string name="rules_delete_confirm_title">Delete rule?</string>
     <string name="rules_delete_confirm_message">“%1$s” will be permanently deleted.</string>
@@ -216,6 +217,8 @@
     <string name="validation_complete_not">Complete the NOT condition</string>
     <string name="validation_enter_value">Enter a value</string>
     <string name="validation_condition_too_long">Condition value is too long</string>
+    <string name="validation_condition_node_limit">A rule can contain at most 256 conditions</string>
+    <string name="validation_condition_depth_limit">A rule can be nested at most 32 levels deep</string>
     <string name="validation_boolean">Use true or false</string>
     <string name="validation_time">Use HH:mm</string>
     <string name="condition_package">Package</string>
@@ -237,14 +240,14 @@
     <string name="onboarding_review_records">Review its predictions in Records</string>
     <string name="onboarding_activate_rule">Switch the verified rule to Active</string>
     <string name="onboarding_optional">This checklist is only a guide. Nothing is enabled automatically.</string>
-    <string name="setup_filtering_paused">Filtering is paused. Existing rules are preserved.</string>
+    <string name="setup_filtering_paused">Filtering and new activity history are paused. Existing rules are preserved.</string>
     <string name="setup_no_active_rules">Create or enable a rule to start filtering.</string>
     <string name="setup_create_rule">Create first rule</string>
     <plurals name="setup_ready">
         <item quantity="one">Filtering is ready · %1$d active rule</item>
         <item quantity="other">Filtering is ready · %1$d active rules</item>
     </plurals>
-    <string name="automation_hint">To control rules via Samsung Routines or Tasker, enable external automation in Settings.</string>
+    <string name="automation_hint">Samsung Routines can use AlarmControl app shortcuts directly. Enable external automation only for Tasker or MacroDroid Intents.</string>
     <string name="rule_untitled">Untitled rule</string>
     <string name="rule_summary_all_empty">Matches nothing (empty group)</string>
     <string name="rule_summary_any_empty">Matches nothing</string>
@@ -276,7 +279,6 @@
     <string name="simulator_ml_category">ML category</string>
     <string name="simulator_time">Local time HH:mm</string>
     <string name="simulator_ongoing">Ongoing notification</string>
-    <string name="simulator_ad_unknown">Ad signal unknown</string>
     <string name="simulator_unknown">Unknown</string>
     <string name="yes">Yes</string>
     <string name="no">No</string>
@@ -293,8 +295,6 @@
     <string name="importance_default">Default</string>
     <string name="importance_high">High</string>
     <string name="importance_max">Maximum</string>
-    <string name="simulator_ad_yes">Advertisement</string>
-    <string name="simulator_ad_no">Not an advertisement</string>
     <string name="simulator_run">Run test</string>
     <string name="simulator_matched">Matched — action: %1$s</string>
     <string name="simulator_no_match">This sample does not match the rule</string>
@@ -304,7 +304,6 @@
     <string name="simulator_trace_unknown">SIGNAL UNAVAILABLE</string>
     <string name="simulator_trace_line">%1$s · %2$s</string>
 
-    <string name="insights_title">Insights</string>
     <string name="insights_today">Today</string>
     <string name="insights_daily_history">Daily history</string>
     <string name="insights_daily_empty">Daily summaries appear here after the next background check runs.</string>
@@ -399,10 +398,6 @@
     <string name="insights_more_actions">More actions</string>
     <string name="insights_create_rule">Create rule for this app</string>
     <string name="insights_app_notification_settings">Open app notification settings</string>
-    <string name="insights_likely_ad">Likely advertisement · %1$d%% confidence</string>
-    <string name="insights_likely_transactional">Likely transactional · %1$d%% confidence</string>
-    <string name="insights_ad_corrected">You marked this as an advertisement</string>
-    <string name="insights_transactional_corrected">You marked this as transactional</string>
     <string name="insights_mark_ad">Mark as advertisement</string>
     <string name="insights_mark_transactional">Mark as transactional</string>
     <string name="category_promotion">Promotion</string>

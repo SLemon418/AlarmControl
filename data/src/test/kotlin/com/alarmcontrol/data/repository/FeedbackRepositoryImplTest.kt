@@ -2,13 +2,15 @@ package com.alarmcontrol.data.repository
 
 import app.cash.turbine.test
 import com.alarmcontrol.core.feedback.CategoryFeedback
+import com.alarmcontrol.data.db.dao.CategoryFeedbackDao
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class FeedbackRepositoryImplTest {
     private val dao = FakeCategoryFeedbackDao()
-    private val repository = FeedbackRepositoryImpl(dao)
+    private val dailyInsightDao = FakeDailyInsightDao()
+    private val repository = FeedbackRepositoryImpl(dao, dailyInsightDao, ImmediateTransactionRunner())
 
     private fun correction(
         label: String,
@@ -33,6 +35,7 @@ class FeedbackRepositoryImplTest {
             assertEquals("promotion", entity.predictedLabel)
             assertEquals("social", entity.correctedLabel)
             assertEquals(1_000L, entity.recordedAtMillis)
+            assertEquals(CategoryFeedbackDao.MAX_RETAINED_ROWS, dao.lastTrimMaximum)
         }
 
     @Test
@@ -110,5 +113,13 @@ class FeedbackRepositoryImplTest {
                 cancelAndIgnoreRemainingEvents()
             }
             assertEquals(listOf("news"), dao.inserted.map { it.correctedLabel })
+        }
+
+    @Test
+    fun `linked correction invalidates its completed daily rollup`() =
+        runTest {
+            repository.recordCorrection(correction("social", eventId = "7"))
+
+            assertEquals(listOf(7L), dailyInsightDao.invalidatedEventIds)
         }
 }

@@ -9,6 +9,7 @@ internal class FakeLlmEngine(
     private val available: Boolean = true,
     private val loadError: Throwable? = null,
     private val analyzeError: Throwable? = null,
+    private val closeError: Throwable? = null,
     private val result: LlmAnalysisResult = LlmAnalysisResult.of(true, 0.9f, "promotional language detected"),
 ) : LlmEngine {
     var loadCalls = 0
@@ -33,5 +34,6 @@ internal class FakeLlmEngine(
 
     override fun close() {
         closed = true
+        closeError?.let { throw it }
     }
 }

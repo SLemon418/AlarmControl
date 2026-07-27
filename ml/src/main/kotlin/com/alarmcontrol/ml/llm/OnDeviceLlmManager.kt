@@ -15,6 +15,9 @@ interface OnDeviceLlmManager {
     /** The engine lifecycle; starts at [LlmInitState.Idle]. Observe to gate routing to the LLM. */
     val initState: StateFlow<LlmInitState>
 
+    /** Verified local-model fingerprint, or `null` when no intact imported model is available. */
+    val modelInfo: StateFlow<LlmModelInfo?>
+
     /**
      * Loads the model off the main thread, driving [initState] `Loading -> Ready` (or
      * `-> Unavailable` if the model is missing or fails to load). Idempotent: a no-op while already

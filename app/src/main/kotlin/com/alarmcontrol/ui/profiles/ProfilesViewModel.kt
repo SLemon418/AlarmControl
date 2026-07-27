@@ -1,5 +1,6 @@
 package com.alarmcontrol.ui.profiles
 
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.alarmcontrol.R
@@ -23,6 +24,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 @HiltViewModel
@@ -32,11 +34,23 @@ class ProfilesViewModel
         private val profileRepository: ProfileRepository,
         private val ruleRepository: RuleRepository,
         private val profileController: ProfileController,
+        private val savedStateHandle: SavedStateHandle,
         @Dispatcher(AppDispatcher.Default) private val dispatcher: CoroutineDispatcher,
     ) : ViewModel() {
-        private val editor = MutableStateFlow<ProfileEditorState?>(null)
+        private val editor =
+            MutableStateFlow(
+                savedStateHandle
+                    .get<ArrayList<String>>(PROFILE_EDITOR_DRAFT_SAVED_STATE_KEY)
+                    ?.let(ProfileEditorDraftCodec::decode),
+            )
         private val pendingDeleteId = MutableStateFlow<String?>(null)
         private val messages = MutableStateFlow<UiText?>(null)
+
+        init {
+            if (editor.value == null) {
+                savedStateHandle.remove<ArrayList<String>>(PROFILE_EDITOR_DRAFT_SAVED_STATE_KEY)
+            }
+        }
 
         private val content: StateFlow<DataResult<ProfileContent>> =
             combine(profileRepository.observeProfiles(), ruleRepository.observeRules()) { profiles, rules ->
@@ -65,51 +79,57 @@ class ProfilesViewModel
             }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), ProfilesUiState())
 
         fun onAddProfile() {
-            editor.value = ProfileEditorState()
+            setEditor(ProfileEditorState())
         }
 
         fun onEditProfile(profileId: String) {
             val profiles = currentContent()?.profiles.orEmpty()
             profiles.firstOrNull { it.id == profileId }?.let { profile ->
-                editor.value =
+                setEditor(
                     ProfileEditorState(
                         id = profile.id,
                         name = profile.name,
                         selectedRuleIds = profile.ruleIds,
                         nameConflict = profiles.hasNameConflict(profile.name, profile.id),
-                    )
+                    ),
+                )
             }
         }
 
         fun onEditorChange(state: ProfileEditorState) {
-            editor.value =
+            if (editor.value?.isSaving == true) return
+            setEditor(
                 state.copy(
                     nameConflict = currentContent()?.profiles.orEmpty().hasNameConflict(state.name, state.id),
                     hasUnsavedChanges = true,
                     showDiscardConfirmation = false,
-                )
+                ),
+            )
         }
 
         fun onDismissEditor() {
             val current = editor.value ?: return
-            editor.value =
+            if (current.isSaving) return
+            setEditor(
                 if (current.hasUnsavedChanges) {
                     current.copy(showDiscardConfirmation = true)
                 } else {
                     null
-                }
+                },
+            )
         }
 
         fun onCancelDiscardEditor() {
-            editor.value = editor.value?.copy(showDiscardConfirmation = false)
+            setEditor(editor.value?.copy(showDiscardConfirmation = false))
         }
 
         fun onConfirmDiscardEditor() {
-            editor.value = null
+            setEditor(null)
         }
 
         fun onSaveProfile() {
             val state = editor.value ?: return
+            if (state.isSaving) return
             if (!state.canSave) {
                 messages.value =
                     uiText(
@@ -121,7 +141,11 @@ class ProfilesViewModel
                     )
                 return
             }
-            launchOp(onSuccess = { editor.value = null }) {
+            setEditor(state.copy(isSaving = true, showDiscardConfirmation = false))
+            launchOp(
+                onSuccess = { setEditor(null) },
+                onComplete = { setEditor(editor.value?.copy(isSaving = false)) },
+            ) {
                 profileRepository.save(
                     FilteringProfile(
                         id = state.id,
@@ -154,16 +178,32 @@ class ProfilesViewModel
             messages.value = null
         }
 
+        private fun setEditor(state: ProfileEditorState?) {
+            editor.value = state
+            val encoded = state?.let(ProfileEditorDraftCodec::encode)
+            if (encoded == null) {
+                savedStateHandle.remove<ArrayList<String>>(PROFILE_EDITOR_DRAFT_SAVED_STATE_KEY)
+            } else {
+                savedStateHandle[PROFILE_EDITOR_DRAFT_SAVED_STATE_KEY] = encoded
+            }
+        }
+
         private fun currentContent(): ProfileContent? = (content.value as? DataResult.Success)?.data
 
         private fun launchOp(
             onSuccess: () -> Unit = {},
+            onComplete: () -> Unit = {},
             block: suspend () -> Unit,
         ) {
-            viewModelScope.launch(dispatcher) {
-                runCatchingPreservingCancellation { block() }
-                    .onSuccess { onSuccess() }
-                    .onFailure { messages.value = uiText(R.string.message_generic_error) }
+            viewModelScope.launch {
+                try {
+                    val result = withContext(dispatcher) { runCatchingPreservingCancellation { block() } }
+                    result
+                        .onSuccess { onSuccess() }
+                        .onFailure { messages.value = uiText(R.string.message_generic_error) }
+                } finally {
+                    onComplete()
+                }
             }
         }
 

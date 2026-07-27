@@ -3,12 +3,14 @@ package com.alarmcontrol.ui.rules
 import android.app.Application
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -46,7 +48,8 @@ class RulesScreenTest {
     val composeRule = createComposeRule()
 
     private val hintText =
-        "To control rules via Samsung Routines or Tasker, enable external automation in Settings."
+        "Samsung Routines can use AlarmControl app shortcuts directly. " +
+            "Enable external automation only for Tasker or MacroDroid Intents."
 
     @Test
     fun showsHint_whenShowAutomationHintIsTrue() {
@@ -93,6 +96,15 @@ class RulesScreenTest {
         setRulesScreen(showHint = false) // default state has notificationAccessGranted = true
 
         composeRule.onNodeWithText("Notification access needed").assertDoesNotExist()
+    }
+
+    @Test
+    fun addRuleFabHasAnAccessibleName() {
+        setRulesScreen(showHint = false)
+
+        composeRule
+            .onNodeWithContentDescription("Add rule")
+            .assertHasClickAction()
     }
 
     @Test

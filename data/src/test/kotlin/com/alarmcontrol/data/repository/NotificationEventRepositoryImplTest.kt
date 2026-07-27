@@ -13,24 +13,38 @@ import com.alarmcontrol.core.filtering.NotificationHistoryQuery
 import com.alarmcontrol.core.filtering.RuleAction
 import com.alarmcontrol.core.insights.ActionBreakdown
 import com.alarmcontrol.data.db.model.StoredRuleAction
+import com.alarmcontrol.data.security.NotificationContentAccessGuard
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class NotificationEventRepositoryImplTest {
     private val dao = FakeNotificationEventDao()
     private val cipher = FakeNotificationContentCipher()
+    private val contentAccessGuard = NotificationContentAccessGuard()
+    private val settings = FakeContentSettingsRepository(contentAccessGuard = contentAccessGuard)
+    private val dailyInsights = FakeDailyInsightDao()
     private val repository =
         NotificationEventRepositoryImpl(
             dao,
             cipher,
             Clock.fixed(Instant.ofEpochMilli(10_000), ZoneOffset.UTC),
+            settings,
+            contentAccessGuard,
+            dailyInsights,
+            ImmediateTransactionRunner(),
             Dispatchers.Unconfined,
         )
 
@@ -115,6 +129,10 @@ class NotificationEventRepositoryImplTest {
                     dao,
                     cipher,
                     Clock.fixed(Instant.ofEpochMilli(8L * 24 * 60 * 60 * 1_000), ZoneOffset.UTC),
+                    settings,
+                    contentAccessGuard,
+                    dailyInsights,
+                    ImmediateTransactionRunner(),
                     Dispatchers.Unconfined,
                 )
             val id =
@@ -136,6 +154,57 @@ class NotificationEventRepositoryImplTest {
         }
 
     @Test
+    fun `disabling content storage immediately blocks existing ciphertext reads`() =
+        runTest {
+            val id = repository.record(event(), NotificationContent("title", "body"))
+
+            settings.setNotificationContentStorageEnabled(false)
+
+            assertEquals(NotificationContentState.NotStored, repository.getDetail(id)?.content)
+        }
+
+    @Test
+    fun `excluded package cannot be written or read even if content storage is enabled`() =
+        runTest {
+            settings.setContentExcludedPackages(setOf("com.example.clock"))
+
+            val id = repository.record(event(), NotificationContent("title", "body"))
+
+            assertEquals(NotificationContentState.NotStored, repository.getDetail(id)?.content)
+            assertEquals(0, dao.countEncryptedContents())
+        }
+
+    @Test
+    fun `disabling content storage waits for an in-flight encrypted write before cleanup`() =
+        runTest {
+            val encryptionStarted = CountDownLatch(1)
+            val releaseEncryption = CountDownLatch(1)
+            cipher.beforeEncryption = {
+                encryptionStarted.countDown()
+                check(releaseEncryption.await(2, TimeUnit.SECONDS))
+            }
+            val write =
+                async(Dispatchers.Default) {
+                    repository.record(event(), NotificationContent("title", "body"))
+                }
+            assertTrue(encryptionStarted.await(2, TimeUnit.SECONDS))
+
+            val disableAndClear =
+                async(start = CoroutineStart.UNDISPATCHED) {
+                    settings.setNotificationContentStorageEnabled(false)
+                    dao.deleteAllEncryptedContents()
+                }
+            assertFalse(disableAndClear.isCompleted)
+
+            releaseEncryption.countDown()
+            write.await()
+            disableAndClear.await()
+
+            assertEquals(0, dao.countEncryptedContents())
+            assertEquals(NotificationContentState.NotStored, repository.getDetail("1")?.content)
+        }
+
+    @Test
     fun `trimToMostRecent keeps only the newest events`() =
         runTest {
             listOf(1_000L, 2_000L, 3_000L, 4_000L).forEach { repository.record(event(recordedAtMillis = it)) }
@@ -144,6 +213,20 @@ class NotificationEventRepositoryImplTest {
 
             assertEquals(2, removed)
             assertEquals(listOf(4_000L, 3_000L), repository.observeRecent(10).first().map { it.recordedAtMillis })
+        }
+
+    @Test
+    fun `rejects invalid read and retention bounds before querying Room`() =
+        runTest {
+            assertThrows(IllegalArgumentException::class.java) {
+                repository.observeRecent(0)
+            }
+            assertThrows(IllegalArgumentException::class.java) {
+                repository.observeSources(1_001)
+            }
+            assertTrue(runCatching { repository.trimToMostRecent(-1) }.isFailure)
+            assertTrue(runCatching { repository.trimDecisionTracesToMostRecent(-1) }.isFailure)
+            assertTrue(runCatching { repository.mutedCountsByPackageBetween(2, 1) }.isFailure)
         }
 
     @Test
@@ -248,6 +331,16 @@ class NotificationEventRepositoryImplTest {
         }
 
     @Test
+    fun `undo invalidates the affected completed daily rollup`() =
+        runTest {
+            val id = repository.record(event())
+
+            repository.undo(id)
+
+            assertEquals(listOf(id.toLong()), dailyInsights.invalidatedEventIds)
+        }
+
+    @Test
     fun `action breakdown reacts to inserts and undo using one grouped stream`() =
         runTest {
             repository.observeActionBreakdownSince(sinceMillis = 1_500L).test {
@@ -303,10 +396,21 @@ class NotificationEventRepositoryImplTest {
                     recordedAtMillis = 2_100,
                 ),
             )
+            repository.record(
+                event(
+                    action = RuleAction.Cancel,
+                    recordedAtMillis = 3_000,
+                ),
+            )
 
             assertEquals(
                 ActionBreakdown(cancelled = 1, kept = 1),
-                repository.observeActionBreakdownForDay(epochDay = 5, legacyStartMillis = 1_000).first(),
+                repository
+                    .observeActionBreakdownForDay(
+                        epochDay = 5,
+                        legacyStartMillis = 1_000,
+                        legacyEndMillis = 3_000,
+                    ).first(),
             )
         }
 

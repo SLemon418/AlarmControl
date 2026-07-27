@@ -45,34 +45,38 @@ sdk.dir=/absolute/path/to/your/Android/sdk
 `ACCESS_NETWORK_STATE` 권한은 허용됩니다. `:baselineprofile:offlineManifestGuard`는 같은
 검사를 두 Baseline Profile 테스트 APK에도 적용합니다.
 
-현재 Debug JVM/Robolectric 테스트 집계는 총 425개이며 실패, 오류, 건너뜀은 모두 0개입니다.
-API 34 Managed Device 계측 테스트는 총 11개(Room/데이터 6, 실제 TFLite 4, 앱 스모크 1)이며 모두
-통과합니다.
+현재 Debug JVM/Robolectric 테스트 집계는 총 564개이며 실패, 오류, 건너뜀은 모두 0개입니다.
+계측 테스트는 총 19개(Room/데이터 7, 실제 TFLite 4, 앱 런타임 8)이며 연결된 Galaxy에서 모두
+통과했습니다. CI는 같은 테스트를 API 34 Managed Device에서도 실행합니다.
 
 ## 빌드 산출물
 
 ```sh
 ./gradlew :app:assembleDebug
 ./gradlew :app:assembleRelease
-./gradlew :app:bundleRelease
+./gradlew :app:bundleRelease  # 컴파일/스토어 형식 확인용이며 무서명일 수 있음
 ```
 
 로컬 APK 작업은 AGP 리소스 축소와 APK/AAB 릴리스 경로를 모두 안정적으로 지원하기 위해
-범용 APK를 생성합니다. 스토어 배포에는 `app/build/outputs/bundle/release/` 아래의 Release
-Android App Bundle을 권장하며, Play가 기기에 맞는 ABI APK를 생성합니다.
+범용 APK를 생성합니다. 로컬 및 CI 컴파일을 위해 `bundleRelease`는 키 저장소 없이도
+실행할 수 있으므로, 이 작업의 성공만으로 AAB가 배포 가능한 상태라는 뜻은 아닙니다.
 
-로컬 Release 컴파일에는 서명이 필수가 아닙니다. 서명된 산출물을 만들려면 네 환경 변수를
-모두 제공합니다. 키 저장소와 자격 증명은 커밋하지 않습니다.
+스토어 배포본을 만들 때는 네 환경 변수를 모두 제공하고 명시적인 배포 후보 게이트를
+실행합니다. 키 저장소와 자격 증명은 커밋하지 않습니다.
 
 ```sh
 export ALARMCONTROL_KEYSTORE_FILE="/absolute/path/to/release.jks"
 export ALARMCONTROL_KEYSTORE_PASSWORD="..."
 export ALARMCONTROL_KEY_ALIAS="..."
 export ALARMCONTROL_KEY_PASSWORD="..."
-./gradlew :app:bundleRelease
+./gradlew :app:releaseCandidate
 ```
 
-일부 변수만 제공하면 의도적으로 설정 단계에서 실패합니다.
+일부 변수만 제공하면 의도적으로 설정 단계에서 실패합니다. `releaseCandidate`는 기기 없이
+실행 가능한 품질·오프라인 검사 전체, 계측 테스트 APK와 Baseline Profile 변형 컴파일,
+Release AAB 60MiB 상한을 검사하고 번들의 모든 항목을 읽어 JAR 서명을 암호학적으로
+검증합니다. 검증된 번들은 `app/build/outputs/bundle/release/`에 생성되며 Play가 기기에
+맞는 ABI APK를 생성합니다.
 
 ## 계측 테스트
 
@@ -82,8 +86,16 @@ JVM 테스트는 실제 Android 런타임 검증을 대체하지 않습니다. �
 ```sh
 ./gradlew :data:connectedDebugAndroidTest  # Room v1/v2/v3/v10/v12 -> v13 마이그레이션
 ./gradlew :ml:connectedDebugAndroidTest    # 번들 TFLite 런타임/에셋 호환성
-./gradlew :app:connectedDebugAndroidTest   # 실제 Activity/Hilt/리소스/탐색 스모크 테스트
+./gradlew :app:connectedDebugAndroidTest   # Activity/Hilt, 리스너, 자동화, LLM 폴백, WorkManager
 ```
+
+> **전용 테스트 기기 또는 사용자 프로필에서 실행하세요.** AGP의
+> `connectedDebugAndroidTest` 수명 주기는 종료 시 대상 Debug 패키지를 제거할 수 있으며,
+> 이때 해당 앱의 로컬 데이터도 삭제됩니다. 보존할 데이터가 있다면 먼저 로컬 백업을
+> 내보내세요. 데이터가 있는 개발용 휴대전화에서는 빌드된 대상/테스트 APK를
+> `adb install -r`로 설치하고 `adb shell am instrument`로 실행한 뒤 `.test` 패키지만
+> 제거합니다. 리스너 테스트는 `com.android.shell`로 통제된 알림을 게시하므로 두 APK 모두
+> `POST_NOTIFICATIONS` 권한을 요청하지 않습니다.
 
 기기가 없을 때는 소스, 리소스, 의존성 오류를 찾기 위해 테스트 APK까지만 컴파일합니다.
 
@@ -128,7 +140,9 @@ PR에서는 JVM/Robolectric, detekt, ktlint, Android Lint, 오프라인 가드, 
 Release AAB, 모든 계측 APK와 Baseline Profile 생성기 변형을 검사합니다. main 변경, 매일
 예약 실행, 수동 실행에서는 Managed Device 테스트까지 수행합니다. 두 작업 모두 Gradle
 wrapper 검증을 먼저 실행하고 `gradle/verification-metadata.xml`의 SHA-256을 strict 모드로
-확인합니다. 실패 보고서는 CI artifact로 보존합니다.
+확인합니다. 루트 `verifyCiActionPins` 게이트는 워크플로, 재사용 워크플로, composite action
+YAML을 모두 검사하며 원격 Action은 40자 커밋 SHA, 컨테이너 Action은 SHA-256 이미지
+digest로 고정해야 합니다. 실패 보고서는 CI artifact로 보존합니다.
 
 ## Baseline Profile과 오프라인 시작 벤치마크
 
@@ -162,3 +176,9 @@ AndroidX TraceProcessor 방식은 기기 내부 localhost HTTP 소켓 때문에 
   억제하거나 약화하지 않습니다.
 - **No compatible LLM model**: MediaPipe 모델은 앱에 포함되지 않습니다. 설정에서 호환되는
   로컬 양자화 모델을 가져옵니다. 모델이 없어도 규칙과 번들 TFLite는 정상 동작합니다.
+  앱 전용 Gemma 후보 생성 절차는
+  [`ml/llm-training/README.ko.md`](ml/llm-training/README.ko.md)를 따릅니다.
+  safetensors, GGUF, 중간 `.tflite`는 직접 가져오지 않습니다.
+- **LLM 무결성 기록 누락/불일치**: 설정에서 신뢰하는 로컬 모델을 다시 가져옵니다.
+  AlarmControl은 가져올 때 기록한 SHA-256 값을 검증할 수 없는 모델을 의도적으로
+  불러오지 않습니다.

@@ -34,6 +34,7 @@ sealed interface LlmInitState {
 enum class LlmFailure {
     MODEL_MISSING,
     MODEL_INVALID,
+    MODEL_INTEGRITY_FAILED,
     LOAD_FAILED,
     STORAGE_FAILURE,
 }

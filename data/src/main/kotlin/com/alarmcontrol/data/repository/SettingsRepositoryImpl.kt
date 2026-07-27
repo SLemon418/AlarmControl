@@ -12,6 +12,7 @@ import com.alarmcontrol.core.settings.RetentionDefaults
 import com.alarmcontrol.core.settings.SemanticAnalysisScope
 import com.alarmcontrol.core.settings.SettingsRepository
 import com.alarmcontrol.core.settings.SettingsSnapshot
+import com.alarmcontrol.data.security.NotificationContentAccessGuard
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
@@ -24,13 +25,14 @@ import javax.inject.Inject
 /** DataStore (Preferences)-backed [SettingsRepository]; reads degrade to defaults on I/O error. */
 class SettingsRepositoryImpl
     @Inject
-    constructor(
+    internal constructor(
         private val dataStore: DataStore<Preferences>,
+        private val contentAccessGuard: NotificationContentAccessGuard,
     ) : SettingsRepository {
         override val filteringEnabled: Flow<Boolean> =
             dataStore.data
-                .catch { error -> if (error is IOException) emit(emptyPreferences()) else throw error }
                 .map { prefs -> prefs[FILTERING_ENABLED] ?: true }
+                .catch { error -> if (error is IOException) emit(false) else throw error }
 
         override val externalAutomationEnabled: Flow<Boolean> =
             dataStore.data
@@ -40,7 +42,12 @@ class SettingsRepositoryImpl
         override val externalAutomationToken: Flow<String> =
             dataStore.data
                 .catch { error -> if (error is IOException) emit(emptyPreferences()) else throw error }
-                .map { prefs -> prefs[EXTERNAL_AUTOMATION_TOKEN].orEmpty() }
+                .map { prefs ->
+                    prefs[EXTERNAL_AUTOMATION_TOKEN]
+                        .orEmpty()
+                        .takeIf { it.isValidAutomationToken() }
+                        .orEmpty()
+                }
 
         override val llmAnalysisEnabled: Flow<Boolean> =
             dataStore.data
@@ -97,7 +104,7 @@ class SettingsRepositoryImpl
         override suspend fun setExternalAutomationEnabled(enabled: Boolean) {
             dataStore.edit { prefs ->
                 prefs[EXTERNAL_AUTOMATION_ENABLED] = enabled
-                if (enabled && prefs[EXTERNAL_AUTOMATION_TOKEN].isNullOrBlank()) {
+                if (enabled && prefs[EXTERNAL_AUTOMATION_TOKEN]?.isValidAutomationToken() != true) {
                     prefs[EXTERNAL_AUTOMATION_TOKEN] = newAutomationToken()
                 }
             }
@@ -106,7 +113,10 @@ class SettingsRepositoryImpl
         override suspend fun ensureExternalAutomationToken(): String {
             var token = ""
             dataStore.edit { prefs ->
-                token = prefs[EXTERNAL_AUTOMATION_TOKEN].orEmpty().ifBlank { newAutomationToken() }
+                token =
+                    prefs[EXTERNAL_AUTOMATION_TOKEN]
+                        ?.takeIf { it.isValidAutomationToken() }
+                        ?: newAutomationToken()
                 prefs[EXTERNAL_AUTOMATION_TOKEN] = token
             }
             return token
@@ -123,11 +133,19 @@ class SettingsRepositoryImpl
         }
 
         override suspend fun setLlmAnalysisEnabled(enabled: Boolean) {
-            dataStore.edit { prefs -> prefs[LLM_ANALYSIS_ENABLED] = enabled }
+            dataStore.edit { prefs ->
+                prefs[LLM_ANALYSIS_ENABLED] = enabled
+                if (!enabled) prefs[LLM_AUTO_ACTIONS_ENABLED] = false
+            }
         }
 
         override suspend fun setLlmAutoActionsEnabled(enabled: Boolean) {
-            dataStore.edit { prefs -> prefs[LLM_AUTO_ACTIONS_ENABLED] = enabled }
+            dataStore.edit { prefs ->
+                require(!enabled || prefs[LLM_ANALYSIS_ENABLED] == true) {
+                    "LLM automatic actions require analysis"
+                }
+                prefs[LLM_AUTO_ACTIONS_ENABLED] = enabled
+            }
         }
 
         override suspend fun setSemanticAnalysisScope(scope: SemanticAnalysisScope) {
@@ -149,7 +167,9 @@ class SettingsRepositoryImpl
         }
 
         override suspend fun setNotificationContentStorageEnabled(enabled: Boolean) {
-            dataStore.edit { prefs -> prefs[NOTIFICATION_CONTENT_STORAGE_ENABLED] = enabled }
+            contentAccessGuard.withLock {
+                dataStore.edit { prefs -> prefs[NOTIFICATION_CONTENT_STORAGE_ENABLED] = enabled }
+            }
         }
 
         override suspend fun setContentExcludedPackages(packageNames: Set<String>) {
@@ -157,26 +177,18 @@ class SettingsRepositoryImpl
             require(packageNames.all { it.isNotBlank() && it.length <= MAX_PACKAGE_NAME_CHARS }) {
                 "Invalid excluded package"
             }
-            dataStore.edit { prefs -> prefs[CONTENT_EXCLUDED_PACKAGES] = packageNames }
-        }
-
-        override suspend fun claimInsightsBootstrap(appVersion: Int): Boolean {
-            require(appVersion >= 0) { "App version is invalid" }
-            var claimed = false
-            dataStore.edit { prefs ->
-                if (prefs[INSIGHTS_BOOTSTRAP_VERSION] != appVersion) {
-                    prefs[INSIGHTS_BOOTSTRAP_VERSION] = appVersion
-                    claimed = true
-                }
+            contentAccessGuard.withLock {
+                dataStore.edit { prefs -> prefs[CONTENT_EXCLUDED_PACKAGES] = packageNames }
             }
-            return claimed
         }
 
         override suspend fun snapshot(): SettingsSnapshot {
             val prefs =
-                dataStore.data
-                    .catch { error -> if (error is IOException) emit(emptyPreferences()) else throw error }
-                    .first()
+                try {
+                    dataStore.data.first()
+                } catch (_: IOException) {
+                    return SettingsSnapshot(filteringEnabled = false)
+                }
             return SettingsSnapshot(
                 filteringEnabled = prefs[FILTERING_ENABLED] ?: true,
                 externalAutomationEnabled = prefs[EXTERNAL_AUTOMATION_ENABLED] ?: false,
@@ -201,6 +213,15 @@ class SettingsRepositoryImpl
             dataStore.edit { prefs ->
                 prefs[FILTERING_ENABLED] = snapshot.filteringEnabled
                 prefs[EXTERNAL_AUTOMATION_ENABLED] = snapshot.externalAutomationEnabled
+                if (
+                    snapshot.externalAutomationEnabled &&
+                    prefs[EXTERNAL_AUTOMATION_TOKEN]?.isValidAutomationToken() != true
+                ) {
+                    // The per-install secret is deliberately absent from portable backups. A fresh
+                    // restore still needs a valid local token or the UI would claim automation is
+                    // enabled while every authenticated broadcast is rejected.
+                    prefs[EXTERNAL_AUTOMATION_TOKEN] = newAutomationToken()
+                }
                 prefs[LLM_ANALYSIS_ENABLED] = snapshot.llmAnalysisEnabled
                 prefs[LLM_AUTO_ACTIONS_ENABLED] = snapshot.llmAnalysisEnabled && snapshot.llmAutoActionsEnabled
                 prefs[SEMANTIC_ANALYSIS_SCOPE] = snapshot.semanticAnalysisScope.name
@@ -210,7 +231,15 @@ class SettingsRepositoryImpl
         }
 
         override suspend fun reset() {
-            dataStore.edit { it.clear() }
+            contentAccessGuard.withLock {
+                dataStore.edit { preferences ->
+                    preferences.clear()
+                    // A destructive local-data reset must never reactivate surviving rules when a
+                    // separate database deletion failed. Keep the master gate fail-safe and require
+                    // the user to resume filtering explicitly after a reset.
+                    preferences[FILTERING_ENABLED] = false
+                }
+            }
         }
 
         private companion object {
@@ -226,16 +255,30 @@ class SettingsRepositoryImpl
             val NOTIFICATION_CONTENT_STORAGE_ENABLED =
                 booleanPreferencesKey("notification_content_storage_enabled")
             val CONTENT_EXCLUDED_PACKAGES = stringSetPreferencesKey("content_excluded_packages")
-            val INSIGHTS_BOOTSTRAP_VERSION = intPreferencesKey("insights_bootstrap_version")
             val RETENTION_RANGE = 1..3_650
             const val AUTOMATION_TOKEN_BYTES = 32
+            const val AUTOMATION_TOKEN_CHARS = 43
             const val MAX_EXCLUDED_PACKAGES = 200
             const val MAX_PACKAGE_NAME_CHARS = 255
 
             fun newAutomationToken(): String {
                 val bytes = ByteArray(AUTOMATION_TOKEN_BYTES)
                 SecureRandom().nextBytes(bytes)
-                return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+                return try {
+                    Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+                } finally {
+                    bytes.fill(0)
+                }
             }
+
+            fun String.isValidAutomationToken(): Boolean =
+                length == AUTOMATION_TOKEN_CHARS &&
+                    all { character ->
+                        character in 'A'..'Z' ||
+                            character in 'a'..'z' ||
+                            character in '0'..'9' ||
+                            character == '-' ||
+                            character == '_'
+                    }
         }
     }

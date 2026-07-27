@@ -6,6 +6,7 @@ import android.service.notification.NotificationListenerService.RankingMap
 import android.service.notification.StatusBarNotification
 import android.util.Log
 import com.alarmcontrol.core.coroutines.AppDispatcher
+import com.alarmcontrol.core.coroutines.ApplicationScope
 import com.alarmcontrol.core.coroutines.Dispatcher
 import com.alarmcontrol.core.feedback.AdFeedbackRepository
 import com.alarmcontrol.core.feedback.AdObservation
@@ -43,6 +44,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.time.Clock
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 
 /**
@@ -76,15 +78,23 @@ class NotificationFilterService : NotificationListenerService() {
     @Inject lateinit var clock: Clock
 
     @Inject
-    @field:Dispatcher(AppDispatcher.Default)
+    @Dispatcher(AppDispatcher.Default)
     lateinit var dispatcher: CoroutineDispatcher
+
+    @Inject
+    @ApplicationScope
+    lateinit var applicationScope: CoroutineScope
 
     // Service-scoped structured concurrency (§8): cancelled in onDestroy, never GlobalScope.
     private val scope by lazy { CoroutineScope(SupervisorJob() + dispatcher) }
     private val processingCoordinator by lazy { NotificationProcessingCoordinator(scope) }
     private val rateTracker = NotificationRateTracker()
     private val semanticObservationQueue by lazy {
-        SemanticObservationQueue<SemanticObservationRequest>(scope, ::processSemanticObservation)
+        SemanticObservationQueue(
+            scope = scope,
+            onFailure = { Log.w(TAG, "Semantic observation failed") },
+            handler = ::processSemanticObservation,
+        )
     }
 
     // Active rules cached in-memory and recompiled only when they change, so each notification
@@ -100,12 +110,18 @@ class NotificationFilterService : NotificationListenerService() {
     private var settingsJob: Job? = null
     private var rateSeedJob: Job? = null
     private val llmInitializationStarted = AtomicBoolean(false)
+    private val semanticGeneration = AtomicLong(0)
+    private val llmLifecycleLock = Any()
+    private var llmCloseJob: Job? = null
 
     override fun onListenerConnected() {
         super.onListenerConnected()
         seedRateCacheIfNeeded()
         observeRulesIfNeeded()
         observeSettingsIfNeeded()
+        if (llmAnalysisEnabled.value == true) {
+            initializeLlmOnce()
+        }
     }
 
     private fun seedRateCacheIfNeeded() {
@@ -129,7 +145,7 @@ class NotificationFilterService : NotificationListenerService() {
 
     private fun observeRulesIfNeeded() {
         // Warm and keep the rule cache fresh for the listener's lifetime; recompile on every change.
-        if (rulesJob == null) {
+        if (rulesJob?.isActive != true) {
             rulesJob =
                 scope.launch {
                     runCatchingPreservingCancellation {
@@ -156,7 +172,7 @@ class NotificationFilterService : NotificationListenerService() {
     }
 
     private fun observeSettingsIfNeeded() {
-        if (settingsJob == null) {
+        if (settingsJob?.isActive != true) {
             settingsJob =
                 scope.launch {
                     runCatchingPreservingCancellation {
@@ -203,6 +219,8 @@ class NotificationFilterService : NotificationListenerService() {
         contentExcludedPackages.value = settings.excludedPackages
         if (previous != null && previous != settings) {
             // Includes privacy reductions such as new content exclusions.
+            semanticGeneration.incrementAndGet()
+            semanticObservationQueue.clearPending()
             processingCoordinator.invalidateAll()
         }
         if (settings.llmEnabled) {
@@ -235,6 +253,8 @@ class NotificationFilterService : NotificationListenerService() {
         contentStorageEnabled.value = false
         contentExcludedPackages.value = emptySet()
         llmInitializationStarted.set(false)
+        semanticGeneration.incrementAndGet()
+        semanticObservationQueue.clearPending()
         processingCoordinator.invalidateAll()
         llmManager.close()
     }
@@ -259,7 +279,7 @@ class NotificationFilterService : NotificationListenerService() {
         val key = sbn.key
         // Frequency state must reflect post time, not completion time after optional inference.
         rateTracker.record(snapshot, key)
-        processingCoordinator.submit(key) { token ->
+        processingCoordinator.submit(key, freshness = snapshot.postedAtMillis) { token ->
             runCatchingPreservingCancellation { evaluateAndApply(key, snapshot, token) }
                 // Fixed message only: notification content must never enter logs (§1/§3).
                 .onFailure { Log.w(TAG, "Notification processing failed") }
@@ -267,11 +287,17 @@ class NotificationFilterService : NotificationListenerService() {
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
+        rateTracker.markRemoved(sbn.key)
         processingCoordinator.invalidate(sbn.key)
     }
 
     override fun onListenerDisconnected() {
         processingCoordinator.invalidateAll()
+        rateSeedJob?.cancel()
+        rateSeedJob = null
+        rateTracker.markUnavailable()
+        semanticGeneration.incrementAndGet()
+        releaseLlmAsync()
         super.onListenerDisconnected()
     }
 
@@ -291,6 +317,7 @@ class NotificationFilterService : NotificationListenerService() {
                     excludedPackages = contentExcludedPackages.filterNotNull().first(),
                     semanticScope = semanticAnalysisScope.filterNotNull().first(),
                     compiledRules = compiledRules.filterNotNull().first(),
+                    semanticGeneration = semanticGeneration.get(),
                 )
             } ?: return
         if (!runtime.filtering || !token.isCurrent()) return
@@ -300,6 +327,7 @@ class NotificationFilterService : NotificationListenerService() {
                 runtime.compiledRules,
                 runtime.llmEnabled,
                 runtime.llmAutoActions,
+                runtime.semanticGeneration,
                 token,
             ) ?: return
         if (!token.commit { applyAction(key, evaluated.action) }) return
@@ -317,6 +345,7 @@ class NotificationFilterService : NotificationListenerService() {
         compiled: CompiledRuleSet,
         llmEnabled: Boolean,
         llmAutoActions: Boolean,
+        semanticGeneration: Long,
         token: NotificationProcessingCoordinator.ProcessingToken,
     ): EvaluatedNotification? {
         if (!token.isCurrent()) return null
@@ -374,6 +403,7 @@ class NotificationFilterService : NotificationListenerService() {
             mlConfidence = classification?.confidence,
             analysis = decisionAnalysis,
             decisionTrace = matchEvaluation.decisionTrace,
+            semanticGeneration = semanticGeneration,
         )
     }
 
@@ -428,18 +458,39 @@ class NotificationFilterService : NotificationListenerService() {
                 ),
                 encryptedContent,
             )
-        if (evaluated.analysis != null) {
+        if (evaluated.analysis != null && isSemanticAnalysisCurrent(evaluated.semanticGeneration)) {
             recordSemanticObservation(eventId, persistedSnapshot.packageName, evaluated.analysis)
-        } else if (llmEnabled && semanticScope == SemanticAnalysisScope.ALL_NOTIFICATIONS) {
-            semanticObservationQueue.offer(SemanticObservationRequest(eventId, persistedSnapshot))
+        } else if (
+            llmEnabled &&
+            semanticScope == SemanticAnalysisScope.ALL_NOTIFICATIONS &&
+            isSemanticAnalysisCurrent(evaluated.semanticGeneration, requireAllNotifications = true)
+        ) {
+            semanticObservationQueue.offer(
+                SemanticObservationRequest(
+                    eventId = eventId,
+                    snapshot = persistedSnapshot,
+                    semanticGeneration = evaluated.semanticGeneration,
+                ),
+            )
         }
     }
 
     private suspend fun processSemanticObservation(request: SemanticObservationRequest) {
+        if (!isSemanticAnalysisCurrent(request.semanticGeneration, requireAllNotifications = true)) return
         analyzeAdvertisement(request.snapshot)?.let { result ->
-            recordSemanticObservation(request.eventId, request.snapshot.packageName, result)
+            if (isSemanticAnalysisCurrent(request.semanticGeneration, requireAllNotifications = true)) {
+                recordSemanticObservation(request.eventId, request.snapshot.packageName, result)
+            }
         }
     }
+
+    private fun isSemanticAnalysisCurrent(
+        generation: Long,
+        requireAllNotifications: Boolean = false,
+    ): Boolean =
+        semanticGeneration.get() == generation &&
+            llmAnalysisEnabled.value == true &&
+            (!requireAllNotifications || semanticAnalysisScope.value == SemanticAnalysisScope.ALL_NOTIFICATIONS)
 
     private suspend fun recordSemanticObservation(
         eventId: String,
@@ -478,7 +529,26 @@ class NotificationFilterService : NotificationListenerService() {
 
     private fun initializeLlmOnce() {
         if (!llmInitializationStarted.compareAndSet(false, true)) return
-        scope.launch { llmManager.initialize() }
+        val pendingClose = synchronized(llmLifecycleLock) { llmCloseJob }
+        scope.launch {
+            pendingClose?.join()
+            if (llmInitializationStarted.get() && llmAnalysisEnabled.value == true) {
+                llmManager.initialize()
+            }
+        }
+    }
+
+    private fun releaseLlmAsync() {
+        semanticObservationQueue.clearPending()
+        llmInitializationStarted.set(false)
+        synchronized(llmLifecycleLock) {
+            val previousClose = llmCloseJob
+            llmCloseJob =
+                applicationScope.launch {
+                    previousClose?.join()
+                    llmManager.close()
+                }
+        }
     }
 
     /** Performs the platform side-effect for [action]. We can only act in these ways (§0/§6). */
@@ -494,6 +564,8 @@ class NotificationFilterService : NotificationListenerService() {
 
     override fun onDestroy() {
         processingCoordinator.invalidateAll()
+        semanticGeneration.incrementAndGet()
+        releaseLlmAsync()
         scope.cancel()
         super.onDestroy()
     }
@@ -507,6 +579,7 @@ class NotificationFilterService : NotificationListenerService() {
         val mlConfidence: Float?,
         val analysis: LlmAnalysisResult?,
         val decisionTrace: List<com.alarmcontrol.core.filtering.DecisionTraceNode>,
+        val semanticGeneration: Long,
     )
 
     private data class ResolvedDecision(
@@ -541,6 +614,7 @@ class NotificationFilterService : NotificationListenerService() {
         val excludedPackages: Set<String>,
         val semanticScope: SemanticAnalysisScope,
         val compiledRules: CompiledRuleSet,
+        val semanticGeneration: Long,
     )
 
     private data class ListenerLlmSettings(
@@ -552,6 +626,7 @@ class NotificationFilterService : NotificationListenerService() {
     private data class SemanticObservationRequest(
         val eventId: String,
         val snapshot: NotificationSnapshot,
+        val semanticGeneration: Long,
     )
 }
 

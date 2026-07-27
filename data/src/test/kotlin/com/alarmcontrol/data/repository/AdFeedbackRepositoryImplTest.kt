@@ -10,7 +10,8 @@ import org.junit.Test
 
 class AdFeedbackRepositoryImplTest {
     private val dao = FakeLlmObservationDao()
-    private val repository = AdFeedbackRepositoryImpl(dao)
+    private val dailyInsightDao = FakeDailyInsightDao()
+    private val repository = AdFeedbackRepositoryImpl(dao, dailyInsightDao, ImmediateTransactionRunner())
 
     @Test
     fun `stores content-free observations keyed by activity event`() =
@@ -68,6 +69,16 @@ class AdFeedbackRepositoryImplTest {
                 assertEquals(SemanticIntent.entries.size, counts.total)
                 cancelAndIgnoreRemainingEvents()
             }
+        }
+
+    @Test
+    fun `semantic correction invalidates its completed daily rollup`() =
+        runTest {
+            repository.recordObservation(observation("9", "com.shop", isAd = true))
+
+            repository.recordCorrection("9", SemanticIntent.TRANSACTIONAL)
+
+            assertEquals(listOf(9L), dailyInsightDao.invalidatedEventIds)
         }
 
     private fun observation(

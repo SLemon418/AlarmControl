@@ -2,6 +2,8 @@ package com.alarmcontrol.data.repository
 
 import com.alarmcontrol.core.profile.FilteringProfile
 import com.alarmcontrol.core.profile.MAX_PROFILE_NAME_CHARS
+import com.alarmcontrol.core.profile.MAX_PROFILE_RULE_IDS
+import com.alarmcontrol.core.profile.MAX_SAVED_PROFILES
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -71,5 +73,24 @@ class ProfileRepositoryImplTest {
             assertEquals(1, repository.countUsingRule("1"))
             assertEquals(2, repository.countUsingRule("2"))
             assertEquals(0, repository.countUsingRule("invalid"))
+        }
+
+    @Test
+    fun `saving enforces profile and membership storage bounds`() =
+        runTest {
+            dao.countOverride = MAX_SAVED_PROFILES
+            assertTrue(
+                runCatching {
+                    repository.save(FilteringProfile(name = "Overflow", ruleIds = emptySet()))
+                }.exceptionOrNull() is IllegalArgumentException,
+            )
+
+            dao.countOverride = 0
+            val tooManyRules = (1..MAX_PROFILE_RULE_IDS + 1).map(Int::toString).toSet()
+            assertTrue(
+                runCatching {
+                    repository.save(FilteringProfile(name = "Large", ruleIds = tooManyRules))
+                }.exceptionOrNull() is IllegalArgumentException,
+            )
         }
 }

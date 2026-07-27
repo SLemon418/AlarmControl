@@ -73,7 +73,10 @@
   금지합니다.
 - 분류 모델은 `:ml/src/main/assets/`에 포함하고 로컬에서만 읽습니다.
 - 생성형 LLM은 사용자가 로컬 파일로 선택하고 앱 전용 `filesDir`에 원자적으로 복사합니다.
-  누락되거나 잘못된 모델은 정상적으로 성능 저하 처리합니다.
+  가져올 때 SHA-256 사이드카를 함께 원자적으로 기록하고 이후 초기화마다 전체 파일을
+  해시해 누락되거나 불일치한 무결성 기록을 거부합니다. 이는 가져온 뒤 파일 변경을
+  탐지하지만 모델 제작자를 인증하지는 않습니다. 누락·손상·변경된 모델은 정상적으로
+  성능 저하 처리합니다.
 - 백업/모델 파일 선택 Intent에는 `Intent.EXTRA_LOCAL_ONLY`를 지정합니다.
 - 로컬 백업 v6에는 규칙 모드와 지원 조건 트리, 이름 있는 프로필, 채널·앱·시간대·의미별
   일별 요약, 선택한 설정을 포함하며 v1~v5도 계속 복원합니다. 패키지별 7종 의미 학습 투표는
@@ -136,8 +139,10 @@
 - 활성 규칙은 **ACTIVE**, 관찰 규칙은 **MONITOR** 목록으로 별도 컴파일합니다. 첫 활성
   일치만 플랫폼 동작을 수행하며 첫 관찰 일치는 예상 동작만 기록하고 활성 규칙을 가리지
   않습니다.
-- 리스너 작업은 최대 64개, 동시 평가 4개로 제한합니다. 같은 알림의 새 게시와 규칙·권한
-  변경은 오래된 작업의 Binder 실행 권한을 취소하며, 시작 캐시는 2초 뒤 fail-open 합니다.
+- 리스너 작업은 최대 64개, 동시 평가 4개로 제한합니다. 실제 알림 게시 시각을 freshness로
+  사용하므로 늦게 도착한 과거 콜백이 더 최신 대기 작업을 밀어낼 수 없고, 이미 실행 중인
+  작업은 폭주 퇴출 대상이 아닙니다. 같은 알림의 새 게시와 규칙·권한 변경은 오래된 작업의
+  Binder 실행 권한을 취소하며, 시작 캐시는 2초 뒤 fail-open 합니다.
 - 빈도 조건은 패키지 또는 패키지+채널 범위에서 현재 알림을 포함해 1분~24시간, 임계치
   2~1000을 지원합니다. Room 메타데이터로 인메모리 추적기를 한 번만 초기화하고 알림마다
   DB를 조회하지 않습니다. 초기화·채널·Ranking 신호 누락은 `UNKNOWN`이며 동작하지 않습니다.
@@ -166,16 +171,22 @@
 
 ## 7. 자동화와 Samsung Routines 규칙
 
-- 공개된 Samsung Modes and Routines 서드파티 액션 SDK는 없습니다. 공개 Intent와
-  Tasker/Locale 플러그인, Good Lock RoutinePlus를 통해 연동합니다.
+- 공개된 Samsung Modes and Routines 서드파티 액션 SDK는 없습니다. Samsung Routines의
+  직접 연동은 **애플리케이션 → 앱을 열거나 앱 동작 바로 실행**에서 AlarmControl의 동적
+  App Shortcut을 선택하는 방식입니다. 검증한 One UI 5.1 / Routine+ 1.0.60에는 임의
+  브로드캐스트 전송 동작이 없습니다. Tasker, MacroDroid, Locale 호환 도구는 별도의
+  인증된 공개 Intent 계약을 사용합니다.
 - `ENABLE_PROFILE` / `DISABLE_PROFILE` 및 extra 이름은 공개 API처럼 안정적으로 유지합니다.
 - 외부 요청은 앱 내부 opt-in과 설치별 `AUTH_TOKEN`을 모두 요구합니다.
+- 발신자는 AlarmControl 패키지 또는 수신기 component를 명시해야 합니다. 다른 앱이 공개
+  Action을 구독해 토큰을 볼 수 없도록 암시적 브로드캐스트는 거부합니다.
 - 액션과 extra를 검증하고 브로드캐스트 폭주를 제한합니다.
-- Tasker/RoutinePlus가 앱 정의 signature 권한을 가질 수 없으므로 사용자 정의 Android
+- 외부 자동화 도구가 앱 정의 signature 권한을 가질 수 없으므로 사용자 정의 Android
   권한은 의도적으로 사용하지 않습니다.
 - 감사 기록은 소스, 동작, 대상 타입, 결과, 변경 수만 최대 한도로 보관합니다. 대상 이름,
   토큰, 알림 내용은 기록하지 않습니다.
 - QS 타일, App Shortcuts, UI, 외부 Intent는 모두 같은 `ProfileController`에 위임합니다.
+  Samsung Routines의 App Shortcut 경로에는 외부 자동화 opt-in이나 토큰이 필요하지 않습니다.
 
 ---
 
@@ -203,13 +214,26 @@
   v13으로 업그레이드하고, 기존 데이터 보존과 이진 광고 피드백의 7종 의미 이관을 검증합니다.
 - 계측 테스트는 기기/에뮬레이터에서 `./gradlew :data:connectedDebugAndroidTest`로 실행하며
   기본 JVM `test` 작업에는 포함되지 않습니다.
-- `:app` 계측 테스트는 실제 Activity/Hilt/리소스/탐색을, `:ml` 계측 테스트는 실제 TFLite
-  런타임과 에셋 호환성을 검증합니다.
-- PR CI는 JVM/Robolectric, 품질·오프라인 게이트, Release APK/AAB, 모든 계측 APK와
+- AGP `connectedDebugAndroidTest`는 전용 테스트 기기/프로필에서만 실행합니다. 종료 과정이
+  대상 Debug 패키지와 로컬 데이터를 삭제할 수 있으므로, 보존할 데이터가 있다면 먼저
+  백업합니다. 또는 빌드된 APK를 직접 설치한 뒤 `adb shell am instrument`로 실행하고
+  `.test` 패키지만 제거합니다. 리스너 테스트는 통제된 `com.android.shell` 알림을 사용하므로
+  제품/테스트 APK 모두 `POST_NOTIFICATIONS` 권한을 요청하지 않습니다.
+- `:app` 계측 테스트는 실제 Activity/Hilt/리소스/탐색, 알림 리스너의 통제된
+  관찰/취소/스누즈 판단, 20개 급속 게시, 강제 Doze 취소, Android Ranking 중요도,
+  인증된 외부 자동화, LLM 미설치 폴백, Hilt WorkManager 일별 집계 경로를 검증합니다.
+  `:ml` 계측 테스트는 실제 TFLite 런타임과 에셋 호환성을 검증합니다.
+- PR CI는 JVM/Robolectric, 품질·오프라인 게이트, Release APK/AAB 컴파일, 모든 계측 APK와
   Baseline Profile 변형을 컴파일합니다. main 변경·매일 예약·수동 실행은 추가로 API 34
   `pixel2Api34` `aosp-atd` Managed Device에서 `:data`, `:ml`, `:app` 테스트를 실행합니다.
+- Release 번들이 컴파일됐다고 바로 배포 가능한 것은 아닙니다. CI의 `bundleRelease`는
+  의도적으로 무서명일 수 있습니다. 실제 배포본은 반드시 `:app:releaseCandidate`를 통과해야
+  하며, 이 작업은 네 서명 환경 변수, 기기 독립 게이트, AAB 크기 제한과 payload의
+  암호학적 서명을 검증합니다. 키 저장소와 서명 자격 증명은 커밋하지 않습니다.
 - CI는 Gradle wrapper를 검증하고 `gradle/verification-metadata.xml`의 SHA-256을 strict
-  모드로 확인합니다. 이 공급망 검사를 우회하거나 약화하지 않습니다.
+  모드로 확인합니다. `verifyCiActionPins`는 워크플로·재사용 워크플로·composite action
+  YAML을 모두 검사하며 원격 Action은 40자 커밋 SHA, 컨테이너 Action은 SHA-256 digest로
+  고정해야 합니다. 이 공급망 검사를 우회하거나 약화하지 않습니다.
 - Baseline Profile과 소켓 없는 ActivityManager 시작 벤치마크는 `:baselineprofile`에서
   관리합니다. AndroidX TraceProcessor 방식은 localhost HTTP에도 테스트 APK의 `INTERNET`
   권한이 필요하므로 사용하지 않습니다. 생성과 측정은 API 33 이상 연결 기기에서 수행하며

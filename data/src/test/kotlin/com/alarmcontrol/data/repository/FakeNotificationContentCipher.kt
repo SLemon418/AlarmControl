@@ -9,8 +9,10 @@ internal class FakeNotificationContentCipher(
 ) : NotificationContentCipher {
     var keyDeleted: Boolean = false
         private set
+    var beforeEncryption: (() -> Unit)? = null
 
     override fun encrypt(plaintext: ByteArray): EncryptedContent {
+        beforeEncryption?.invoke()
         check(!failEncryption) { "Encryption failed" }
         keyDeleted = false
         return EncryptedContent(

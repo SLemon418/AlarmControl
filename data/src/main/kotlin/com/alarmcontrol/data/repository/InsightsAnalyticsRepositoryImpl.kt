@@ -31,18 +31,17 @@ class InsightsAnalyticsRepositoryImpl
                 val days = rows.map { it.toDomain() }
                 val actualRules =
                     days.flatMap { it.topRules }.groupingBy { it.ruleId }.fold(0) { sum, row ->
-                        sum +
-                            row.count
+                        sum.saturatedPlus(row.count)
                     }
                 val monitoredRules =
                     days
                         .flatMap { it.topMonitoredRules }
                         .groupingBy { it.ruleId }
-                        .fold(0) { sum, row -> sum + row.count }
+                        .fold(0) { sum, row -> sum.saturatedPlus(row.count) }
                 val ruleIds = actualRules.keys + monitoredRules.keys
                 InsightsAnalytics(
                     range = range,
-                    totalNotifications = days.sumOf { it.totalNotifications },
+                    totalNotifications = days.map { it.totalNotifications }.saturatedSum(),
                     actionBreakdown = days.map { it.actionBreakdown }.summed(),
                     monitoredActionBreakdown = days.map { it.monitoredActionBreakdown }.summed(),
                     apps =
@@ -52,8 +51,8 @@ class InsightsAnalyticsRepositoryImpl
                             .map { (packageName, counts) ->
                                 AppInsightCount(
                                     packageName,
-                                    counts.sumOf { it.totalCount },
-                                    counts.sumOf { it.silencedCount },
+                                    counts.map { it.totalCount }.saturatedSum(),
+                                    counts.map { it.silencedCount }.saturatedSum(),
                                 )
                             }.sortedWith(
                                 compareByDescending<AppInsightCount> { it.totalCount }.thenBy { it.packageName },
@@ -62,14 +61,15 @@ class InsightsAnalyticsRepositoryImpl
                         ruleIds
                             .map { RuleInsightCount(it, actualRules[it] ?: 0, monitoredRules[it] ?: 0) }
                             .sortedWith(
-                                compareByDescending<RuleInsightCount> { it.actualCount + it.monitoredCount }
-                                    .thenBy { it.ruleId },
+                                compareByDescending<RuleInsightCount> {
+                                    it.actualCount.toLong() + it.monitoredCount
+                                }.thenBy { it.ruleId },
                             ),
                     categories =
                         days
                             .flatMap { it.categoryBreakdown }
                             .groupingBy { it.category }
-                            .fold(0) { sum, row -> sum + row.count }
+                            .fold(0) { sum, row -> sum.saturatedPlus(row.count) }
                             .map { CategoryCount(it.key, it.value) }
                             .sortedByDescending { it.count },
                     channels =
@@ -80,7 +80,7 @@ class InsightsAnalyticsRepositoryImpl
                                 ChannelCount(
                                     packageName = key.first,
                                     channelId = key.second,
-                                    count = counts.sumOf { it.count },
+                                    count = counts.map { it.count }.saturatedSum(),
                                     channelName = counts.mapNotNull { it.channelName }.lastOrNull(),
                                 )
                             }.sortedByDescending { it.count },
@@ -91,20 +91,20 @@ class InsightsAnalyticsRepositoryImpl
                             .map { (hour, counts) ->
                                 HourInsightCount(
                                     hour,
-                                    counts.sumOf { it.totalCount },
-                                    counts.sumOf { it.silencedCount },
+                                    counts.map { it.totalCount }.saturatedSum(),
+                                    counts.map { it.silencedCount }.saturatedSum(),
                                 )
                             }.sortedBy { it.hour },
                     semanticIntents =
                         days
                             .flatMap { it.semanticBreakdown }
                             .groupingBy { it.intent }
-                            .fold(0) { sum, row -> sum + row.count }
+                            .fold(0) { sum, row -> sum.saturatedPlus(row.count) }
                             .map { SemanticIntentCount(it.key, it.value) }
                             .sortedByDescending { it.count },
-                    mlClassifiedCount = days.sumOf { it.mlClassifiedCount },
-                    categoryCorrectionCount = days.sumOf { it.categoryCorrectionCount },
-                    semanticCorrectionCount = days.sumOf { it.semanticCorrectionCount },
+                    mlClassifiedCount = days.map { it.mlClassifiedCount }.saturatedSum(),
+                    categoryCorrectionCount = days.map { it.categoryCorrectionCount }.saturatedSum(),
+                    semanticCorrectionCount = days.map { it.semanticCorrectionCount }.saturatedSum(),
                     bucket = range.bucket(),
                     trend = days.toTrend(range.bucket()),
                     breakdownCoverageStartEpochDay =
@@ -141,18 +141,25 @@ private fun List<com.alarmcontrol.core.insights.DailyInsight>.toTrend(
         InsightsTrendPoint(
             startEpochDay = start.toEpochDay(),
             endEpochDay = days.maxOf { it.epochDay },
-            totalCount = days.sumOf { it.totalNotifications },
-            silencedCount = days.sumOf { it.mutedCount },
+            totalCount = days.map { it.totalNotifications }.saturatedSum(),
+            silencedCount = days.map { it.mutedCount }.saturatedSum(),
         )
     }.sortedBy(InsightsTrendPoint::startEpochDay)
 
 private fun List<ActionBreakdown>.summed(): ActionBreakdown =
     ActionBreakdown(
-        cancelled = sumOf { it.cancelled },
-        snoozed = sumOf { it.snoozed },
-        loggedOnly = sumOf { it.loggedOnly },
-        kept = sumOf { it.kept },
+        cancelled = map { it.cancelled }.saturatedSum(),
+        snoozed = map { it.snoozed }.saturatedSum(),
+        loggedOnly = map { it.loggedOnly }.saturatedSum(),
+        kept = map { it.kept }.saturatedSum(),
     )
+
+private fun Iterable<Int>.saturatedSum(): Int = fold(0, Int::saturatedPlus)
+
+private fun Int.saturatedPlus(other: Int): Int =
+    (toLong() + other)
+        .coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong())
+        .toInt()
 
 private const val MAX_DAILY_BUCKET_DAYS = 31L
 private const val MAX_WEEKLY_BUCKET_DAYS = 180L

@@ -35,13 +35,15 @@ data class ProfileEditorState(
     val name: String = "",
     val selectedRuleIds: Set<String> = emptySet(),
     val nameConflict: Boolean = false,
+    val isSaving: Boolean = false,
     val hasUnsavedChanges: Boolean = false,
     val showDiscardConfirmation: Boolean = false,
 ) {
     val isEditing: Boolean get() = id.isNotBlank()
     val canSave: Boolean
         get() =
-            name.isNotBlank() &&
+            !isSaving &&
+                name.isNotBlank() &&
                 name.length <= MAX_PROFILE_NAME_CHARS &&
                 !nameConflict &&
                 selectedRuleIds.isNotEmpty()

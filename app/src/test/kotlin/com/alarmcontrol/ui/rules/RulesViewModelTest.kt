@@ -1,5 +1,6 @@
 package com.alarmcontrol.ui.rules
 
+import androidx.lifecycle.SavedStateHandle
 import app.cash.turbine.test
 import com.alarmcontrol.R
 import com.alarmcontrol.core.filtering.Condition
@@ -24,13 +25,19 @@ import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.coroutines.resume
+import kotlin.coroutines.suspendCoroutine
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class RulesViewModelTest {
@@ -59,6 +66,8 @@ class RulesViewModelTest {
     private fun viewModel(
         automationEnabled: Boolean = false,
         sources: List<NotificationSource> = emptyList(),
+        savedStateHandle: SavedStateHandle = SavedStateHandle(),
+        workerDispatcher: CoroutineDispatcher = mainDispatcherRule.dispatcher,
     ): RulesViewModel {
         every { ruleRepository.observeRules() } returns rulesFlow
         coEvery { profileRepository.countUsingRule(any()) } returns 0
@@ -75,7 +84,8 @@ class RulesViewModelTest {
             DefaultRuleAnalyzer(),
             appHealthProvider,
             appIdentityResolver,
-            mainDispatcherRule.dispatcher,
+            savedStateHandle,
+            workerDispatcher,
         )
     }
 
@@ -162,6 +172,43 @@ class RulesViewModelTest {
         }
 
     @Test
+    fun `late profile count cannot replace the latest rule deletion confirmation`() =
+        runTest {
+            val secondRule = sampleRule.copy(id = "2", name = "Keep banking")
+            rulesFlow.value = listOf(sampleRule, secondRule)
+            val vm = viewModel()
+            var resumeFirst: ((Int) -> Unit)? = null
+            coEvery { profileRepository.countUsingRule("1") } coAnswers {
+                suspendCoroutine { continuation ->
+                    resumeFirst = continuation::resume
+                }
+            }
+            coEvery { profileRepository.countUsingRule("2") } returns 3
+
+            vm.uiState.test {
+                awaitUntil { it.rules.size == 2 }
+                vm.onDeleteRule("1")
+                vm.onDeleteRule("2")
+                awaitUntil { it.pendingDelete?.ruleId == "2" }
+
+                requireNotNull(resumeFirst).invoke(1)
+                mainDispatcherRule.dispatcher.scheduler.runCurrent()
+                assertEquals(
+                    "2",
+                    vm.uiState.value
+                        .pendingDelete
+                        ?.ruleId,
+                )
+
+                vm.confirmDeleteRule()
+                cancelAndIgnoreRemainingEvents()
+            }
+
+            coVerify(exactly = 1) { ruleRepository.deleteRule("2") }
+            coVerify(exactly = 0) { ruleRepository.deleteRule("1") }
+        }
+
+    @Test
     fun `saving an empty editor surfaces a message and does not persist`() =
         runTest {
             val vm = viewModel()
@@ -177,6 +224,35 @@ class RulesViewModelTest {
             }
 
             coVerify(exactly = 0) { ruleRepository.saveRule(any()) }
+        }
+
+    @Test
+    fun `saving a rule ignores repeated submissions until the first write completes`() =
+        runTest {
+            val releaseSave = CompletableDeferred<Unit>()
+            coEvery { ruleRepository.saveRule(any()) } coAnswers {
+                releaseSave.await()
+                "42"
+            }
+            val vm = viewModel()
+
+            vm.uiState.test {
+                awaitUntil { !it.isLoading }
+                vm.onUseTemplate(RuleTemplate.KEEP_ALARMS)
+                val draft = awaitUntil { it.editor != null }.editor!!
+                vm.onEditorChange(draft.copy(name = "Keep alarms"))
+                awaitUntil { it.editor?.canSave == true }
+                vm.onSaveRule()
+                val saving = awaitUntil { it.editor?.isSaving == true }.editor!!
+                assertFalse(saving.canSave)
+
+                vm.onSaveRule()
+                releaseSave.complete(Unit)
+                awaitUntil { it.editor == null }
+                cancelAndIgnoreRemainingEvents()
+            }
+
+            coVerify(exactly = 1) { ruleRepository.saveRule(any()) }
         }
 
     @Test
@@ -263,6 +339,30 @@ class RulesViewModelTest {
             }
 
             coVerify(exactly = 0) { ruleRepository.saveRule(any()) }
+        }
+
+    @Test
+    fun `late activity shortcut resolution cannot replace a newer editor draft`() =
+        runTest {
+            val workerDispatcher = StandardTestDispatcher(testScheduler)
+            val vm = viewModel(workerDispatcher = workerDispatcher)
+
+            vm.uiState.test {
+                awaitUntil { !it.isLoading }
+                vm.onCreateRuleFromActivity(QuickRuleDraft("com.example.shop", "promotion"))
+                vm.onUseTemplate(RuleTemplate.KEEP_ALARMS)
+                val draft = awaitUntil { it.editor != null }.editor!!
+                workerDispatcher.scheduler.runCurrent()
+
+                assertEquals(EditorAction.KEEP, draft.action)
+                assertEquals(
+                    Condition.AllOf(listOf(Condition.CategoryEquals("alarm"))),
+                    vm.uiState.value.editor
+                        ?.root
+                        ?.toConditionOrNull(),
+                )
+                cancelAndIgnoreRemainingEvents()
+            }
         }
 
     @Test
@@ -410,6 +510,95 @@ class RulesViewModelTest {
         runTest {
             viewModel(automationEnabled = true).uiState.test {
                 assertEquals(false, awaitUntil { !it.isLoading }.showAutomationHint)
+                cancelAndIgnoreRemainingEvents()
+            }
+        }
+
+    @Test
+    fun `restores an unsaved nested rule draft after view model recreation`() =
+        runTest {
+            val savedState = SavedStateHandle()
+            val first = viewModel(savedStateHandle = savedState)
+
+            first.uiState.test {
+                awaitUntil { !it.isLoading }
+                first.onAddRule()
+                val editor = awaitUntil { it.editor != null }.editor!!
+                first.onEditorChange(
+                    editor.copy(
+                        name = "Quiet nested offers",
+                        editorMode = RuleEditorMode.ADVANCED,
+                        root =
+                            GroupNode(
+                                key = nextNodeKey(),
+                                anyOf = false,
+                                children =
+                                    listOf(
+                                        LeafNode(nextNodeKey(), LeafKind.PACKAGE, "com.example.shop"),
+                                        NotNode(
+                                            nextNodeKey(),
+                                            GroupNode(
+                                                nextNodeKey(),
+                                                anyOf = true,
+                                                children =
+                                                    listOf(
+                                                        LeafNode(nextNodeKey(), LeafKind.TEXT, "receipt"),
+                                                        TimeWindowNode(nextNodeKey(), "22:00", "07:00"),
+                                                    ),
+                                            ),
+                                        ),
+                                    ),
+                            ),
+                    ),
+                )
+                awaitUntil { it.editor?.name == "Quiet nested offers" }
+                cancelAndIgnoreRemainingEvents()
+            }
+
+            assertTrue(savedState.get<String>(RULE_EDITOR_DRAFT_SAVED_STATE_KEY).orEmpty().isNotEmpty())
+
+            viewModel(savedStateHandle = savedState).uiState.test {
+                val restored = awaitUntil { !it.isLoading && it.editor != null }.editor!!
+                assertEquals("Quiet nested offers", restored.name)
+                assertEquals(
+                    Condition.AllOf(
+                        listOf(
+                            Condition.PackageEquals("com.example.shop"),
+                            Condition.Not(
+                                Condition.AnyOf(
+                                    listOf(
+                                        Condition.TextContains("receipt"),
+                                        Condition.TimeWindow(22 * 60, 7 * 60),
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                    restored.root.toConditionOrNull(),
+                )
+                cancelAndIgnoreRemainingEvents()
+            }
+        }
+
+    @Test
+    fun `discarding a rule draft removes its process death state`() =
+        runTest {
+            val savedState = SavedStateHandle()
+            val vm = viewModel(savedStateHandle = savedState)
+
+            vm.uiState.test {
+                awaitUntil { !it.isLoading }
+                vm.onUseTemplate(RuleTemplate.KEEP_ALARMS)
+                awaitUntil { it.editor != null }
+                vm.onConfirmDiscardEditor()
+                awaitUntil { it.editor == null }
+                cancelAndIgnoreRemainingEvents()
+            }
+
+            assertEquals(null, savedState.get<String>(RULE_EDITOR_DRAFT_SAVED_STATE_KEY))
+
+            viewModel(savedStateHandle = savedState).uiState.test {
+                assertEquals(null, awaitUntil { !it.isLoading }.editor)
                 cancelAndIgnoreRemainingEvents()
             }
         }

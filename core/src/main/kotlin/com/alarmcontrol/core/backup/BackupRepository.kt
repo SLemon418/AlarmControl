@@ -25,9 +25,10 @@ interface BackupRepository {
     ): DataResult<BackupPreview>
 
     /**
-     * Parses [serialized] and restores it atomically: rules are replaced wholesale with fresh local
-     * ids, historical references are remapped, and each day's rollup is upserted. Malformed input fails as
-     * [DataResult.Failure] rather than throwing.
+     * Parses [serialized] and restores Room-backed sections in one transaction: rules are replaced
+     * wholesale with fresh local ids, historical references are remapped, and each day's rollup is
+     * upserted. Side-effecting settings stay disabled during a rule restore and are activated only
+     * after commit. Malformed input fails as [DataResult.Failure] rather than throwing.
      */
     suspend fun restore(
         serialized: String,

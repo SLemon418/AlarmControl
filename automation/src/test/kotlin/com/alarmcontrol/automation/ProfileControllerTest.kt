@@ -137,6 +137,27 @@ class ProfileControllerTest {
         }
 
     @Test
+    fun `malformed first party target cannot fall through to the master switch`() =
+        runTest {
+            val settings = FakeSettingsRepository(filtering = true)
+            val audit = RecordingAutomationAuditRepository()
+            val controller =
+                ProfileController(
+                    FakeRuleRepository(emptyList()),
+                    FakeProfileRepository(),
+                    settings,
+                    audit,
+                )
+            val malformed = "x".repeat(201)
+
+            assertEquals(0, controller.setEnabled(profileId = malformed, enabled = false))
+            assertEquals(0, controller.toggle("\u0001"))
+
+            assertTrue(settings.isFilteringEnabled())
+            assertEquals(listOf(AutomationOutcome.INVALID, AutomationOutcome.INVALID), audit.entries.map { it.outcome })
+        }
+
+    @Test
     fun `external automation is ignored when the opt-in is off`() =
         runTest {
             val repo = FakeRuleRepository(listOf(rule("1", "Work", enabled = true)))
@@ -239,6 +260,7 @@ class ProfileControllerTest {
 
             assertEquals(1, changed)
             assertFalse(settings.isFilteringEnabled())
+            assertEquals(13, audit.entries.size)
             assertEquals(AutomationOutcome.APPLIED, audit.entries.last().outcome)
         }
 

@@ -1,5 +1,6 @@
 package com.alarmcontrol.ui.rules
 
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.alarmcontrol.R
@@ -29,15 +30,18 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 
 @OptIn(ExperimentalCoroutinesApi::class, FlowPreview::class)
@@ -54,14 +58,30 @@ class RulesViewModel
         private val ruleAnalyzer: RuleAnalyzer,
         private val appHealthProvider: AppHealthProvider,
         private val appIdentityResolver: AppIdentityResolver,
+        private val savedStateHandle: SavedStateHandle,
         @Dispatcher(AppDispatcher.Default) private val dispatcher: CoroutineDispatcher,
     ) : ViewModel() {
-        private val editor = MutableStateFlow<RuleEditorState?>(null)
+        private val editor =
+            MutableStateFlow(
+                savedStateHandle
+                    .get<String>(RULE_EDITOR_DRAFT_SAVED_STATE_KEY)
+                    ?.let(RuleEditorDraftCodec::decode),
+            )
         private val messages = MutableStateFlow<UiText?>(null)
         private val pendingDelete = MutableStateFlow<RuleDeleteConfirmationUi?>(null)
+        private val deleteRequestGeneration = AtomicLong()
+        private var deleteRequestJob: Job? = null
+        private val editorRequestGeneration = AtomicLong()
+        private var editorRequestJob: Job? = null
 
         private val notificationAccess =
             MutableStateFlow(NotificationAccessUiState.CHECKING)
+
+        init {
+            if (editor.value == null) {
+                savedStateHandle.remove<String>(RULE_EDITOR_DRAFT_SAVED_STATE_KEY)
+            }
+        }
 
         private val rulesResult: StateFlow<DataResult<List<Rule>>> =
             ruleRepository
@@ -88,7 +108,7 @@ class RulesViewModel
                             )
                         },
                 )
-            }
+            }.flowOn(dispatcher)
 
         private val settingsState =
             combine(
@@ -189,88 +209,96 @@ class RulesViewModel
 
         /** Opens an unsaved package-level draft from a privacy-safe activity-feed item. */
         fun onCreateRuleFromActivity(draft: QuickRuleDraft) {
-            val conditions =
-                if (draft.marketingMonitor) {
-                    listOf(
-                        Condition.PackageEquals(draft.packageName),
-                        Condition.AnyOf(
-                            listOf(
-                                Condition.MlCategoryEquals("promotion"),
-                                Condition.SemanticIntentEquals(
-                                    com.alarmcontrol.core.filtering.SemanticIntent.MARKETING,
-                                ),
-                            ),
-                        ),
-                    )
-                } else {
-                    buildList {
-                        add(Condition.PackageEquals(draft.packageName))
-                        if (draft.channelId.isNullOrBlank()) {
-                            draft.category?.takeIf(String::isNotBlank)?.let { add(Condition.CategoryEquals(it)) }
-                        } else {
-                            add(Condition.ChannelEquals(draft.channelId))
-                        }
-                    }
-                }
-            editor.value =
-                RuleEditorState(
-                    name =
+            val generation = editorRequestGeneration.incrementAndGet()
+            editorRequestJob?.cancel()
+            editorRequestJob =
+                viewModelScope.launch {
+                    val appName = withContext(dispatcher) { appIdentityResolver.resolve(draft.packageName).label }
+                    if (editorRequestGeneration.get() != generation) return@launch
+                    val conditions =
                         if (draft.marketingMonitor) {
-                            "Filter promotions from ${draft.packageName}"
+                            listOf(
+                                Condition.PackageEquals(draft.packageName),
+                                Condition.AnyOf(
+                                    listOf(
+                                        Condition.MlCategoryEquals("promotion"),
+                                        Condition.SemanticIntentEquals(
+                                            com.alarmcontrol.core.filtering.SemanticIntent.MARKETING,
+                                        ),
+                                    ),
+                                ),
+                            )
                         } else {
-                            ""
-                        },
-                    root = Condition.AllOf(conditions).toEditableRoot(),
-                    action = if (draft.keep) EditorAction.KEEP else EditorAction.CANCEL,
-                    executionMode =
-                        if (draft.keep) {
-                            RuleExecutionMode.ACTIVE
-                        } else {
-                            RuleExecutionMode.MONITOR
-                        },
-                    priority = if (draft.keep) suggestedProtectionPriority().toString() else "0",
-                    simulation =
-                        RuleSimulationState(
-                            packageName = draft.packageName,
-                            category = draft.category.orEmpty(),
-                            channelId = draft.channelId.orEmpty(),
+                            buildList {
+                                add(Condition.PackageEquals(draft.packageName))
+                                if (draft.channelId.isNullOrBlank()) {
+                                    draft.category
+                                        ?.takeIf(String::isNotBlank)
+                                        ?.let { add(Condition.CategoryEquals(it)) }
+                                } else {
+                                    add(Condition.ChannelEquals(draft.channelId))
+                                }
+                            }
+                        }
+                    setEditor(
+                        RuleEditorState(
+                            name = appName.takeIf { draft.marketingMonitor }.orEmpty(),
+                            root = Condition.AllOf(conditions).toEditableRoot(),
+                            action = if (draft.keep) EditorAction.KEEP else EditorAction.CANCEL,
+                            executionMode =
+                                if (draft.keep) {
+                                    RuleExecutionMode.ACTIVE
+                                } else {
+                                    RuleExecutionMode.MONITOR
+                                },
+                            priority = if (draft.keep) suggestedProtectionPriority().toString() else "0",
+                            simulation =
+                                RuleSimulationState(
+                                    packageName = draft.packageName,
+                                    category = draft.category.orEmpty(),
+                                    channelId = draft.channelId.orEmpty(),
+                                ),
+                            hasUnsavedChanges = true,
+                            editorMode =
+                                if (draft.marketingMonitor || (!draft.keep && !draft.category.isNullOrBlank())) {
+                                    RuleEditorMode.ADVANCED
+                                } else {
+                                    RuleEditorMode.GUIDED
+                                },
+                            guidedPackageName = draft.packageName,
+                            guidedAppName = appName,
+                            guidedChannelId = draft.channelId,
+                            guidedScope =
+                                if (draft.channelId.isNullOrBlank()) {
+                                    GuidedRuleScope.APP
+                                } else {
+                                    GuidedRuleScope.CHANNEL
+                                },
                         ),
-                    hasUnsavedChanges = true,
-                    editorMode =
-                        if (draft.marketingMonitor || (!draft.keep && !draft.category.isNullOrBlank())) {
-                            RuleEditorMode.ADVANCED
-                        } else {
-                            RuleEditorMode.GUIDED
-                        },
-                    guidedPackageName = draft.packageName,
-                    guidedAppName = appIdentityResolver.resolve(draft.packageName).label,
-                    guidedChannelId = draft.channelId,
-                    guidedScope =
-                        if (draft.channelId.isNullOrBlank()) {
-                            GuidedRuleScope.APP
-                        } else {
-                            GuidedRuleScope.CHANNEL
-                        },
-                )
+                        invalidatePendingRequest = false,
+                    )
+                }
         }
 
         fun onAddRule() {
-            editor.value = RuleEditorState()
+            setEditor(RuleEditorState())
         }
 
         fun onUseTemplate(template: RuleTemplate) {
-            editor.value =
+            setEditor(
                 template
                     .toEditorState(suggestedProtectionPriority())
-                    .copy(hasUnsavedChanges = true)
+                    .copy(hasUnsavedChanges = true),
+            )
         }
 
         fun onEditRule(ruleId: String) {
-            currentRule(ruleId)?.let { editor.value = it.toEditorState() }
+            currentRule(ruleId)?.let { setEditor(it.toEditorState()) }
         }
 
         fun onEditorChange(state: RuleEditorState) {
             val previous = editor.value
+            if (previous?.isSaving == true) return
             var normalized = state
             if (state.editorMode == RuleEditorMode.GUIDED) {
                 if (previous?.action == EditorAction.KEEP && state.action != EditorAction.KEEP) {
@@ -284,12 +312,13 @@ class RulesViewModel
                 }
                 normalized = normalized.copy(root = normalized.toGuidedRoot())
             }
-            editor.value =
+            setEditor(
                 normalized.copy(
                     simulation = normalized.simulation.copy(result = null, trace = emptyList()),
                     hasUnsavedChanges = true,
                     showDiscardConfirmation = false,
-                )
+                ),
+            )
         }
 
         /** Evaluates the draft against sample metadata without applying a platform action. */
@@ -322,7 +351,7 @@ class RulesViewModel
                     ?.condition
                     ?.toSimulationTrace()
                     .orEmpty()
-            editor.value = state.copy(simulation = state.simulation.copy(result = result, trace = trace))
+            setEditor(state.copy(simulation = state.simulation.copy(result = result, trace = trace)))
         }
 
         private fun buildSimulationSnapshot(
@@ -356,24 +385,28 @@ class RulesViewModel
 
         fun onDismissEditor() {
             val current = editor.value ?: return
-            editor.value =
+            if (current.isSaving) return
+            setEditor(
                 if (current.hasUnsavedChanges) {
                     current.copy(showDiscardConfirmation = true)
                 } else {
                     null
-                }
+                },
+            )
         }
 
         fun onCancelDiscardEditor() {
-            editor.value = editor.value?.copy(showDiscardConfirmation = false)
+            setEditor(editor.value?.copy(showDiscardConfirmation = false))
         }
 
         fun onConfirmDiscardEditor() {
-            editor.value = null
+            setEditor(null)
         }
 
         fun onSaveRule() {
-            val built = editor.value?.toRuleOrNull()
+            val state = editor.value ?: return
+            if (state.isSaving) return
+            val built = state.toRuleOrNull()
             if (built == null) {
                 messages.value = uiText(R.string.message_rule_condition_required)
                 return
@@ -386,7 +419,13 @@ class RulesViewModel
                 } else {
                     built
                 }
-            launchOp(onSuccess = { editor.value = null }) { ruleRepository.saveRule(rule) }
+            setEditor(state.copy(isSaving = true, showDiscardConfirmation = false))
+            launchOp(
+                onSuccess = { setEditor(null) },
+                onComplete = { setEditor(editor.value?.copy(isSaving = false)) },
+            ) {
+                ruleRepository.saveRule(rule)
+            }
         }
 
         fun onToggleRule(
@@ -399,29 +438,43 @@ class RulesViewModel
 
         fun onDeleteRule(ruleId: String) {
             val rule = currentRule(ruleId) ?: return
-            viewModelScope.launch(dispatcher) {
-                runCatchingPreservingCancellation {
-                    profileRepository.countUsingRule(ruleId)
-                }.onSuccess { count ->
-                    pendingDelete.value =
-                        RuleDeleteConfirmationUi(
-                            ruleId = ruleId,
-                            ruleName = rule.name,
-                            profileCount = count,
-                        )
-                }.onFailure {
-                    messages.value = uiText(R.string.message_generic_error)
+            val generation = deleteRequestGeneration.incrementAndGet()
+            deleteRequestJob?.cancel()
+            pendingDelete.value = null
+            deleteRequestJob =
+                viewModelScope.launch {
+                    val result =
+                        withContext(dispatcher) {
+                            runCatchingPreservingCancellation {
+                                profileRepository.countUsingRule(ruleId)
+                            }
+                        }
+                    if (deleteRequestGeneration.get() != generation) return@launch
+                    result
+                        .onSuccess { count ->
+                            if (currentRule(ruleId) != null) {
+                                pendingDelete.value =
+                                    RuleDeleteConfirmationUi(
+                                        ruleId = ruleId,
+                                        ruleName = rule.name,
+                                        profileCount = count,
+                                    )
+                            }
+                        }.onFailure {
+                            messages.value = uiText(R.string.message_generic_error)
+                        }
                 }
-            }
         }
 
         fun confirmDeleteRule() {
             val ruleId = pendingDelete.value?.ruleId ?: return
+            invalidateDeleteRequest()
             pendingDelete.value = null
             launchOp { ruleRepository.deleteRule(ruleId) }
         }
 
         fun cancelDeleteRule() {
+            invalidateDeleteRequest()
             pendingDelete.value = null
         }
 
@@ -429,8 +482,36 @@ class RulesViewModel
             messages.value = null
         }
 
+        private fun setEditor(
+            state: RuleEditorState?,
+            invalidatePendingRequest: Boolean = true,
+        ) {
+            if (invalidatePendingRequest) {
+                invalidateEditorRequest()
+            }
+            editor.value = state
+            val encoded = state?.let(RuleEditorDraftCodec::encode)
+            if (encoded == null) {
+                savedStateHandle.remove<String>(RULE_EDITOR_DRAFT_SAVED_STATE_KEY)
+            } else {
+                savedStateHandle[RULE_EDITOR_DRAFT_SAVED_STATE_KEY] = encoded
+            }
+        }
+
         private fun currentRule(id: String): Rule? =
             (rulesResult.value as? DataResult.Success)?.data?.firstOrNull { it.id == id }
+
+        private fun invalidateDeleteRequest() {
+            deleteRequestGeneration.incrementAndGet()
+            deleteRequestJob?.cancel()
+            deleteRequestJob = null
+        }
+
+        private fun invalidateEditorRequest() {
+            editorRequestGeneration.incrementAndGet()
+            editorRequestJob?.cancel()
+            editorRequestJob = null
+        }
 
         private fun RuleEditorState.withAnalysisWarnings(rules: List<Rule>): RuleEditorState {
             val draft = toRuleOrNull() ?: return copy(warnings = emptyList())
@@ -461,12 +542,18 @@ class RulesViewModel
 
         private fun launchOp(
             onSuccess: () -> Unit = {},
+            onComplete: () -> Unit = {},
             block: suspend () -> Unit,
         ) {
-            viewModelScope.launch(dispatcher) {
-                runCatchingPreservingCancellation { block() }
-                    .onSuccess { onSuccess() }
-                    .onFailure { messages.value = uiText(R.string.message_generic_error) }
+            viewModelScope.launch {
+                try {
+                    val result = withContext(dispatcher) { runCatchingPreservingCancellation { block() } }
+                    result
+                        .onSuccess { onSuccess() }
+                        .onFailure { messages.value = uiText(R.string.message_generic_error) }
+                } finally {
+                    onComplete()
+                }
             }
         }
 

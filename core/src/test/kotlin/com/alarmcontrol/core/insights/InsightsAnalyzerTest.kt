@@ -68,4 +68,16 @@ class InsightsAnalyzerTest {
         assertTrue(report.topMutedApps.isEmpty())
         assertTrue(report.anomalies.isEmpty())
     }
+
+    @Test
+    fun `large count sums and anomaly thresholds do not overflow`() {
+        val report =
+            analyze(
+                recent = mapOf("a" to Int.MAX_VALUE, "b" to Int.MAX_VALUE),
+                baseline = mapOf("a" to Int.MAX_VALUE),
+            )
+
+        assertEquals(Int.MAX_VALUE, report.totalEvents)
+        assertEquals(listOf("b"), report.anomalies.map { it.packageName })
+    }
 }

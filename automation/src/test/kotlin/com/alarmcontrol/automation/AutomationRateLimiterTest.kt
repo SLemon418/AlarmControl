@@ -13,4 +13,25 @@ class AutomationRateLimiterTest {
         assertFalse(limiter.tryAcquire(nowMillis = 1_000L))
         assertTrue(limiter.tryAcquire(nowMillis = 61_000L))
     }
+
+    @Test
+    fun `rejected storm allowance is bounded independently from valid requests`() {
+        val limiter = AutomationRateLimiter()
+
+        repeat(12) { assertTrue(limiter.tryAcquireRejected(nowMillis = 1_000L)) }
+        assertFalse(limiter.tryAcquireRejected(nowMillis = 1_000L))
+
+        repeat(12) { assertTrue(limiter.tryAcquire(nowMillis = 1_000L)) }
+        assertFalse(limiter.tryAcquire(nowMillis = 1_000L))
+    }
+
+    @Test
+    fun `wall clock rollback does not lock automation indefinitely`() {
+        val limiter = AutomationRateLimiter()
+
+        repeat(12) { assertTrue(limiter.tryAcquire(nowMillis = 60_000L)) }
+        assertFalse(limiter.tryAcquire(nowMillis = 60_000L))
+
+        assertTrue(limiter.tryAcquire(nowMillis = 1_000L))
+    }
 }

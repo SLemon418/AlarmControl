@@ -1,3 +1,5 @@
+import java.util.jar.JarFile
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -239,3 +241,105 @@ tasks
             }
         }
     }
+
+// Normal local/CI compilation may intentionally produce an unsigned release artifact. Distribution
+// uses the explicit releaseCandidate gate below so an unsigned AAB can never be mistaken for a
+// publishable bundle.
+val verifyReleaseSigningConfiguration by tasks.registering {
+    group = "verification"
+    description = "Fails unless every release-signing environment variable is configured."
+
+    doLast {
+        check(hasCompleteReleaseSigning) {
+            "Release signing is not configured. Set ALARMCONTROL_KEYSTORE_FILE, " +
+                "ALARMCONTROL_KEYSTORE_PASSWORD, ALARMCONTROL_KEY_ALIAS, and ALARMCONTROL_KEY_PASSWORD."
+        }
+    }
+}
+
+tasks
+    .matching { it.name == "bundleRelease" }
+    .configureEach {
+        mustRunAfter(verifyReleaseSigningConfiguration)
+    }
+
+val verifyReleaseBundleSigning by tasks.registering {
+    group = "verification"
+    description = "Builds the release AAB and cryptographically verifies its JAR signature."
+    dependsOn(verifyReleaseSigningConfiguration, "bundleRelease")
+
+    doLast {
+        val bundles =
+            layout.buildDirectory
+                .dir("outputs/bundle/release")
+                .get()
+                .asFile
+                .listFiles { file -> file.extension == "aab" }
+                .orEmpty()
+        check(bundles.size == 1) {
+            "Expected one release AAB, found ${bundles.size}"
+        }
+        val bundle = bundles.single()
+        val entryNames = mutableSetOf<String>()
+        var signedPayloadEntries = 0
+        val unsignedPayloadEntries = mutableListOf<String>()
+        val readBuffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        JarFile(bundle, true).use { jar ->
+            val entries = jar.entries()
+            while (entries.hasMoreElements()) {
+                val entry = entries.nextElement()
+                entryNames += entry.name.uppercase()
+                if (!entry.isDirectory && !entry.name.startsWith("META-INF/")) {
+                    jar.getInputStream(entry).use { input ->
+                        while (input.read(readBuffer) >= 0) {
+                            // Reading every byte makes JarFile validate the entry digest/signature.
+                        }
+                    }
+                    if (!entry.codeSigners.isNullOrEmpty()) {
+                        signedPayloadEntries += 1
+                    } else {
+                        unsignedPayloadEntries += entry.name
+                    }
+                }
+            }
+        }
+        check(signedPayloadEntries > 0) {
+            "Release AAB contains no cryptographically verified signed payload entries"
+        }
+        check(unsignedPayloadEntries.isEmpty()) {
+            "Release AAB contains unsigned payload entries: " +
+                unsignedPayloadEntries.take(5).joinToString()
+        }
+        check("META-INF/MANIFEST.MF" in entryNames) {
+            "Release AAB has no JAR signature manifest"
+        }
+        check(entryNames.any { it.matches(Regex("""META-INF/[^/]+\.SF""")) }) {
+            "Release AAB has no signature descriptor"
+        }
+        check(entryNames.any { it.matches(Regex("""META-INF/[^/]+\.(RSA|DSA|EC)""")) }) {
+            "Release AAB has no signing certificate block"
+        }
+        logger.lifecycle("Verified signed release bundle: ${bundle.absolutePath}")
+    }
+}
+
+tasks.register("releaseCandidate") {
+    group = "build"
+    description = "Runs all device-independent gates and produces a verified signed release AAB."
+    dependsOn(
+        ":core:check",
+        ":data:check",
+        ":ml:check",
+        ":notifications:check",
+        ":automation:check",
+        ":app:check",
+        ":baselineprofile:check",
+        ":app:assembleRelease",
+        ":app:assembleDebugAndroidTest",
+        ":data:assembleDebugAndroidTest",
+        ":ml:assembleDebugAndroidTest",
+        ":baselineprofile:assembleNonMinifiedRelease",
+        ":baselineprofile:assembleBenchmarkRelease",
+        verifyReleaseBundleSigning,
+    )
+}

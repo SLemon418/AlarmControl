@@ -70,9 +70,11 @@ object ProfileShortcuts {
                         iconRes = R.drawable.ic_shortcut_pause,
                     ),
                 )
-                profiles.take((maxCount - MASTER_SHORTCUT_COUNT).coerceAtLeast(0)).forEach { profile ->
-                    add(profileShortcut(context, profile))
-                }
+                profiles
+                    .asSequence()
+                    .filter { it.id.isNotBlank() && it.name.isNotBlank() }
+                    .take((maxCount - MASTER_SHORTCUT_COUNT).coerceAtLeast(0))
+                    .forEach { profile -> add(profileShortcut(context, profile)) }
             }.take(maxCount)
         ShortcutManagerCompat.setDynamicShortcuts(
             context,
@@ -83,17 +85,22 @@ object ProfileShortcuts {
     private fun profileShortcut(
         context: Context,
         profile: FilteringProfile,
-    ): ShortcutInfoCompat =
-        ShortcutInfoCompat
+    ): ShortcutInfoCompat {
+        val displayName = profile.name.trim().take(MAX_LABEL_CHARS)
+        return ShortcutInfoCompat
             .Builder(context, "profile_${profile.id}")
-            .setShortLabel(profile.name.take(MAX_LABEL_CHARS))
-            .setLongLabel(context.getString(R.string.shortcut_toggle_profile_long, profile.name))
-            .setIcon(IconCompat.createWithResource(context, R.drawable.ic_qs_filter))
+            .setShortLabel(displayName)
+            .setLongLabel(
+                context
+                    .getString(R.string.shortcut_toggle_profile_long, displayName)
+                    .take(MAX_LONG_LABEL_CHARS),
+            ).setIcon(IconCompat.createWithResource(context, R.drawable.ic_qs_filter))
             .setIntent(
                 Intent(context, ProfileShortcutActivity::class.java)
                     .setAction(ACTION_TOGGLE_PROFILE)
                     .putExtra(EXTRA_PROFILE_ID, profile.id),
             ).build()
+    }
 
     private fun shortcut(
         context: Context,
@@ -115,4 +122,5 @@ object ProfileShortcuts {
     private const val MASTER_SHORTCUT_COUNT = 2
     private const val DEFAULT_MAX_SHORTCUT_COUNT = 4
     private const val MAX_LABEL_CHARS = 40
+    private const val MAX_LONG_LABEL_CHARS = 80
 }

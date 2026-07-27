@@ -7,11 +7,16 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -19,6 +24,9 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.ByteArrayInputStream
+import java.io.InputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -140,6 +148,46 @@ class DefaultOnDeviceLlmManagerTest {
         }
 
     @Test
+    fun `initialize contains native linkage failures and keeps the actor responsive`() =
+        runTest {
+            val engine = FakeLlmEngine(available = true, loadError = UnsatisfiedLinkError("unsupported ABI"))
+            val manager = DefaultOnDeviceLlmManager(engine, UnconfinedTestDispatcher(testScheduler))
+
+            manager.initialize()
+            assertEquals(
+                LlmInitState.Unavailable(LlmFailure.LOAD_FAILED),
+                manager.initState.value,
+            )
+            assertTrue(engine.closed)
+            manager.close()
+
+            assertEquals(LlmInitState.Idle, manager.initState.value)
+            assertTrue(engine.closed)
+        }
+
+    @Test
+    fun `native analysis linkage failure revokes and closes the engine`() =
+        runTest {
+            val engine =
+                FakeLlmEngine(
+                    available = true,
+                    analyzeError = UnsatisfiedLinkError("native inference failed"),
+                )
+            val manager = DefaultOnDeviceLlmManager(engine, UnconfinedTestDispatcher(testScheduler))
+            manager.initialize()
+
+            assertNull(manager.analyze("notification"))
+
+            assertEquals(
+                LlmInitState.Unavailable(LlmFailure.LOAD_FAILED),
+                manager.initState.value,
+            )
+            assertTrue(engine.closed)
+            assertNull(manager.analyze("must not reuse failed runtime"))
+            assertEquals(1, engine.analyzeCalls)
+        }
+
+    @Test
     fun `concurrent initialization loads the native engine exactly once`() =
         runTest {
             val engine = FakeLlmEngine(available = true)
@@ -188,6 +236,26 @@ class DefaultOnDeviceLlmManagerTest {
         }
 
     @Test
+    fun `hung native analysis revokes the engine before another request can overlap`() =
+        runTest {
+            val engine = NeverCompletingEngine()
+            val manager = DefaultOnDeviceLlmManager(engine, UnconfinedTestDispatcher(testScheduler))
+            manager.initialize()
+
+            val result = async { manager.analyze("stuck") }
+            engine.started.await()
+            advanceTimeBy(9_001)
+            runCurrent()
+
+            assertNull(result.await())
+            assertTrue(manager.initState.value is LlmInitState.Unavailable)
+            assertNull(manager.analyze("must not overlap"))
+            assertEquals(1, engine.analyzeCalls)
+            manager.close()
+            assertTrue(engine.closed)
+        }
+
+    @Test
     fun `close releases the engine and returns to Idle`() =
         runTest {
             val engine = FakeLlmEngine(available = true)
@@ -218,6 +286,11 @@ class DefaultOnDeviceLlmManagerTest {
             assertEquals(LlmInitState.Ready, manager.initState.value)
             assertEquals(1, engine.loadCalls)
             assertEquals(listOf<Byte>(1, 2, 3), model.readBytes().toList())
+            assertEquals(3L, manager.modelInfo.value?.sizeBytes)
+            assertEquals(
+                "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
+                manager.modelInfo.value?.sha256,
+            )
         }
 
     @Test
@@ -250,15 +323,52 @@ class DefaultOnDeviceLlmManagerTest {
         }
 
     @Test
+    fun `cancelled install caller cannot start a second overlapping installation`() =
+        runTest {
+            val engine = GateEngine()
+            val model = temporaryFolder.root.resolve("llm/cancelled-install.task")
+            val store = LocalLlmModelStore(model)
+            store.install(byteArrayOf(0).inputStream())
+            val manager =
+                DefaultOnDeviceLlmManager(
+                    engine,
+                    Dispatchers.Default,
+                    store,
+                )
+            manager.initialize()
+            val analysis = async(Dispatchers.Default) { manager.analyze("hold actor") }
+            engine.started.await()
+            val firstInstall =
+                async(Dispatchers.Default) {
+                    manager.installModel(byteArrayOf(1).inputStream(), expectedBytes = 1)
+                }
+            withTimeout(1_000) {
+                while (manager.initState.value !is LlmInitState.Installing) yield()
+            }
+
+            firstInstall.cancelAndJoin()
+            val overlapping = manager.installModel(byteArrayOf(2).inputStream(), expectedBytes = 1)
+
+            assertTrue(overlapping is DataResult.Failure)
+            engine.release.complete(Unit)
+            analysis.await()
+            manager.close()
+            val afterCleanup = manager.installModel(byteArrayOf(3).inputStream(), expectedBytes = 1)
+            assertTrue(afterCleanup is DataResult.Success)
+        }
+
+    @Test
     fun `invalid replacement rolls back and reloads a previously working model`() =
         runTest {
-            val model = temporaryFolder.newFile("rollback.task").apply { writeBytes(byteArrayOf(1)) }
+            val model = temporaryFolder.root.resolve("rollback.task")
+            val store = LocalLlmModelStore(model)
+            store.install(byteArrayOf(1).inputStream())
             val engine = FileAwareEngine(model)
             val manager =
                 DefaultOnDeviceLlmManager(
                     engine,
                     UnconfinedTestDispatcher(testScheduler),
-                    LocalLlmModelStore(model),
+                    store,
                 )
             manager.initialize()
 
@@ -271,15 +381,65 @@ class DefaultOnDeviceLlmManagerTest {
         }
 
     @Test
-    fun `remove model closes the engine deletes the private file and resets state`() =
+    fun `initialize recovers the previous model after activation was interrupted`() =
         runTest {
-            val model = temporaryFolder.newFile("remove.task").apply { writeBytes(byteArrayOf(1)) }
+            val model = temporaryFolder.root.resolve("interrupted-activation.task")
+            val store = LocalLlmModelStore(model)
+            store.install(byteArrayOf(1).inputStream())
+            store.stage(byteArrayOf(2).inputStream()).activate()
+            val engine = FileAwareEngine(model)
+            val manager =
+                DefaultOnDeviceLlmManager(
+                    engine,
+                    UnconfinedTestDispatcher(testScheduler),
+                    store,
+                )
+
+            manager.initialize()
+
+            assertEquals(LlmInitState.Ready, manager.initState.value)
+            assertEquals(listOf<Byte>(1), model.readBytes().toList())
+            assertEquals(1L, manager.modelInfo.value?.sizeBytes)
+            assertEquals(2, engine.loadCalls)
+        }
+
+    @Test
+    fun `initialize rejects a model changed after import before native loading`() =
+        runTest {
+            val model = temporaryFolder.root.resolve("tampered.task")
+            val store = LocalLlmModelStore(model)
+            store.install(byteArrayOf(1).inputStream())
+            model.appendBytes(byteArrayOf(2))
             val engine = FakeLlmEngine(available = true)
             val manager =
                 DefaultOnDeviceLlmManager(
                     engine,
                     UnconfinedTestDispatcher(testScheduler),
-                    LocalLlmModelStore(model),
+                    store,
+                )
+
+            manager.initialize()
+
+            assertEquals(
+                LlmInitState.Unavailable(LlmFailure.MODEL_INTEGRITY_FAILED),
+                manager.initState.value,
+            )
+            assertNull(manager.modelInfo.value)
+            assertEquals(0, engine.loadCalls)
+        }
+
+    @Test
+    fun `remove model closes the engine deletes the private file and resets state`() =
+        runTest {
+            val model = temporaryFolder.root.resolve("remove.task")
+            val store = LocalLlmModelStore(model)
+            store.install(byteArrayOf(1).inputStream())
+            val engine = FakeLlmEngine(available = true)
+            val manager =
+                DefaultOnDeviceLlmManager(
+                    engine,
+                    UnconfinedTestDispatcher(testScheduler),
+                    store,
                 )
             manager.initialize()
 
@@ -288,6 +448,58 @@ class DefaultOnDeviceLlmManagerTest {
             assertTrue(result is DataResult.Success)
             assertTrue(!model.exists())
             assertTrue(engine.closed)
+            assertEquals(LlmInitState.Idle, manager.initState.value)
+            assertNull(manager.modelInfo.value)
+        }
+
+    @Test
+    fun `native close failure cannot prevent private model deletion`() =
+        runTest {
+            val model = temporaryFolder.root.resolve("close-failure.task")
+            val store = LocalLlmModelStore(model)
+            store.install(byteArrayOf(1).inputStream())
+            val manager =
+                DefaultOnDeviceLlmManager(
+                    FakeLlmEngine(available = true, closeError = UnsatisfiedLinkError("native close")),
+                    UnconfinedTestDispatcher(testScheduler),
+                    store,
+                )
+
+            val result = manager.removeModel()
+
+            assertTrue(result is DataResult.Success)
+            assertTrue(!model.exists())
+            assertEquals(LlmInitState.Idle, manager.initState.value)
+        }
+
+    @Test
+    fun `remove during model copy aborts staging before native loading`() =
+        runTest {
+            val model = temporaryFolder.root.resolve("remove-during-copy.task")
+            val engine = FakeLlmEngine(available = true)
+            val manager =
+                DefaultOnDeviceLlmManager(
+                    engine,
+                    Dispatchers.Default,
+                    LocalLlmModelStore(model),
+                )
+            val source = BlockingModelInputStream()
+            val installation =
+                async(Dispatchers.Default) {
+                    manager.installModel(source, expectedBytes = 1)
+                }
+            assertTrue(source.started.await(1, TimeUnit.SECONDS))
+
+            val removal = async(Dispatchers.Default) { manager.removeModel() }
+            withTimeout(1_000) {
+                while (manager.initState.value != LlmInitState.Idle) yield()
+            }
+            source.release.countDown()
+
+            assertTrue(installation.await() is DataResult.Failure)
+            assertTrue(removal.await() is DataResult.Success)
+            assertTrue(!model.exists())
+            assertEquals(0, engine.loadCalls)
             assertEquals(LlmInitState.Idle, manager.initState.value)
         }
 
@@ -347,5 +559,51 @@ class DefaultOnDeviceLlmManagerTest {
         }
 
         override fun close() = Unit
+    }
+
+    private class NeverCompletingEngine : LlmEngine {
+        val started = CompletableDeferred<Unit>()
+        var closed = false
+        var analyzeCalls = 0
+
+        override fun isModelAvailable(): Boolean = true
+
+        override fun load() = Unit
+
+        override suspend fun analyze(text: String): LlmAnalysisResult {
+            analyzeCalls += 1
+            started.complete(Unit)
+            CompletableDeferred<Unit>().await()
+            return LlmAnalysisResult.UNAVAILABLE
+        }
+
+        override fun close() {
+            closed = true
+        }
+    }
+
+    private class BlockingModelInputStream : InputStream() {
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        private var emitted = false
+
+        override fun read(): Int {
+            val byte = ByteArray(1)
+            return if (read(byte, 0, 1) < 0) -1 else byte[0].toInt() and 0xff
+        }
+
+        override fun read(
+            buffer: ByteArray,
+            offset: Int,
+            length: Int,
+        ): Int {
+            if (emitted) return -1
+            require(length > 0)
+            started.countDown()
+            check(release.await(1, TimeUnit.SECONDS)) { "Timed out waiting to release model copy" }
+            buffer[offset] = 1
+            emitted = true
+            return 1
+        }
     }
 }

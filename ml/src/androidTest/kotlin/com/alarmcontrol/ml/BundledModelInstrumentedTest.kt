@@ -19,7 +19,7 @@ import org.junit.runner.RunWith
 
 /**
  * On-device verification that the bundled `.tflite` actually loads and runs under the real Android
- * TensorFlow Lite runtime (`org.tensorflow:tensorflow-lite`). The JVM unit tests cover the
+ * official LiteRT runtime (`com.google.ai.edge.litert:litert`). The JVM unit tests cover the
  * classifier's decision logic with a fake backend; only this suite can catch a converter/runtime
  * version mismatch between the model (converted with a newer TF) and the bundled Android runtime.
  *

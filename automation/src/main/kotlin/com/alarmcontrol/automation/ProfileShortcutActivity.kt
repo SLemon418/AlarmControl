@@ -19,7 +19,7 @@ import kotlinx.coroutines.launch
  * with no UI. The toggle runs on the application scope so it completes even though this activity
  * finishes immediately — no work happens on the main thread.
  *
- * This is a first-party user action, so it uses [ProfileController.setEnabled] directly (the same
+ * This is a first-party user action, so it uses the controller's direct set/toggle path (the same
  * ungated path as the Quick Settings tile), not the external-automation opt-in path.
  *
  * Deps are pulled via a Hilt [EntryPoint] (a plain `Activity`, no `@AndroidEntryPoint`), matching
@@ -36,24 +36,34 @@ class ProfileShortcutActivity : Activity() {
                 ?.getStringExtra(ProfileShortcuts.EXTRA_PROFILE_ID)
         if (enabled != null || !profileId.isNullOrBlank()) {
             val entryPoint =
-                EntryPointAccessors.fromApplication(
-                    applicationContext,
-                    ShortcutEntryPoint::class.java,
-                )
-            entryPoint.applicationScope().launch {
-                runCatchingPreservingCancellation {
-                    if (enabled != null) {
-                        entryPoint
-                            .profileController()
-                            .setEnabled(
-                                profileId = null,
-                                enabled = enabled,
-                                source = AutomationSource.SHORTCUT,
-                            )
-                    } else {
-                        entryPoint.profileController().toggle(profileId, source = AutomationSource.SHORTCUT)
-                    }
-                }.onFailure { Log.w(TAG, "Launcher shortcut action failed") }
+                try {
+                    EntryPointAccessors.fromApplication(
+                        applicationContext,
+                        ShortcutEntryPoint::class.java,
+                    )
+                } catch (_: RuntimeException) {
+                    Log.w(TAG, "Launcher shortcut dependencies unavailable")
+                    finish()
+                    return
+                }
+            try {
+                entryPoint.applicationScope().launch {
+                    runCatchingPreservingCancellation {
+                        if (enabled != null) {
+                            entryPoint
+                                .profileController()
+                                .setEnabled(
+                                    profileId = null,
+                                    enabled = enabled,
+                                    source = AutomationSource.SHORTCUT,
+                                )
+                        } else {
+                            entryPoint.profileController().toggle(profileId, source = AutomationSource.SHORTCUT)
+                        }
+                    }.onFailure { Log.w(TAG, "Launcher shortcut action failed") }
+                }
+            } catch (_: RuntimeException) {
+                Log.w(TAG, "Couldn't start launcher shortcut action")
             }
         }
         finish()

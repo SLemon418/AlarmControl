@@ -33,12 +33,17 @@ internal class LiteRTNotificationClassifier(
                 backend.run(featureExtractor.extract(content))
             } catch (error: CancellationException) {
                 throw error
+            } catch (_: LinkageError) {
+                null
+            } catch (_: OutOfMemoryError) {
+                null
             } catch (_: Exception) {
                 null
             } ?: return null
+        if (!rawScores.isCompatibleProbabilityVector()) return null
         // Fold in the user's local corrections for this package (no-op when there is none, §5).
         val scores = feedbackBlender.blend(snapshot.packageName, labels, rawScores)
-        if (scores.any { !it.isFinite() }) return null
+        if (!scores.isCompatibleProbabilityVector()) return null
 
         val bestIndex = scores.indices.maxByOrNull { scores[it] } ?: return null
         val confidence = scores[bestIndex]
@@ -47,6 +52,9 @@ internal class LiteRTNotificationClassifier(
         val label = labels.getOrNull(bestIndex) ?: return null
         return ClassificationResult(category = label, confidence = confidence)
     }
+
+    private fun FloatArray.isCompatibleProbabilityVector(): Boolean =
+        size == labels.size && isNotEmpty() && all { it.isFinite() && it in 0f..1f }
 
     private fun NotificationSnapshot.classifiableText(): String? =
         listOfNotNull(title, text).joinToString(separator = " ").trim().ifBlank { null }

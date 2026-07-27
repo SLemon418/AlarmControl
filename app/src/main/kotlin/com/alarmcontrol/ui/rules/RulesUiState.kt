@@ -1,6 +1,11 @@
 package com.alarmcontrol.ui.rules
 
+import com.alarmcontrol.core.filtering.MAX_CONDITION_VALUE_CHARS
+import com.alarmcontrol.core.filtering.MAX_RATE_THRESHOLD
+import com.alarmcontrol.core.filtering.MAX_RATE_WINDOW_MILLIS
 import com.alarmcontrol.core.filtering.MAX_RULE_NAME_CHARS
+import com.alarmcontrol.core.filtering.MIN_RATE_THRESHOLD
+import com.alarmcontrol.core.filtering.MIN_RATE_WINDOW_MILLIS
 import com.alarmcontrol.core.filtering.NotificationImportance
 import com.alarmcontrol.core.filtering.RuleExecutionMode
 import com.alarmcontrol.core.filtering.SemanticIntent
@@ -80,6 +85,7 @@ data class RuleEditorState(
     val root: GroupNode = emptyRootGroup(),
     val simulation: RuleSimulationState = RuleSimulationState(),
     val warnings: List<UiText> = emptyList(),
+    val isSaving: Boolean = false,
     val hasUnsavedChanges: Boolean = false,
     val showDiscardConfirmation: Boolean = false,
     val editorMode: RuleEditorMode = RuleEditorMode.GUIDED,
@@ -99,12 +105,44 @@ data class RuleEditorState(
 
     val canSave: Boolean
         get() =
-            name.isNotBlank() &&
+            !isSaving &&
+                name.isNotBlank() &&
                 name.length <= MAX_RULE_NAME_CHARS &&
-                (editorMode != RuleEditorMode.GUIDED || isLikelyAndroidPackage(guidedPackageName)) &&
+                guidedDefinitionValid &&
                 root.toConditionOrNull() != null &&
                 priority.toIntOrNull() != null &&
                 (action != EditorAction.SNOOZE || snoozeMinutes.toLongOrNull() in VALID_SNOOZE_MINUTES)
+
+    /**
+     * Validates every enabled guided input independently of [root]. This prevents an invalid
+     * optional condition from being omitted while a broader package-only rule is persisted.
+     */
+    internal val guidedDefinitionValid: Boolean
+        get() {
+            if (editorMode != RuleEditorMode.GUIDED) return true
+            if (!isLikelyAndroidPackage(guidedPackageName)) return false
+            if (guidedPackageName.length > MAX_CONDITION_VALUE_CHARS) return false
+            if (
+                guidedScope == GuidedRuleScope.CHANNEL &&
+                (guidedChannelId.isNullOrBlank() || guidedChannelId.length > MAX_CONDITION_VALUE_CHARS)
+            ) {
+                return false
+            }
+            if (
+                guidedTimeEnabled &&
+                (parseMinuteOfDay(guidedStartTime) == null || parseMinuteOfDay(guidedEndTime) == null)
+            ) {
+                return false
+            }
+            if (guidedFrequencyEnabled) {
+                val minutes = guidedFrequencyMinutes.toLongOrNull()
+                val threshold = guidedFrequencyThreshold.toIntOrNull()
+                if (minutes !in VALID_GUIDED_RATE_WINDOW_MINUTES || threshold !in VALID_GUIDED_RATE_THRESHOLDS) {
+                    return false
+                }
+            }
+            return true
+        }
 }
 
 enum class RuleEditorMode { GUIDED, ADVANCED }
@@ -157,3 +195,8 @@ enum class SimulationTraceStatus { MATCH, NO_MATCH, UNKNOWN }
 enum class EditorAction { CANCEL, SNOOZE, MARK_READ, KEEP }
 
 internal val VALID_SNOOZE_MINUTES = 1L..10_080L
+
+private const val MILLIS_PER_MINUTE = 60_000L
+private val VALID_GUIDED_RATE_WINDOW_MINUTES =
+    (MIN_RATE_WINDOW_MILLIS / MILLIS_PER_MINUTE)..(MAX_RATE_WINDOW_MILLIS / MILLIS_PER_MINUTE)
+private val VALID_GUIDED_RATE_THRESHOLDS = MIN_RATE_THRESHOLD..MAX_RATE_THRESHOLD

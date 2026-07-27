@@ -112,7 +112,7 @@ class BackupRepositoryImpl
                     dailyInsights = data.dailyInsights.size,
                     hasSettings = data.settings != null,
                     categoryFeedback = data.categoryFeedback.size,
-                    adFeedbackVotes = data.semanticFeedback.sumOf { it.count },
+                    adFeedbackVotes = data.semanticFeedback.saturatedVoteCount(),
                 )
             }.fold(
                 onSuccess = { DataResult.Success(it) },
@@ -130,17 +130,34 @@ class BackupRepositoryImpl
             runCatchingPreservingCancellation {
                 val (data, encrypted) = decodeAndValidate(serialized, passphrase)
                 require(!options.learningFeedback || encrypted) { "Learning feedback requires encryption" }
-                val priorSettings =
-                    if (options.settings && data.settings != null) settingsRepository.snapshot() else null
+                val priorSettings = settingsRepository.snapshot()
+                val pauseSideEffects = options.rulesAndProfiles
+                val desiredSettings = data.settings
+                var databaseCommitted = false
                 try {
-                    if (options.settings) data.settings?.let { settingsRepository.restore(it) }
+                    if (pauseSideEffects) disableSideEffectingSettings()
                     transactionRunner.run { restoreDatabase(data, options) }
+                    databaseCommitted = true
+                    when {
+                        options.settings && desiredSettings != null -> settingsRepository.restore(desiredSettings)
+                        pauseSideEffects -> settingsRepository.restore(priorSettings)
+                    }
                 } catch (error: CancellationException) {
                     withContext(NonCancellable) {
-                        restorePreviousSettingsAndThrow(priorSettings, error)
+                        recoverSettingsAndThrow(
+                            priorSettings = priorSettings,
+                            databaseCommitted = databaseCommitted,
+                            sideEffectsWerePaused = pauseSideEffects,
+                            error = error,
+                        )
                     }
                 } catch (error: Exception) {
-                    restorePreviousSettingsAndThrow(priorSettings, error)
+                    recoverSettingsAndThrow(
+                        priorSettings = priorSettings,
+                        databaseCommitted = databaseCommitted,
+                        sideEffectsWerePaused = pauseSideEffects,
+                        error = error,
+                    )
                 }
 
                 BackupSummary(
@@ -150,7 +167,10 @@ class BackupRepositoryImpl
                     settingsRestored = options.settings && data.settings != null,
                     feedbackRestored =
                         if (options.learningFeedback) {
-                            data.categoryFeedback.size + data.semanticFeedback.sumOf { it.count }
+                            (
+                                data.categoryFeedback.size.toLong() +
+                                    data.semanticFeedback.saturatedVoteCount()
+                            ).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
                         } else {
                             0
                         },
@@ -160,12 +180,32 @@ class BackupRepositoryImpl
                 onFailure = { DataResult.Failure(it) },
             )
 
-        private suspend fun restorePreviousSettingsAndThrow(
-            priorSettings: SettingsSnapshot?,
+        private fun List<BackupSemanticFeedback>.saturatedVoteCount(): Int =
+            fold(0L) { total, feedback -> total + feedback.count }
+                .coerceAtMost(Int.MAX_VALUE.toLong())
+                .toInt()
+
+        private suspend fun disableSideEffectingSettings() {
+            settingsRepository.setFilteringEnabled(false)
+            settingsRepository.setExternalAutomationEnabled(false)
+            settingsRepository.setLlmAutoActionsEnabled(false)
+        }
+
+        private suspend fun recoverSettingsAndThrow(
+            priorSettings: SettingsSnapshot,
+            databaseCommitted: Boolean,
+            sideEffectsWerePaused: Boolean,
             error: Throwable,
         ): Nothing {
-            priorSettings?.let { previous ->
-                runCatchingPreservingCancellation { settingsRepository.restore(previous) }
+            if (!databaseCommitted || !sideEffectsWerePaused) {
+                runCatchingPreservingCancellation { settingsRepository.restore(priorSettings) }
+            } else {
+                // The Room restore cannot be rolled back after commit. Keep destructive entry
+                // points off rather than applying either old settings or a partially restored set
+                // to the new rules.
+                runCatchingPreservingCancellation { settingsRepository.setFilteringEnabled(false) }
+                runCatchingPreservingCancellation { settingsRepository.setExternalAutomationEnabled(false) }
+                runCatchingPreservingCancellation { settingsRepository.setLlmAutoActionsEnabled(false) }
             }
             throw error
         }
@@ -255,6 +295,7 @@ class BackupRepositoryImpl
                 llmObservationDao.deleteSemanticImportedPriors()
             }
             categoryFeedbackDao.insertAll(data.categoryFeedback.map { it.toEntity() })
+            categoryFeedbackDao.trimToMostRecent(CategoryFeedbackDao.MAX_RETAINED_ROWS)
 
             val existing =
                 if (mode == RestoreMode.MERGE) {
@@ -265,12 +306,18 @@ class BackupRepositoryImpl
             val imported =
                 data.semanticFeedback
                     .groupingBy { it.packageName to it.intent.name }
-                    .fold(0) { total, row -> total + row.count }
+                    .fold(0L) { total, row -> Math.addExact(total, row.count.toLong()) }
                     .map { (key, count) ->
+                        val mergedCount =
+                            Math.addExact(
+                                count,
+                                existing[key]?.count?.toLong() ?: 0L,
+                            )
+                        require(mergedCount <= Int.MAX_VALUE) { "Imported feedback count is too large" }
                         SemanticFeedbackPriorEntity(
                             packageName = key.first,
                             intent = key.second,
-                            count = count + (existing[key]?.count ?: 0),
+                            count = mergedCount.toInt(),
                         )
                     }
             llmObservationDao.upsertSemanticImportedPriors(imported)

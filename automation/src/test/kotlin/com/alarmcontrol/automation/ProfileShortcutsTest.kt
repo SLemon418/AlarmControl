@@ -48,6 +48,24 @@ class ProfileShortcutsTest {
         assertEquals("7", shortcut.intent.getStringExtra(ProfileShortcuts.EXTRA_PROFILE_ID))
     }
 
+    @Test
+    fun `publish skips invalid legacy profiles and bounds launcher labels`() {
+        ProfileShortcuts.publish(
+            context,
+            listOf(
+                FilteringProfile(id = "", name = "Missing id", ruleIds = emptySet()),
+                FilteringProfile(id = "blank", name = "   ", ruleIds = emptySet()),
+                FilteringProfile(id = "valid", name = "x".repeat(200), ruleIds = emptySet()),
+            ),
+        )
+
+        val shortcuts = ShortcutManagerCompat.getDynamicShortcuts(context)
+        val profile = shortcuts.single { it.id == "profile_valid" }
+        assertEquals(40, profile.shortLabel.length)
+        assertEquals(true, requireNotNull(profile.longLabel).length <= 80)
+        assertEquals(false, shortcuts.any { it.id == "profile_blank" })
+    }
+
     @Suppress("DEPRECATION")
     @Test
     fun `legacy shortcut actions remain compatible`() {

@@ -5,6 +5,7 @@ import androidx.room.Insert
 import androidx.room.Query
 import androidx.room.Transaction
 import androidx.room.Update
+import com.alarmcontrol.core.profile.MAX_SAVED_PROFILES
 import com.alarmcontrol.data.db.entity.FilteringProfileEntity
 import com.alarmcontrol.data.db.entity.ProfileRuleEntity
 import com.alarmcontrol.data.db.relation.ProfileWithRules
@@ -63,8 +64,12 @@ interface ProfileDao {
         profile: FilteringProfileEntity,
         ruleIds: Set<Long>,
     ): Long {
+        require(countByNameExcluding(profile.name, profile.id) == 0) {
+            "A profile with this name already exists"
+        }
         val id =
             if (profile.id == 0L) {
+                require(countAll() < MAX_SAVED_PROFILES) { "Profile limit reached" }
                 insertProfile(profile)
             } else {
                 val existing = requireNotNull(findById(profile.id)) { "Profile ${profile.id} does not exist" }

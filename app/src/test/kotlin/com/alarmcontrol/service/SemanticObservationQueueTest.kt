@@ -6,6 +6,7 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -30,5 +31,29 @@ class SemanticObservationQueueTest {
             advanceUntilIdle()
 
             assertEquals(listOf(1, 3), handled)
+        }
+
+    @Test
+    fun `one failed observation does not stop later local analytics`() =
+        runTest {
+            val handled = mutableListOf<Int>()
+            val failures = mutableListOf<Throwable>()
+            val queue =
+                SemanticObservationQueue<Int>(
+                    scope = this,
+                    onFailure = failures::add,
+                ) { value ->
+                    if (value == 1) error("local database unavailable")
+                    handled += value
+                }
+
+            queue.offer(1)
+            runCurrent()
+            queue.offer(2)
+            queue.close()
+            advanceUntilIdle()
+
+            assertEquals(listOf(2), handled)
+            assertTrue(failures.single() is IllegalStateException)
         }
 }

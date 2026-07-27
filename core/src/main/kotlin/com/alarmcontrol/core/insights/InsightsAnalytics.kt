@@ -2,6 +2,10 @@ package com.alarmcontrol.core.insights
 
 import com.alarmcontrol.core.filtering.SemanticIntent
 import kotlinx.coroutines.flow.Flow
+import java.time.LocalDate
+
+/** Largest day that still renders as the app's fixed `yyyy-MM-dd` date contract. */
+val MAX_SUPPORTED_INSIGHT_EPOCH_DAY: Long = LocalDate.of(9_999, 12, 31).toEpochDay()
 
 /** Inclusive local-day range selected by the user. */
 data class InsightsDateRange(
@@ -10,6 +14,9 @@ data class InsightsDateRange(
 ) {
     init {
         require(startEpochDay <= endEpochDay) { "Insight start day must not follow end day" }
+        require(startEpochDay >= 0 && endEpochDay <= MAX_SUPPORTED_INSIGHT_EPOCH_DAY) {
+            "Insight date range is outside the supported calendar"
+        }
     }
 }
 
@@ -54,9 +61,21 @@ data class InsightsAnalytics(
     val silencedCount: Int get() = actionBreakdown.silenced
 
     val silencedPercent: Int
-        get() = if (totalNotifications == 0) 0 else silencedCount * 100 / totalNotifications
+        get() =
+            if (totalNotifications <= 0) {
+                0
+            } else {
+                ((silencedCount.toLong() * 100) / totalNotifications)
+                    .coerceIn(0, 100)
+                    .toInt()
+            }
 
-    val semanticTotal: Int get() = semanticIntents.sumOf(SemanticIntentCount::count)
+    val semanticTotal: Int
+        get() =
+            semanticIntents
+                .fold(0L) { total, count -> total + count.count }
+                .coerceIn(0, Int.MAX_VALUE.toLong())
+                .toInt()
 
     fun countFor(intent: SemanticIntent): Int = semanticIntents.firstOrNull { it.intent == intent }?.count ?: 0
 }

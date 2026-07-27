@@ -23,6 +23,8 @@ data class SettingsUiState(
     val llmModelCopiedBytes: Long = 0,
     val llmModelTotalBytes: Long? = null,
     val llmModelError: LlmModelErrorUi? = null,
+    val llmModelSha256: String? = null,
+    val llmModelSizeBytes: Long? = null,
     val notificationAccessGranted: Boolean = false,
     val notificationAccessState: NotificationAccessUiState = NotificationAccessUiState.CHECKING,
     val batteryOptimizationExempt: Boolean = false,
@@ -61,7 +63,10 @@ data class BackupPreviewUi(
     val categoryFeedback: Int,
     val adFeedbackVotes: Int,
     val selection: RestoreSelectionUi = RestoreSelectionUi(),
-)
+) {
+    val canRestoreLearningFeedback: Boolean
+        get() = encrypted && (categoryFeedback > 0 || adFeedbackVotes > 0)
+}
 
 data class RestoreSelectionUi(
     val replaceExisting: Boolean = false,
@@ -76,7 +81,7 @@ data class RestoreSelectionUi(
 /** App-local presentation state; no MediaPipe or ML domain type reaches the Composable. */
 enum class LlmModelUiStatus { NOT_LOADED, INSTALLING, LOADING, READY, UNAVAILABLE }
 
-enum class LlmModelErrorUi { MISSING, INVALID, LOAD_FAILED, STORAGE_FAILURE }
+enum class LlmModelErrorUi { MISSING, INVALID, INTEGRITY_FAILED, LOAD_FAILED, STORAGE_FAILURE }
 
 enum class SettingsDestination(
     val route: String,

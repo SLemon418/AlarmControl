@@ -150,7 +150,7 @@ internal fun Rule.toEditorState(): RuleEditorState {
 /** Builds a domain [Rule] from the editor, or `null` when the condition tree has nothing valid. */
 internal fun RuleEditorState.toRuleOrNull(): Rule? {
     if (name.isBlank() || name.length > MAX_RULE_NAME_CHARS) return null
-    if (editorMode == RuleEditorMode.GUIDED && !isLikelyAndroidPackage(guidedPackageName)) return null
+    if (!guidedDefinitionValid) return null
     val condition = root.toConditionOrNull() ?: return null
     val parsedPriority = priority.toIntOrNull() ?: return null
     val ruleAction =

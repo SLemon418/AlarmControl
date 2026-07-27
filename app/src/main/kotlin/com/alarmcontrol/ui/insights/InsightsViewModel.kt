@@ -10,6 +10,7 @@ import com.alarmcontrol.core.feedback.AdObservation
 import com.alarmcontrol.core.feedback.CategoryFeedback
 import com.alarmcontrol.core.feedback.FeedbackRepository
 import com.alarmcontrol.core.filtering.HistoryActionFilter
+import com.alarmcontrol.core.filtering.MAX_NOTIFICATION_HISTORY_QUERY_CHARS
 import com.alarmcontrol.core.filtering.NotificationEventRepository
 import com.alarmcontrol.core.filtering.NotificationHistoryQuery
 import com.alarmcontrol.core.filtering.NotificationHistoryRepository
@@ -32,6 +33,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -48,12 +50,16 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.time.Clock
+import java.time.Instant
 import java.time.LocalDate
 import java.time.format.DateTimeParseException
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 
 @OptIn(ExperimentalCoroutinesApi::class, FlowPreview::class)
-@Suppress("TooManyFunctions")
+// One UDF owner intentionally coordinates the Overview, Analysis, and Records tabs so their
+// filters, sensitive-detail lifecycle, and correction actions share one immutable UI state.
+@Suppress("LargeClass", "TooManyFunctions")
 @HiltViewModel
 class InsightsViewModel
     @Inject
@@ -62,7 +68,7 @@ class InsightsViewModel
         private val feedbackRepository: FeedbackRepository,
         private val adFeedbackRepository: AdFeedbackRepository,
         insightsSummaryRepository: InsightsSummaryRepository,
-        dailyInsightRepository: DailyInsightRepository,
+        private val dailyInsightRepository: DailyInsightRepository,
         private val notificationHistoryRepository: NotificationHistoryRepository,
         insightsAnalyticsRepository: InsightsAnalyticsRepository,
         ruleRepository: RuleRepository,
@@ -82,6 +88,8 @@ class InsightsViewModel
         private val historyChannelId = MutableStateFlow<String?>(null)
         private val historyLimit = MutableStateFlow(HISTORY_PAGE_SIZE)
         private val selectedEventDetail = MutableStateFlow<NotificationDetailUi?>(null)
+        private val detailRequestGeneration = AtomicLong()
+        private var detailRequestJob: Job? = null
         private val analysisPreset = MutableStateFlow(AnalysisRangePreset.LAST_7_DAYS)
         private val customRangeStart = MutableStateFlow("")
         private val customRangeEnd = MutableStateFlow("")
@@ -99,8 +107,11 @@ class InsightsViewModel
         private val metrics: Flow<InsightsMetrics> =
             todayWindow.flatMapLatest { window ->
                 eventRepository
-                    .observeActionBreakdownForDay(window.epochDay, window.startMillis)
-                    .map { breakdown ->
+                    .observeActionBreakdownForDay(
+                        epochDay = window.epochDay,
+                        legacyStartMillis = window.startMillis,
+                        legacyEndMillis = window.endMillis,
+                    ).map { breakdown ->
                         InsightsMetrics(
                             cancelled = breakdown.cancelled,
                             snoozed = breakdown.snoozed,
@@ -143,27 +154,28 @@ class InsightsViewModel
         // Resolve each rollup's rule ids to names from the live rules, so the cards show "Mute promos"
         // instead of "Rule #1"; ids missing from the current set fall back gracefully (deleted rules).
         private val dailyInsights: Flow<List<DailyInsightUi>> =
-            selectedTab.flatMapLatest { tab ->
-                if (tab != InsightsTab.OVERVIEW) {
-                    flowOf(emptyList())
-                } else {
-                    combine(
-                        dailyInsightRepository.observeRecent(DAILY_LIMIT),
-                        rules,
-                    ) { days, rules ->
-                        val ruleNames = rules.associate { it.id to it.name }
-                        val mapped = days.map { it.toUiModel(ruleNames, appIdentityResolver) }
-                        mapped.mapIndexed { index, day ->
-                            day.copy(
-                                mutedDelta =
-                                    mapped.getOrNull(index + 1)?.let { previous ->
-                                        day.mutedCount - previous.mutedCount
-                                    },
-                            )
+            selectedTab
+                .flatMapLatest { tab ->
+                    if (tab != InsightsTab.OVERVIEW) {
+                        flowOf(emptyList())
+                    } else {
+                        combine(
+                            dailyInsightRepository.observeRecent(DAILY_LIMIT),
+                            rules,
+                        ) { days, rules ->
+                            val ruleNames = rules.associate { it.id to it.name }
+                            val mapped = days.map { it.toUiModel(ruleNames, appIdentityResolver) }
+                            mapped.mapIndexed { index, day ->
+                                day.copy(
+                                    mutedDelta =
+                                        mapped.getOrNull(index + 1)?.let { previous ->
+                                            day.mutedCount - previous.mutedCount
+                                        },
+                                )
+                            }
                         }
                     }
-                }
-            }
+                }.flowOn(dispatcher)
 
         private val summaryUi: Flow<InsightsSummaryUi?> =
             selectedTab
@@ -449,10 +461,13 @@ class InsightsViewModel
             }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), InsightsUiState())
 
         fun onUndo(eventId: String) {
+            val affectedEvent = eventForRefresh(eventId)
             viewModelScope.launch(dispatcher) {
                 runCatchingPreservingCancellation { eventRepository.undo(eventId) }
-                    .onSuccess { messages.value = uiText(R.string.message_insights_excluded) }
-                    .onFailure { messages.value = uiText(R.string.message_insights_update_failed) }
+                    .onSuccess {
+                        refreshDailyInsight(affectedEvent)
+                        messages.value = uiText(R.string.message_insights_excluded)
+                    }.onFailure { messages.value = uiText(R.string.message_insights_update_failed) }
             }
         }
 
@@ -545,19 +560,30 @@ class InsightsViewModel
         }
 
         fun openEventDetail(eventId: String) {
-            viewModelScope.launch(dispatcher) {
-                runCatchingPreservingCancellation {
-                    notificationHistoryRepository.getDetail(eventId)
-                }.onSuccess { detail ->
-                    selectedEventDetail.value =
-                        detail?.toUiModel(appIdentityResolver.resolve(detail.event.packageName))
-                }.onFailure {
-                    messages.value = uiText(R.string.message_notification_detail_failed)
+            val generation = detailRequestGeneration.incrementAndGet()
+            detailRequestJob?.cancel()
+            selectedEventDetail.value = null
+            detailRequestJob =
+                viewModelScope.launch(dispatcher) {
+                    runCatchingPreservingCancellation {
+                        notificationHistoryRepository.getDetail(eventId)
+                    }.onSuccess { detail ->
+                        if (detailRequestGeneration.get() == generation) {
+                            selectedEventDetail.value =
+                                detail?.toUiModel(appIdentityResolver.resolve(detail.event.packageName))
+                        }
+                    }.onFailure {
+                        if (detailRequestGeneration.get() == generation) {
+                            messages.value = uiText(R.string.message_notification_detail_failed)
+                        }
+                    }
                 }
-            }
         }
 
         fun closeEventDetail() {
+            detailRequestGeneration.incrementAndGet()
+            detailRequestJob?.cancel()
+            detailRequestJob = null
             selectedEventDetail.value = null
         }
 
@@ -572,6 +598,7 @@ class InsightsViewModel
             predictedLabel: String?,
             correctedLabel: String,
         ) {
+            val affectedEvent = eventForRefresh(eventId)
             viewModelScope.launch(dispatcher) {
                 runCatchingPreservingCancellation {
                     feedbackRepository.recordCorrection(
@@ -584,6 +611,7 @@ class InsightsViewModel
                         ),
                     )
                 }.onSuccess {
+                    refreshDailyInsight(affectedEvent)
                     messages.value = uiText(R.string.message_recategorized, correctedLabel)
                 }.onFailure { messages.value = uiText(R.string.message_recategorize_failed) }
             }
@@ -593,10 +621,12 @@ class InsightsViewModel
             eventId: String,
             correctedIsAdvertisement: Boolean,
         ) {
+            val affectedEvent = eventForRefresh(eventId)
             viewModelScope.launch(dispatcher) {
                 runCatchingPreservingCancellation {
                     adFeedbackRepository.recordCorrection(eventId, correctedIsAdvertisement)
                 }.onSuccess {
+                    refreshDailyInsight(affectedEvent)
                     messages.value =
                         uiText(
                             if (correctedIsAdvertisement) {
@@ -613,11 +643,17 @@ class InsightsViewModel
             eventId: String,
             correctedIntent: SemanticIntent,
         ) {
+            val affectedEvent = eventForRefresh(eventId)
             viewModelScope.launch(dispatcher) {
                 runCatchingPreservingCancellation {
                     adFeedbackRepository.recordCorrection(eventId, correctedIntent)
                 }.onSuccess {
-                    messages.value = uiText(R.string.message_semantic_corrected, correctedIntent.name)
+                    refreshDailyInsight(affectedEvent)
+                    messages.value =
+                        uiText(
+                            R.string.message_semantic_corrected,
+                            correctedIntent.toLabelUiText(),
+                        )
                 }.onFailure { messages.value = uiText(R.string.message_ad_feedback_failed) }
             }
         }
@@ -639,79 +675,38 @@ class InsightsViewModel
             messages.value = null
         }
 
-        private data class Content(
-            val events: List<EventListItem>,
-            val metrics: InsightsMetrics,
-        )
+        /**
+         * Replaces a completed day's persisted rollup after an undo or explicit correction. Today's
+         * metrics already react directly to Room and therefore need no persisted daily row.
+         */
+        private fun eventForRefresh(eventId: String): EventListItem? =
+            (uiState.value.events + uiState.value.historyEvents)
+                .firstOrNull { it.id == eventId }
 
-        private data class ActivityControls(
-            val query: String,
-            val filter: ActivityActionFilter,
-        )
-
-        private data class HistoryContent(
-            val summary: InsightsSummaryUi?,
-            val daily: List<DailyInsightUi>,
-            val suggestions: List<RuleSuggestionUi>,
-        )
-
-        private data class HistoryRecords(
-            val events: List<EventListItem>,
-            val totalCount: Int,
-        )
-
-        private data class HistoryAndSources(
-            val records: HistoryRecords,
-            val sources: List<HistorySourceUi>,
-            val coverage: NotificationHistoryCoverageUi?,
-        )
-
-        private data class AnalysisControls(
-            val preset: AnalysisRangePreset,
-            val start: String,
-            val end: String,
-        )
-
-        private data class DetailAndAnalysisControls(
-            val detail: NotificationDetailUi?,
-            val controls: AnalysisControls,
-        )
-
-        private data class AdvancedContent(
-            val tab: InsightsTab,
-            val analysis: InsightsAnalysisUi,
-            val availableRange: InsightsDateRange?,
-            val history: HistoryRecords,
-            val sources: List<HistorySourceUi>,
-            val historyCoverage: NotificationHistoryCoverageUi?,
-            val detail: NotificationDetailUi?,
-            val analysisControls: AnalysisControls,
-        )
-
-        private fun List<EventListItem>.filtered(controls: ActivityControls): List<EventListItem> {
-            val query = controls.query.trim()
-            return filter { event ->
-                val actionMatches =
-                    when (controls.filter) {
-                        ActivityActionFilter.ALL -> true
-                        ActivityActionFilter.CANCELLED -> event.action == EventActionUi.CANCELLED
-                        ActivityActionFilter.SNOOZED -> event.action == EventActionUi.SNOOZED
-                        ActivityActionFilter.OTHER ->
-                            event.action == EventActionUi.LOGGED ||
-                                event.action == EventActionUi.KEPT ||
-                                event.action == EventActionUi.OTHER
-                    }
-                actionMatches &&
-                    (
-                        query.isEmpty() ||
-                            event.appName.contains(query, ignoreCase = true) ||
-                            event.packageName.contains(query, ignoreCase = true) ||
-                            event.category?.contains(query, ignoreCase = true) == true ||
-                            event.correctedCategory?.contains(query, ignoreCase = true) == true ||
-                            event.channelId?.contains(query, ignoreCase = true) == true ||
-                            event.matchedRuleName?.let { it is UiText.Dynamic && it.value.contains(query, true) } ==
-                            true
-                    )
+        private suspend fun refreshDailyInsight(event: EventListItem?) {
+            event ?: return
+            val epochDay =
+                event.postedEpochDay
+                    ?: Instant
+                        .ofEpochMilli(event.postedAtMillis)
+                        .atZone(clock.zone)
+                        .toLocalDate()
+                        .toEpochDay()
+            if (epochDay >= LocalDate.now(clock).toEpochDay()) return
+            val day = LocalDate.ofEpochDay(epochDay)
+            runCatchingPreservingCancellation {
+                dailyInsightRepository.aggregateAndStore(
+                    epochDay = epochDay,
+                    startMillis = day.atStartOfDay(clock.zone).toInstant().toEpochMilli(),
+                    endMillis =
+                        day
+                            .plusDays(1)
+                            .atStartOfDay(clock.zone)
+                            .toInstant()
+                            .toEpochMilli(),
+                    generatedAtMillis = clock.millis(),
+                    topRules = DAILY_RULE_BREAKDOWN_LIMIT,
+                )
             }
         }
 
@@ -719,13 +714,14 @@ class InsightsViewModel
             const val RECENT_LIMIT = 100
             const val DAILY_LIMIT = 14
             const val HISTORY_PAGE_SIZE = 100
+            const val DAILY_RULE_BREAKDOWN_LIMIT = 50
             const val HISTORY_MAX_LIMIT = 1_000
             const val HISTORY_QUERY_DEBOUNCE_MILLIS = 300L
             const val HISTORY_SOURCE_LIMIT = 200
             const val DEFAULT_ANALYSIS_DAYS = 7L
             const val DATE_TEXT_LENGTH = 10
             const val STOP_TIMEOUT_MS = 5_000L
-            const val MAX_QUERY_CHARS = 100
+            const val MAX_QUERY_CHARS = MAX_NOTIFICATION_HISTORY_QUERY_CHARS
             const val SUGGESTION_WINDOW_MILLIS = 7L * 24 * 60 * 60 * 1_000
             const val LAST_7_DAYS_OFFSET = 6L
             const val LAST_30_DAYS_OFFSET = 29L
@@ -733,17 +729,99 @@ class InsightsViewModel
         }
     }
 
+private data class Content(
+    val events: List<EventListItem>,
+    val metrics: InsightsMetrics,
+)
+
+private data class ActivityControls(
+    val query: String,
+    val filter: ActivityActionFilter,
+)
+
+private data class HistoryContent(
+    val summary: InsightsSummaryUi?,
+    val daily: List<DailyInsightUi>,
+    val suggestions: List<RuleSuggestionUi>,
+)
+
+private data class HistoryRecords(
+    val events: List<EventListItem>,
+    val totalCount: Int,
+)
+
+private data class HistoryAndSources(
+    val records: HistoryRecords,
+    val sources: List<HistorySourceUi>,
+    val coverage: NotificationHistoryCoverageUi?,
+)
+
+private data class AnalysisControls(
+    val preset: AnalysisRangePreset,
+    val start: String,
+    val end: String,
+)
+
+private data class DetailAndAnalysisControls(
+    val detail: NotificationDetailUi?,
+    val controls: AnalysisControls,
+)
+
+private data class AdvancedContent(
+    val tab: InsightsTab,
+    val analysis: InsightsAnalysisUi,
+    val availableRange: InsightsDateRange?,
+    val history: HistoryRecords,
+    val sources: List<HistorySourceUi>,
+    val historyCoverage: NotificationHistoryCoverageUi?,
+    val detail: NotificationDetailUi?,
+    val analysisControls: AnalysisControls,
+)
+
+private fun List<EventListItem>.filtered(controls: ActivityControls): List<EventListItem> {
+    val query = controls.query.trim()
+    return filter { event ->
+        val actionMatches =
+            when (controls.filter) {
+                ActivityActionFilter.ALL -> true
+                ActivityActionFilter.CANCELLED -> event.action == EventActionUi.CANCELLED
+                ActivityActionFilter.SNOOZED -> event.action == EventActionUi.SNOOZED
+                ActivityActionFilter.OTHER ->
+                    event.action == EventActionUi.LOGGED ||
+                        event.action == EventActionUi.KEPT ||
+                        event.action == EventActionUi.OTHER
+            }
+        actionMatches &&
+            (
+                query.isEmpty() ||
+                    event.appName.contains(query, ignoreCase = true) ||
+                    event.packageName.contains(query, ignoreCase = true) ||
+                    event.category?.contains(query, ignoreCase = true) == true ||
+                    event.correctedCategory?.contains(query, ignoreCase = true) == true ||
+                    event.channelId?.contains(query, ignoreCase = true) == true ||
+                    event.matchedRuleName?.let { it is UiText.Dynamic && it.value.contains(query, true) } == true
+            )
+    }
+}
+
 private fun Clock.todayWindow(): TodayWindow {
     val date = LocalDate.now(this)
     return TodayWindow(
         epochDay = date.toEpochDay(),
         startMillis = date.atStartOfDay(zone).toInstant().toEpochMilli(),
+        endMillis =
+            date
+                .plusDays(1)
+                .atStartOfDay(zone)
+                .toInstant()
+                .toEpochMilli(),
     )
 }
 
 private data class TodayWindow(
     val epochDay: Long,
     val startMillis: Long,
+    val endMillis: Long,
 )
 
 private fun HistoryActionFilterUi.toHistoryFilter(): HistoryActionFilter =

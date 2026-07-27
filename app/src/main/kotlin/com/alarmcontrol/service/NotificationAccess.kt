@@ -3,9 +3,9 @@ package com.alarmcontrol.service
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.provider.Settings
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.net.toUri
 
 /**
  * Notification-listener access is the permission this whole app hinges on: without it the system
@@ -32,7 +32,7 @@ object NotificationAccess {
     /** Generic application details fallback supported even by heavily customized OEM settings. */
     fun appDetailsSettingsIntent(packageName: String): Intent =
         Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
-            .setData(Uri.parse("package:$packageName"))
+            .setData("package:$packageName".toUri())
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
     /** Exact channel controls when [channelId] exists; otherwise package-level controls. */
@@ -80,7 +80,7 @@ object NotificationAccess {
     /** System battery-policy screen; no exemption permission is requested by AlarmControl. */
     fun batteryOptimizationSettingsIntent(context: Context): Intent =
         Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-            .setData(Uri.parse("package:${context.packageName}"))
+            .setData("package:${context.packageName}".toUri())
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
     /** Opens [primary], then application details if that OEM screen is absent or protected. */

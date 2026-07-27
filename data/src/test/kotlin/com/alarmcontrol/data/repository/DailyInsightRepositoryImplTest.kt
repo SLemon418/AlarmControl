@@ -13,11 +13,13 @@ import com.alarmcontrol.data.db.model.StoredRuleAction
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DailyInsightRepositoryImplTest {
     private val dao = FakeDailyInsightDao()
-    private val repository = DailyInsightRepositoryImpl(dao)
+    private val repository = DailyInsightRepositoryImpl(dao, ImmediateTransactionRunner())
 
     private val start = 1_000L
     private val end = 2_000L
@@ -372,5 +374,23 @@ class DailyInsightRepositoryImplTest {
 
             assertEquals(1, removed) // only day 5 is older than 7
             assertEquals(listOf(9L, 7L), repository.observeRecent(10).first().map { it.epochDay })
+        }
+
+    @Test
+    fun `rejects invalid aggregation and read bounds before querying Room`() =
+        runTest {
+            assertThrows(IllegalArgumentException::class.java) {
+                repository.observeRecent(0)
+            }
+            assertTrue(
+                runCatching {
+                    repository.aggregateAndStore(5, end, start, 1_500, topRules = 5)
+                }.isFailure,
+            )
+            assertTrue(
+                runCatching {
+                    repository.aggregateAndStore(5, start, end, 1_500, topRules = 0)
+                }.isFailure,
+            )
         }
 }

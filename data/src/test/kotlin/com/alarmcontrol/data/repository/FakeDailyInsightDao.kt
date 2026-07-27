@@ -43,6 +43,7 @@ class FakeDailyInsightDao : DailyInsightDao {
     private val semanticByEvent = mutableMapOf<Long, SemanticFixture>()
     private var nextChildId = 1L
     private val revision = MutableStateFlow(0)
+    val invalidatedEventIds = mutableListOf<Long>()
 
     override suspend fun countAll(): Int = insights.size
 
@@ -413,6 +414,31 @@ class FakeDailyInsightDao : DailyInsightDao {
         semanticCounts.clear()
         revision.value++
         return count
+    }
+
+    override suspend fun deleteContainingEvent(eventId: Long): Int {
+        invalidatedEventIds += eventId
+        val event = events.firstOrNull { it.id == eventId } ?: return 0
+        val matchingDays =
+            insights.values
+                .filter { insight ->
+                    event.postedEpochDay?.let { it == insight.epochDay }
+                        ?: (
+                            event.postedAtMillis >= insight.windowStartMillis &&
+                                event.postedAtMillis < insight.windowEndMillis
+                        )
+                }.map(DailyInsightEntity::epochDay)
+                .toSet()
+        insights.keys.removeAll(matchingDays)
+        ruleCounts.removeAll { it.epochDay in matchingDays }
+        monitorRuleCounts.removeAll { it.epochDay in matchingDays }
+        categoryCounts.removeAll { it.epochDay in matchingDays }
+        channelCounts.removeAll { it.epochDay in matchingDays }
+        appCounts.removeAll { it.epochDay in matchingDays }
+        hourCounts.removeAll { it.epochDay in matchingDays }
+        semanticCounts.removeAll { it.epochDay in matchingDays }
+        if (matchingDays.isNotEmpty()) revision.value++
+        return matchingDays.size
     }
 
     override fun observeRecent(limit: Int): Flow<List<DailyInsightWithBreakdown>> =

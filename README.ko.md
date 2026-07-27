@@ -55,6 +55,14 @@ AlarmControl은 규칙 기반 필터 엔진과 사용자 교정을 학습하는 
   배송, 보안 코드 같은 거래성 알림을 구분할 수 있습니다.
 - 기본값은 꺼짐이며 사용자가 Storage Access Framework로 호환 모델을 직접 선택해야 합니다.
 - 앱은 모델을 다운로드하지 않고 앱 전용 저장소로 원자적으로 복사합니다.
+- **[ml/llm-training](ml/llm-training/README.ko.md)** 에 Gemma 3 미세조정, 고정 평가,
+  dynamic-INT8 변환, MediaPipe 번들링 도구가 있습니다. 원본 가중치는 사용자가 약관에
+  동의해야 하고 실기기 검증 전에는 배포할 수 없으므로 생성 아티팩트와 함께 저장소 밖에 둡니다.
+- 모델과 SHA-256 무결성 기록을 함께 원자적으로 저장하고 이후 초기화마다 전체 파일을
+  검증합니다. 설정에서 전체 지문을 확인할 수 있으며, 이 검사는 가져온 뒤 변경 여부만
+  확인하고 모델 제작자를 인증하지는 않습니다. 모델 교체 도중 프로세스가 종료되면 다음
+  초기화에서 마지막 정상 모델을 복구하고, 활성화된 새 모델이 호환되지 않아도 이전 정상
+  모델로 되돌린 뒤 추론을 재개합니다.
 - 출력은 `MARKETING`, `TRANSACTIONAL`, `SECURITY`, `DELIVERY`, `SOCIAL`, `OTHER`,
   `AMBIGUOUS` 7종으로 엄격히 제한합니다. 기존 광고 조건은 `MARKETING` 호환 뷰입니다.
 - 의미 조건이 포함된 규칙이 실제로 필요할 때만 제한된 백그라운드 큐에서 추론합니다.
@@ -82,10 +90,15 @@ AlarmControl은 규칙 기반 필터 엔진과 사용자 교정을 학습하는 
 
 ### 🤖 안전한 외부 자동화
 
-- Samsung Galaxy Routines는 Good Lock RoutinePlus를 통해, Tasker와 MacroDroid는 직접
-  공개 브로드캐스트 계약을 통해 마스터 스위치나 이름 있는 프로필을 제어할 수 있습니다.
+- Samsung 모드 및 루틴은 **애플리케이션 → 앱을 열거나 앱 동작 바로 실행**에서
+  AlarmControl의 동적 App Shortcut을 직접 사용합니다. 필터링 켜기·일시 중지와 게시된
+  프로필 바로가기는 외부 자동화 허용이나 토큰이 필요하지 않습니다.
+- Tasker, MacroDroid 및 호환 도구는 별도의 공개 브로드캐스트 계약으로 마스터 스위치나
+  이름 있는 프로필을 제어할 수 있습니다.
 - 외부 수신기는 기본적으로 비활성화되어 있으며 설정에서 명시적으로 허용해야 합니다.
 - 모든 외부 요청은 설치별 무작위 `AUTH_TOKEN`을 포함해야 하며 분당 12회로 제한됩니다.
+- 토큰 노출을 막기 위해 발신자는 AlarmControl 패키지 또는 component를 명시해야 하며
+  암시적 브로드캐스트는 거부됩니다.
 - 토큰은 언제든 회전할 수 있고 백업이나 감사 기록에 포함되지 않습니다.
 - 최근 결과는 최대 200건의 내용 없는 로컬 감사 기록으로만 보관합니다.
 - 빠른 설정 타일과 동적 런처 바로가기는 같은 `ProfileController`를 사용합니다.
@@ -95,7 +108,10 @@ AlarmControl은 규칙 기반 필터 엔진과 사용자 교정을 학습하는 
 
 - 규칙 트리, 이름 있는 프로필, 선택한 설정, 일별 기록을 Storage Access Framework로
   구조화된 JSON 파일에 내보내고 복원할 수 있습니다.
-- 선택적으로 PBKDF2-HMAC-SHA256과 AES-256-GCM으로 암호화할 수 있습니다.
+- 선택적으로 PBKDF2-HMAC-SHA256과 AES-256-GCM으로 암호화할 수 있으며, 평문 JSON은
+  누구나 읽을 수 있는 파일로 취급해야 합니다.
+- 새 암호화 백업 비밀번호는 8자 이상이어야 하며 기존의 짧은 비밀번호 백업도 계속
+  복원할 수 있습니다.
 - 패키지별 분류/광고 학습 투표는 암호화된 백업에만 포함할 수 있습니다.
 - 알림 제목·본문, LLM 추론 문장, 비밀번호, 자동화 토큰은 절대 내보내지 않습니다.
 - 복원 전에 검증된 미리보기를 표시하고 병합/교체 및 섹션별 복원을 지원합니다.
@@ -174,18 +190,23 @@ compile/target SDK 36입니다.
 export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
 
 ./gradlew assembleDebug
-./gradlew :app:bundleRelease
+./gradlew :app:bundleRelease  # Release 형식 컴파일 확인용이며 무서명일 수 있음
 ./gradlew test
 ./gradlew check
 ./gradlew build
 ```
 
-- 런타임 모듈에 **425개의 JVM/Robolectric 테스트**가 있습니다. 현재 검증 집계는
-  **425개, 실패 0개, 오류 0개, 건너뜀 0개**입니다.
-- API 34 Managed Device 계측 테스트도 **11개(Room/데이터 6, 실제 TFLite 4, 앱/Hilt/탐색 1)**가
-  모두 통과합니다.
+실제 배포할 서명 번들은 [BUILD.ko.md](BUILD.ko.md)의 네 `ALARMCONTROL_*` 서명 환경 변수를
+설정한 뒤 `./gradlew :app:releaseCandidate`로 생성합니다.
+
+- 런타임 모듈에 **564개의 JVM/Robolectric 테스트**가 있습니다. 현재 검증 집계는
+  **564개, 실패 0개, 오류 0개, 건너뜀 0개**입니다.
+- 계측 테스트 **19개(Room/데이터 7, 실제 TFLite 4, 앱 런타임 8)**도 연결된 Galaxy에서
+  모두 통과했으며, CI는 같은 테스트를 API 34 Managed Device에서 실행합니다.
 - `:app` Compose UI 테스트는 Robolectric Native Graphics 모드로 로컬 JVM에서 실행됩니다.
 - `detekt`, `ktlint`, Android Lint, 오프라인 가드는 `check`와 `build`의 필수 게이트입니다.
+- `verifyCiActionPins`는 워크플로·재사용 워크플로·로컬 composite action YAML을 검사하며,
+  원격 Action은 전체 커밋 SHA, 컨테이너 Action은 SHA-256 이미지 digest로 고정해야 합니다.
 - 실제 Android 런타임이 필요한 테스트는 기기나 에뮬레이터에서 실행합니다.
 
   ```sh
@@ -193,6 +214,12 @@ export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
   ./gradlew :data:connectedDebugAndroidTest
   ./gradlew :app:connectedDebugAndroidTest
   ```
+
+- `connectedDebugAndroidTest`는 전용 테스트 기기/프로필에서만 실행합니다. AGP가 실행 종료
+  후 대상 Debug 패키지를 제거하면서 로컬 데이터까지 삭제할 수 있습니다. 보존할 데이터가
+  있다면 먼저 백업하거나, 빌드된 APK를 직접 설치한 뒤 `adb shell am instrument`로 실행해
+  `.test` 패키지만 제거합니다. 리스너 테스트는 통제된 `com.android.shell` 알림을 사용하므로
+  두 APK 모두 `POST_NOTIFICATIONS` 권한을 요청하지 않습니다.
 
 - 기기가 없을 때는 계측 테스트 APK를 컴파일할 수 있지만, 이를 실행 완료로 간주하지 않습니다.
 
@@ -230,7 +257,7 @@ export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
 
 ### Milestone 4
 
-- 사용자가 가져오는 MediaPipe 로컬 LLM 모델 관리
+- 사용자가 가져오는 MediaPipe 로컬 LLM 모델 관리와 로드 전 SHA-256 무결성 검증
 - 제한된 큐, 안전한 프롬프트, 엄격한 JSON 파싱과 신뢰도 게이트
 - R8, App Bundle의 Play 관리형 ABI 전달, 적응형 탐색, 접근성, Baseline Profile 기반
 - 모든 릴리스 경로에 연결된 오프라인 검사
@@ -257,8 +284,9 @@ export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
 
 ### 출시 안정화
 
-- 알림 리스너 작업을 최대 64개, 동시 평가 4개로 제한하고 같은 알림의 오래된 작업과
-  규칙·개인정보 설정 변경 전에 시작된 동작을 실행 직전에 무효화합니다.
+- 알림 리스너 작업을 최대 64개, 동시 평가 4개로 제한하고 실제 게시 시각을 기준으로 오래된
+  대기 작업을 먼저 버립니다. 같은 알림의 오래된 작업과 규칙·개인정보 설정 변경 전에 시작된
+  동작은 실행 직전에 무효화합니다.
 - 일별/오늘 통계는 게시 당시 로컬 날짜를 기준으로 계산하고, WorkManager 누락 일자는 한 번에
   최대 7일만 보충합니다. 원본 기록은 최신 10,000건, 상세 트레이스는 최신 1,000건으로
   제한합니다.
@@ -267,20 +295,29 @@ export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
 - 민감 화면 캡처 차단, 60초 민감 클립보드 만료, 독립적인 데이터 삭제 실패 처리,
   대소문자 무시 프로필 중복 방지, 접을 수 있는 규칙 경고를 적용했습니다.
 - Release AAB 60MiB 상한과 detekt, ktlint, 전체 로컬 테스트, 마이그레이션/계측 APK 컴파일,
-  의존성 검증, 오프라인 가드를 필수 출시 게이트로 유지합니다.
+  의존성 검증, 오프라인 가드를 필수 출시 게이트로 유지합니다. CI 컴파일용
+  `bundleRelease`는 무서명일 수 있지만, 실제 배포 경로인 `:app:releaseCandidate`는 네 서명
+  설정이 모두 있는지 확인하고 AAB payload의 JAR 서명을 암호학적으로 검증합니다.
 
 세부 동작은 [규칙 안내](docs/RULES_GUIDE.ko.md), 저장 항목과 제외 항목은
 [개인정보 안내](docs/PRIVACY.ko.md)를 참고하세요.
 
 ## Galaxy 실기기 검증
 
-2026-07-22 Galaxy Note20 5G(`SM-N981N`, Android 13/API 33, One UI 5.1)에서 다음을 확인했습니다.
+2026-07-27 Galaxy Note20 5G(`SM-N981N`, Android 13/API 33, One UI 5.1)에서 다음을 확인했습니다.
 
-- 실기기 계측 테스트 7개 전체 통과(`:data` 2, `:ml` 4, `:app` 1)
-- 실제 알림 리스너 바인딩, 활성 취소, 독립 관찰 예상, 처리 트레이스 저장
+- 실기기 계측 테스트 19개 전체 통과(`:data` 7, `:ml` 4, `:app` 8)
+- 실제 알림 리스너 바인딩, 활성 취소, 독립 관찰 예상, 삼성 스누즈 저장, 처리 트레이스 저장
+- 알림 접근 권한 해제 시 즉시 언바인드, 재허용, 앱 프로세스 종료 후 서비스 자동 재생성
+- 20개 급속 알림 처리와 강제 deep idle 상태에서의 활성 취소
+- 실제 Android Ranking 중요도 조건, 잘못된 토큰을 거부한 뒤 정상 요청은 즉시 허용하는
+  외부 자동화 수신기, 로컬 LLM 미설치 시 production DI 폴백
+- Samsung 모드 및 루틴과 Routine+ 1.0.60에서 실제 AlarmControl App Shortcut을 선택해
+  필터링 일시 중지와 켜기 루틴으로 마스터 스위치를 끄고 다시 켠 양방향 검증
 - 콘텐츠 없는 테스트 알림을 이용한 One UI 채널 설정 이동
-- Release APK/AAB 오프라인 게이트와 Baseline/Startup Profile 생성(각 24,551줄)
-- 프로필 적용 콜드 스타트 10회: 최소 168ms, 중앙값 190ms, 평균 188.7ms, 최대 204ms
+- Hilt가 생성한 WorkManager 집계 경로와 `DailyInsight` 저장
+- Release APK/AAB 오프라인 게이트와 Baseline/Startup Profile 생성(각 25,859줄)
+- 프로필 적용 콜드 스타트 10회: 최소 206ms, 중앙값 213ms, 평균 215.4ms, 최대 233ms
 
 성능 수치는 해당 기기와 실행에만 해당합니다. 검증용 규칙과 활동 기록은 완료 후 삭제했습니다.
 
@@ -288,8 +325,8 @@ export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
 
 ## 향후 작업
 
-- 추가 One UI/API 버전의 알림 중요도, Doze·배터리, Tasker/RoutinePlus 전체 흐름을
-  실기기에서 검증합니다.
+- 추가 One UI/API 버전의 알림 중요도와 Doze·배터리를 검증하고, 실제 Tasker/MacroDroid
+  발신 앱에서 인증된 공개 Intent 계약 전체를 실행합니다.
 - 연결된 Galaxy에서 새 v13 마이그레이션, 안내형 편집기, 기간 분석, 기록 상세, 7일 보존,
   Keystore 키 삭제 시나리오를 출시 전에 검증합니다.
 - 대표적인 실제 기기에서 MediaPipe 모델 호환성, 지연, 메모리, 발열을 측정합니다.

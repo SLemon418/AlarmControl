@@ -21,6 +21,11 @@ object InsightsAnalyzer {
         anomalyMinEvents: Int,
         anomalySpikeFactor: Int,
     ): InsightsReport {
+        require(windowDays > 0) { "Insight window must be positive" }
+        require(topN >= 0) { "Top app count must not be negative" }
+        require(anomalyMinEvents >= 0) { "Anomaly minimum must not be negative" }
+        require(anomalySpikeFactor >= 1) { "Anomaly factor must be positive" }
+
         // Stable ordering (count desc, then package asc) so results are deterministic in tests.
         val ranked =
             recentCounts.entries
@@ -32,12 +37,17 @@ object InsightsAnalyzer {
             ranked
                 .filter { (pkg, count) ->
                     val baseline = baselineCounts[pkg] ?: 0
-                    count >= anomalyMinEvents && count >= anomalySpikeFactor * maxOf(baseline, 1)
+                    count >= anomalyMinEvents &&
+                        count.toLong() >= anomalySpikeFactor.toLong() * maxOf(baseline, 1)
                 }.map { AppMuteCount(it.key, it.value) }
 
         return InsightsReport(
             windowDays = windowDays,
-            totalEvents = recentCounts.values.sum(),
+            totalEvents =
+                recentCounts.values
+                    .fold(0L) { total, count -> total + count }
+                    .coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong())
+                    .toInt(),
             topMutedApps = topMutedApps,
             anomalies = anomalies,
         )

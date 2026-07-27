@@ -101,7 +101,7 @@ class FakeSettingsRepository(
 
     override suspend fun reset() {
         state.value = false
-        filteringState.value = true
+        filteringState.value = false
         llmState.value = false
         llmAutoActionsState.value = false
         eventRetentionState.value = RetentionDefaults.EVENT_DAYS

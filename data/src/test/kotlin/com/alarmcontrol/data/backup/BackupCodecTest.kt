@@ -312,4 +312,21 @@ class BackupCodecTest {
 
         assertThrows(IllegalArgumentException::class.java) { BackupCodec.decode(backup.toString()) }
     }
+
+    @Test
+    fun `decode rejects oversized root arrays before decoding their elements`() {
+        val rules = JSONArray()
+        repeat(1_001) { rules.put(JSONObject()) }
+        val backup =
+            JSONObject()
+                .put("version", BackupCodec.FORMAT_VERSION)
+                .put("rules", rules)
+
+        val error =
+            assertThrows(IllegalArgumentException::class.java) {
+                BackupCodec.decode(backup.toString())
+            }
+
+        assertEquals("Backup array is too large", error.message)
+    }
 }

@@ -14,6 +14,7 @@ import com.alarmcontrol.ml.classifier.LiteRTNotificationClassifier
 import com.alarmcontrol.ml.feature.BagOfWordsFeatureExtractor
 import com.alarmcontrol.ml.feedback.RepositoryFeedbackBlender
 import com.alarmcontrol.ml.inference.BundledTfLiteBackend
+import com.alarmcontrol.ml.llm.AndroidModelStorageGuard
 import com.alarmcontrol.ml.llm.DefaultOnDeviceLlmManager
 import com.alarmcontrol.ml.llm.LocalLlmModelStore
 import com.alarmcontrol.ml.llm.MediaPipeLlmEngine
@@ -81,7 +82,11 @@ object MlModule {
         return DefaultOnDeviceLlmManager(
             engine = MediaPipeLlmEngine(context, modelFile),
             dispatcher = ioDispatcher,
-            modelStore = LocalLlmModelStore(modelFile),
+            modelStore =
+                LocalLlmModelStore(
+                    modelFile = modelFile,
+                    storageGuard = AndroidModelStorageGuard(context),
+                ),
             feedbackAdjuster = RepositoryLlmFeedbackAdjuster.from(adFeedbackRepository, applicationScope),
         )
     }

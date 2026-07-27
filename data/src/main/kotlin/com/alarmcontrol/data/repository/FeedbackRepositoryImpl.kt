@@ -2,7 +2,9 @@ package com.alarmcontrol.data.repository
 
 import com.alarmcontrol.core.feedback.CategoryFeedback
 import com.alarmcontrol.core.feedback.FeedbackRepository
+import com.alarmcontrol.data.db.TransactionRunner
 import com.alarmcontrol.data.db.dao.CategoryFeedbackDao
+import com.alarmcontrol.data.db.dao.DailyInsightDao
 import com.alarmcontrol.data.mapper.toEntity
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -13,9 +15,16 @@ class FeedbackRepositoryImpl
     @Inject
     constructor(
         private val feedbackDao: CategoryFeedbackDao,
+        private val dailyInsightDao: DailyInsightDao,
+        private val transactionRunner: TransactionRunner,
     ) : FeedbackRepository {
         override suspend fun recordCorrection(feedback: CategoryFeedback) {
-            feedbackDao.record(feedback.toEntity())
+            transactionRunner.run {
+                feedbackDao.record(feedback.toEntity())
+                feedback.notificationEventId
+                    ?.toLongOrNull()
+                    ?.let { eventId -> dailyInsightDao.deleteContainingEvent(eventId) }
+            }
         }
 
         override fun observeLabelCounts(packageName: String): Flow<Map<String, Int>> =

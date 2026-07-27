@@ -1,5 +1,6 @@
 package com.alarmcontrol.ui.profiles
 
+import androidx.lifecycle.SavedStateHandle
 import app.cash.turbine.test
 import com.alarmcontrol.automation.ProfileController
 import com.alarmcontrol.core.filtering.Condition
@@ -11,11 +12,14 @@ import com.alarmcontrol.core.profile.MAX_PROFILE_NAME_CHARS
 import com.alarmcontrol.core.profile.ProfileRepository
 import com.alarmcontrol.testsupport.MainDispatcherRule
 import com.alarmcontrol.testsupport.awaitUntil
+import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -32,10 +36,16 @@ class ProfilesViewModelTest {
     private val ruleRepository = mockk<RuleRepository>(relaxed = true)
     private val controller = mockk<ProfileController>(relaxed = true)
 
-    private fun viewModel(): ProfilesViewModel {
+    private fun viewModel(savedStateHandle: SavedStateHandle = SavedStateHandle()): ProfilesViewModel {
         every { profileRepository.observeProfiles() } returns profiles
         every { ruleRepository.observeRules() } returns rules
-        return ProfilesViewModel(profileRepository, ruleRepository, controller, mainDispatcherRule.dispatcher)
+        return ProfilesViewModel(
+            profileRepository,
+            ruleRepository,
+            controller,
+            savedStateHandle,
+            mainDispatcherRule.dispatcher,
+        )
     }
 
     @Test
@@ -111,6 +121,35 @@ class ProfilesViewModelTest {
         }
 
     @Test
+    fun `saving a profile ignores repeated submissions until the first write completes`() =
+        runTest {
+            val releaseSave = CompletableDeferred<Unit>()
+            coEvery { profileRepository.save(any()) } coAnswers {
+                releaseSave.await()
+                "10"
+            }
+            rules.value = listOf(rule("1", true))
+            val vm = viewModel()
+
+            vm.uiState.test {
+                awaitUntil { !it.isLoading }
+                vm.onAddProfile()
+                vm.onEditorChange(ProfileEditorState(name = "Focus", selectedRuleIds = setOf("1")))
+                awaitUntil { it.editor?.canSave == true }
+                vm.onSaveProfile()
+                val saving = awaitUntil { it.editor?.isSaving == true }.editor!!
+                assertFalse(saving.canSave)
+
+                vm.onSaveProfile()
+                releaseSave.complete(Unit)
+                awaitUntil { it.editor == null }
+                cancelAndIgnoreRemainingEvents()
+            }
+
+            coVerify(exactly = 1) { profileRepository.save(any()) }
+        }
+
+    @Test
     fun `profile toggle delegates to the shared automation controller`() =
         runTest {
             val vm = viewModel()
@@ -142,6 +181,53 @@ class ProfilesViewModelTest {
             }
 
             coVerify(exactly = 1) { profileRepository.delete("7") }
+        }
+
+    @Test
+    fun `restores an unsaved profile draft after view model recreation`() =
+        runTest {
+            val savedState = SavedStateHandle()
+            val first = viewModel(savedState)
+
+            first.uiState.test {
+                awaitUntil { !it.isLoading }
+                first.onAddProfile()
+                first.onEditorChange(
+                    ProfileEditorState(
+                        name = "Night focus",
+                        selectedRuleIds = setOf("1", "2"),
+                    ),
+                )
+                awaitUntil { it.editor?.name == "Night focus" }
+                cancelAndIgnoreRemainingEvents()
+            }
+
+            viewModel(savedState).uiState.test {
+                val restored = awaitUntil { !it.isLoading && it.editor != null }.editor!!
+                assertEquals("Night focus", restored.name)
+                assertEquals(setOf("1", "2"), restored.selectedRuleIds)
+                assertTrue(restored.hasUnsavedChanges)
+                cancelAndIgnoreRemainingEvents()
+            }
+        }
+
+    @Test
+    fun `discarding a profile draft removes its process death state`() =
+        runTest {
+            val savedState = SavedStateHandle()
+            val vm = viewModel(savedState)
+
+            vm.uiState.test {
+                awaitUntil { !it.isLoading }
+                vm.onAddProfile()
+                vm.onEditorChange(ProfileEditorState(name = "Focus", selectedRuleIds = setOf("1")))
+                awaitUntil { it.editor?.hasUnsavedChanges == true }
+                vm.onConfirmDiscardEditor()
+                awaitUntil { it.editor == null }
+                cancelAndIgnoreRemainingEvents()
+            }
+
+            assertNull(savedState.get<ArrayList<String>>(PROFILE_EDITOR_DRAFT_SAVED_STATE_KEY))
         }
 
     private fun rule(

@@ -19,8 +19,9 @@ class FakeRuleDao : RuleDao {
     private var nextConditionId = 1L
 
     private val state = MutableStateFlow<List<RuleWithConditions>>(emptyList())
+    var countOverride: Int? = null
 
-    override suspend fun countAll(): Int = rules.size
+    override suspend fun countAll(): Int = countOverride ?: rules.size
 
     private fun refresh() {
         state.value =

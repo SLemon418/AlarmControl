@@ -2,6 +2,18 @@ package com.alarmcontrol.core.filtering
 
 import kotlinx.coroutines.flow.Flow
 
+/** Shared ingestion/storage bounds that prevent oversized notification extras from amplifying memory use. */
+const val MAX_NOTIFICATION_TITLE_CHARS = 512
+const val MAX_NOTIFICATION_TEXT_CHARS = 4_096
+
+/** Android framework metadata is bounded before it enters caches, Room, or analytics. */
+const val MAX_NOTIFICATION_METADATA_CHARS = 1_000
+
+/** Public history-query bounds shared by UI and persistence implementations. */
+const val MAX_NOTIFICATION_HISTORY_QUERY_CHARS = 100
+const val MAX_NOTIFICATION_HISTORY_PAGE_SIZE = 1_000
+const val MAX_NOTIFICATION_HISTORY_SOURCE_COUNT = 1_000
+
 /** Optional notification text supplied separately from the content-free decision record. */
 data class NotificationContent(
     val title: String?,
@@ -57,7 +69,13 @@ data class NotificationHistoryQuery(
     val action: HistoryActionFilter = HistoryActionFilter.ALL,
     val includeExcluded: Boolean = true,
     val limit: Int = 100,
-)
+) {
+    init {
+        require(startMillis <= endMillis) { "History start must not follow end" }
+        require(search.length <= MAX_NOTIFICATION_HISTORY_QUERY_CHARS) { "History search is too long" }
+        require(limit in 1..MAX_NOTIFICATION_HISTORY_PAGE_SIZE) { "History page size is out of range" }
+    }
+}
 
 data class NotificationHistoryPage(
     val items: List<NotificationEvent>,
@@ -70,11 +88,12 @@ data class NotificationHistoryCoverage(
     val oldestPostedAtMillis: Long?,
     val newestPostedAtMillis: Long?,
     val eventsWithTrace: Int,
+    val traceEligibleEvents: Int = eventsWithTrace,
     val eventLimit: Int = 10_000,
     val traceEventLimit: Int = 1_000,
 ) {
     val eventLimitReached: Boolean get() = totalEvents >= eventLimit
-    val traceCoveragePartial: Boolean get() = totalEvents > eventsWithTrace
+    val traceCoveragePartial: Boolean get() = traceEligibleEvents > eventsWithTrace
 }
 
 /**

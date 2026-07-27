@@ -118,6 +118,7 @@ fun ProfilesScreen(
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
     val userMessage = state.userMessage?.asString()
+    val addProfileLabel = stringResource(R.string.profiles_add)
     LaunchedEffect(userMessage) {
         userMessage?.let {
             snackbarHostState.showSnackbar(it)
@@ -132,7 +133,8 @@ fun ProfilesScreen(
             ExtendedFloatingActionButton(
                 onClick = onAddProfile,
                 icon = { Icon(Icons.Default.Add, contentDescription = null) },
-                text = { Text(stringResource(R.string.profiles_add)) },
+                text = { Text(addProfileLabel) },
+                modifier = Modifier.semantics { contentDescription = addProfileLabel },
             )
         },
     ) { padding ->
@@ -272,7 +274,7 @@ fun ProfileEditorScreen(
     onConfirmDiscard: () -> Unit,
     onCancelDiscard: () -> Unit,
 ) {
-    BackHandler(onBack = onRequestClose)
+    BackHandler(enabled = !state.isSaving, onBack = onRequestClose)
     Scaffold(
         topBar = {
             TopAppBar(
@@ -284,7 +286,7 @@ fun ProfileEditorScreen(
                     )
                 },
                 navigationIcon = {
-                    IconButton(onClick = onRequestClose) {
+                    IconButton(onClick = onRequestClose, enabled = !state.isSaving) {
                         Icon(Icons.Default.Close, contentDescription = stringResource(R.string.cancel))
                     }
                 },

@@ -6,6 +6,7 @@ import androidx.room.Insert
 import androidx.room.Query
 import androidx.room.Transaction
 import androidx.room.Update
+import com.alarmcontrol.core.filtering.MAX_SAVED_RULES
 import com.alarmcontrol.data.db.entity.RuleConditionEntity
 import com.alarmcontrol.data.db.entity.RuleEntity
 import com.alarmcontrol.data.db.relation.RuleWithConditions
@@ -76,6 +77,7 @@ interface RuleDao {
     ): Long {
         val ruleId =
             if (rule.id == 0L) {
+                require(countAll() < MAX_SAVED_RULES) { "Rule limit reached" }
                 insertRule(rule)
             } else {
                 val existing = requireNotNull(findRuleById(rule.id)) { "Rule ${rule.id} does not exist" }

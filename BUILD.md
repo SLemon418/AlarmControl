@@ -45,33 +45,39 @@ forbidden networking dependency appears on the debug/release runtime classpath. 
 `:baselineprofile:offlineManifestGuard` task applies the same rule to both test APK variants.
 WorkManager's read-only `ACCESS_NETWORK_STATE` permission is allowed.
 
-The current debug JVM/Robolectric aggregate is 425 tests with zero failures, errors, or skips. The
-API 34 Managed Device aggregate is 11 tests (Room/data 6, real TFLite 4, app smoke 1), all passing.
+The current debug JVM/Robolectric aggregate is 564 tests with zero failures, errors, or skips. The
+instrumented aggregate is 19 tests (Room/data 7, real TFLite 4, app runtime 8), all passing on the
+connected Galaxy; CI runs the same suite on an API 34 Managed Device.
 
 ## Build artifacts
 
 ```sh
 ./gradlew :app:assembleDebug
 ./gradlew :app:assembleRelease
-./gradlew :app:bundleRelease
+./gradlew :app:bundleRelease  # compile/store-shape check; may be unsigned
 ```
 
 Local APK tasks produce a universal artifact so both APK and App Bundle release paths stay
-buildable with AGP resource shrinking. For store distribution, prefer the release Android App
-Bundle under `app/build/outputs/bundle/release/`; Play generates optimized ABI-specific device APKs.
+buildable with AGP resource shrinking. `bundleRelease` deliberately remains usable without a
+keystore for local and CI compilation, so its success alone does **not** mean the AAB is
+publishable.
 
-Release signing is optional for local compilation. To produce signed release artifacts, provide all
-four environment variables (never commit a keystore or its credentials):
+For store distribution, provide all four signing environment variables (never commit a keystore or
+its credentials) and run the explicit release-candidate gate:
 
 ```sh
 export ALARMCONTROL_KEYSTORE_FILE="/absolute/path/to/release.jks"
 export ALARMCONTROL_KEYSTORE_PASSWORD="..."
 export ALARMCONTROL_KEY_ALIAS="..."
 export ALARMCONTROL_KEY_PASSWORD="..."
-./gradlew :app:bundleRelease
+./gradlew :app:releaseCandidate
 ```
 
-Providing only some of the variables fails configuration intentionally.
+Providing only some of the variables fails configuration intentionally. `releaseCandidate` runs
+all device-independent quality/offline checks, compiles the instrumented-test and Baseline Profile
+variants, enforces the 60 MiB AAB limit, and reads every bundle entry to cryptographically verify
+the JAR signature. The verified bundle is written under
+`app/build/outputs/bundle/release/`; Play then generates optimized ABI-specific device APKs.
 
 ## Instrumented tests
 
@@ -81,8 +87,15 @@ or emulator, run:
 ```sh
 ./gradlew :data:connectedDebugAndroidTest  # supported Room v1/v2/v3/v10/v12 -> v13 migrations
 ./gradlew :ml:connectedDebugAndroidTest    # bundled TFLite runtime/asset compatibility
-./gradlew :app:connectedDebugAndroidTest   # real Activity, Hilt, resources, and navigation smoke test
+./gradlew :app:connectedDebugAndroidTest   # Activity/Hilt, listener, automation, LLM fallback, WorkManager
 ```
+
+> **Use a dedicated test device/profile.** AGP's `connectedDebugAndroidTest` lifecycle may uninstall
+> the target debug package after the run, which also erases that package's local app data. Export a
+> local backup first if the device contains anything valuable. On a data-bearing development phone,
+> install the already-built target/test APKs with `adb install -r`, invoke the test runner with
+> `adb shell am instrument`, and remove only the `.test` package afterward. Listener tests publish
+> controlled notifications through `com.android.shell`; neither APK requests `POST_NOTIFICATIONS`.
 
 Without a device, compile the test APKs to catch source, resource, and dependency errors:
 
@@ -126,7 +139,9 @@ Pull requests run JVM/Robolectric tests, detekt, ktlint, Android Lint, `offlineG
 APK, release AAB, all instrumented-test APK builds, and both Baseline Profile generator variants.
 Main pushes, the nightly schedule, and manual runs additionally execute the managed-device suite.
 Gradle wrapper validation runs before both jobs and `gradle/verification-metadata.xml` enforces
-strict SHA-256 verification of resolved Gradle artifacts. Failure reports are uploaded as CI
+strict SHA-256 verification of resolved Gradle artifacts. The root `verifyCiActionPins` gate scans
+workflow, reusable-workflow, and composite-action YAML: remote actions require a full 40-character
+commit SHA and container actions require a SHA-256 image digest. Failure reports are uploaded as CI
 artifacts.
 
 ## Baseline Profile and offline startup benchmark
@@ -159,3 +174,9 @@ Performance numbers are device-specific and are not inferred from APK-only compi
   suppress or weaken the guard.
 - **No compatible LLM model** — the optional MediaPipe model is not part of the build. Import a
   compatible local quantized model from Settings; rules and bundled TFLite still work without it.
+  To create the app-specific Gemma candidate, follow
+  [`ml/llm-training/README.md`](ml/llm-training/README.md); do not import safetensors, GGUF, or the
+  intermediate `.tflite`.
+- **LLM integrity record missing/mismatched** — re-import the trusted local model from Settings.
+  AlarmControl intentionally will not load a model whose import-time SHA-256 record cannot be
+  verified.

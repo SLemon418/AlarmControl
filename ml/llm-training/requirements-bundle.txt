@@ -1,0 +1,2 @@
+# Align the Python bundler with the Android Tasks GenAI runtime.
+mediapipe==0.10.35

@@ -80,6 +80,7 @@ import com.alarmcontrol.core.filtering.Condition
 import com.alarmcontrol.core.filtering.MAX_CONDITION_VALUE_CHARS
 import com.alarmcontrol.core.filtering.MAX_RATE_THRESHOLD
 import com.alarmcontrol.core.filtering.MAX_RATE_WINDOW_MILLIS
+import com.alarmcontrol.core.filtering.MAX_RULE_CONDITION_NODES
 import com.alarmcontrol.core.filtering.MAX_RULE_NAME_CHARS
 import com.alarmcontrol.core.filtering.MIN_RATE_THRESHOLD
 import com.alarmcontrol.core.filtering.MIN_RATE_WINDOW_MILLIS
@@ -193,6 +194,7 @@ fun RulesScreen(
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
     val userMessage = state.userMessage?.asString()
+    val addRuleLabel = stringResource(R.string.rules_add)
     LaunchedEffect(userMessage) {
         userMessage?.let {
             snackbarHostState.showSnackbar(it)
@@ -207,8 +209,11 @@ fun RulesScreen(
             ExtendedFloatingActionButton(
                 onClick = onAddRule,
                 icon = { Icon(Icons.Default.Add, contentDescription = null) },
-                text = { Text(stringResource(R.string.rules_add)) },
-                modifier = Modifier.testTag(RULE_ADD_FAB_TEST_TAG),
+                text = { Text(addRuleLabel) },
+                modifier =
+                    Modifier
+                        .testTag(RULE_ADD_FAB_TEST_TAG)
+                        .semantics { contentDescription = addRuleLabel },
             )
         },
     ) { padding ->
@@ -574,13 +579,13 @@ fun RuleEditorScreen(
     onConfirmDiscard: () -> Unit,
     onCancelDiscard: () -> Unit,
 ) {
-    BackHandler(onBack = onRequestClose)
+    BackHandler(enabled = !state.isSaving, onBack = onRequestClose)
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(if (state.isEditing) R.string.rule_edit else R.string.rule_new)) },
                 navigationIcon = {
-                    IconButton(onClick = onRequestClose) {
+                    IconButton(onClick = onRequestClose, enabled = !state.isSaving) {
                         Icon(Icons.Default.Close, contentDescription = stringResource(R.string.cancel))
                     }
                 },
@@ -634,12 +639,14 @@ private fun RuleEditorContent(
         } else {
             RuleBasicsFields(state, onChange)
             EditorSectionHeading(R.string.conditions)
+            val remainingNodes = (MAX_RULE_CONDITION_NODES - state.root.nodeCount()).coerceAtLeast(0)
             ConditionNodeEditor(
                 node = state.root,
                 // The root is always a group; the group editor only ever produces a group.
                 onChange = { onChange(state.copy(root = it as GroupNode)) },
                 onRemove = null,
                 depth = 0,
+                remainingNodes = remainingNodes,
             )
             RuleModeEditor(state, onChange)
             RuleActionEditor(state, onChange)
@@ -1498,6 +1505,7 @@ private fun ConditionNodeEditor(
     onChange: (ConditionNode) -> Unit,
     onRemove: (() -> Unit)?,
     depth: Int,
+    remainingNodes: Int,
 ) {
     val branchColor = MaterialTheme.colorScheme.outlineVariant
     Box(
@@ -1517,8 +1525,8 @@ private fun ConditionNodeEditor(
                 }.padding(start = if (depth > 0) 8.dp else 0.dp),
     ) {
         when (node) {
-            is GroupNode -> GroupNodeEditor(node, onChange, onRemove, depth)
-            is NotNode -> NotNodeEditor(node, onChange, onRemove, depth)
+            is GroupNode -> GroupNodeEditor(node, onChange, onRemove, depth, remainingNodes)
+            is NotNode -> NotNodeEditor(node, onChange, onRemove, depth, remainingNodes)
             is LeafNode -> LeafNodeEditor(node, onChange, onRemove)
             is TimeWindowNode -> TimeWindowNodeEditor(node, onChange, onRemove)
             is RateNode -> RateNodeEditor(node, onChange, onRemove)
@@ -1533,7 +1541,10 @@ private fun GroupNodeEditor(
     onChange: (ConditionNode) -> Unit,
     onRemove: (() -> Unit)?,
     depth: Int,
+    remainingNodes: Int,
 ) {
+    val canAddLeaf = canAddLeafCondition(depth, remainingNodes)
+    val canAddContainer = canAddContainerCondition(depth, remainingNodes)
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -1576,36 +1587,74 @@ private fun GroupNodeEditor(
                             onChange = { onChange(node.copy(children = node.children.replacedAt(index, it))) },
                             onRemove = { onChange(node.copy(children = node.children.withoutIndex(index))) },
                             depth = depth + 1,
+                            remainingNodes = remainingNodes,
                         )
                     }
                 }
             }
         }
+        ConditionAdditionControls(
+            node = node,
+            onChange = onChange,
+            canAddLeaf = canAddLeaf,
+            canAddContainer = canAddContainer,
+            remainingNodes = remainingNodes,
+            depth = depth,
+        )
+    }
+}
+
+@Composable
+private fun ConditionAdditionControls(
+    node: GroupNode,
+    onChange: (ConditionNode) -> Unit,
+    canAddLeaf: Boolean,
+    canAddContainer: Boolean,
+    remainingNodes: Int,
+    depth: Int,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(
             modifier = Modifier.horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             TextButton(
                 onClick = { onChange(node.copy(children = node.children + newLeafNode())) },
+                enabled = canAddLeaf,
             ) { Text(stringResource(R.string.add_condition)) }
             TextButton(
                 onClick = { onChange(node.copy(children = node.children + newGroupNode())) },
-                enabled = depth < MAX_EDITOR_DEPTH,
+                enabled = canAddContainer,
             ) {
                 Text(stringResource(R.string.add_group))
             }
             TextButton(
                 onClick = { onChange(node.copy(children = node.children + newNotNode())) },
-                enabled = depth < MAX_EDITOR_DEPTH,
+                enabled = canAddContainer,
             ) {
                 Text(stringResource(R.string.add_not))
             }
             TextButton(
                 onClick = { onChange(node.copy(children = node.children + newTimeWindowNode())) },
+                enabled = canAddLeaf,
             ) { Text(stringResource(R.string.add_time)) }
             TextButton(
                 onClick = { onChange(node.copy(children = node.children + newRateNode())) },
+                enabled = canAddLeaf,
             ) { Text(stringResource(R.string.add_rate)) }
+        }
+        val limitMessage =
+            when {
+                remainingNodes < 2 && depth == 0 -> R.string.validation_condition_node_limit
+                remainingNodes >= 2 && !canAddContainer -> R.string.validation_condition_depth_limit
+                else -> null
+            }
+        if (limitMessage != null) {
+            Text(
+                text = stringResource(limitMessage),
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
     }
 }
@@ -1616,6 +1665,7 @@ private fun NotNodeEditor(
     onChange: (ConditionNode) -> Unit,
     onRemove: (() -> Unit)?,
     depth: Int,
+    remainingNodes: Int,
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -1634,6 +1684,7 @@ private fun NotNodeEditor(
             onChange = { onChange(node.copy(child = it)) },
             onRemove = null,
             depth = depth + 1,
+            remainingNodes = remainingNodes,
         )
     }
 }
@@ -1896,7 +1947,6 @@ private fun <T> List<T>.withoutIndex(index: Int): List<T> = filterIndexed { i, _
 private fun String.asSignedIntegerInput(): String =
     filterIndexed { index, char -> char.isDigit() || (char == '-' && index == 0) }
 
-private const val MAX_EDITOR_DEPTH = 32
 private const val MAX_SOURCE_QUERY_CHARS = 80
 private const val MILLIS_PER_MINUTE = 60_000L
 private const val TRACE_INDENT_DP = 12

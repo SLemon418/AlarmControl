@@ -109,4 +109,54 @@ class RuleUiMappingTest {
 
         assertNull(RuleEditorState(name = "x".repeat(MAX_RULE_NAME_CHARS + 1), root = root).toRuleOrNull())
     }
+
+    @Test
+    fun `guided invalid optional time cannot silently widen to package only`() {
+        val root = Condition.PackageEquals("com.example").toEditableRoot()
+        val editor =
+            RuleEditorState(
+                name = "Night",
+                root = root,
+                guidedPackageName = "com.example",
+                guidedTimeEnabled = true,
+                guidedStartTime = "25:00",
+                guidedEndTime = "07:00",
+            )
+
+        assertEquals(false, editor.canSave)
+        assertNull(editor.toRuleOrNull())
+    }
+
+    @Test
+    fun `guided invalid frequency cannot silently widen to package only`() {
+        val root = Condition.PackageEquals("com.example").toEditableRoot()
+        val editor =
+            RuleEditorState(
+                name = "Burst",
+                root = root,
+                guidedPackageName = "com.example",
+                guidedFrequencyEnabled = true,
+                guidedFrequencyMinutes = "0",
+                guidedFrequencyThreshold = "1",
+            )
+
+        assertEquals(false, editor.canSave)
+        assertNull(editor.toRuleOrNull())
+    }
+
+    @Test
+    fun `guided channel scope requires a concrete channel`() {
+        val root = Condition.PackageEquals("com.example").toEditableRoot()
+        val editor =
+            RuleEditorState(
+                name = "Channel",
+                root = root,
+                guidedPackageName = "com.example",
+                guidedScope = GuidedRuleScope.CHANNEL,
+                guidedChannelId = null,
+            )
+
+        assertEquals(false, editor.canSave)
+        assertNull(editor.toRuleOrNull())
+    }
 }

@@ -13,6 +13,11 @@ import com.alarmcontrol.data.db.relation.NotificationEventDetailRelation
 import com.alarmcontrol.data.db.relation.NotificationEventWithTrace
 import kotlinx.coroutines.flow.Flow
 
+private const val EFFECTIVE_CATEGORY =
+    "COALESCE((SELECT corrected_label FROM category_feedback " +
+        "WHERE notification_event_id = notification_events.id ORDER BY id DESC LIMIT 1), " +
+        "ml_category, category)"
+
 @Dao
 @Suppress(
     "LongParameterList",
@@ -55,13 +60,13 @@ interface NotificationEventDao {
             "AND (:includeExcluded = 1 OR undone = 0) " +
             "AND (:packageName IS NULL OR package_name = :packageName) " +
             "AND (:channelId IS NULL OR channel_id = :channelId) " +
-            "AND (:category IS NULL OR COALESCE(ml_category, category) = :category) " +
+            "AND (:category IS NULL OR " + EFFECTIVE_CATEGORY + " = :category) " +
             "AND (:ruleId IS NULL OR matched_rule_id = :ruleId) " +
             "AND (:action IS NULL OR action = :action) " +
             "AND (:search = '' OR package_name LIKE '%' || :search || '%' ESCAPE '\\' " +
             "OR COALESCE(channel_name, '') LIKE '%' || :search || '%' ESCAPE '\\' " +
             "OR COALESCE(channel_id, '') LIKE '%' || :search || '%' ESCAPE '\\' " +
-            "OR COALESCE(ml_category, category, '') LIKE '%' || :search || '%' ESCAPE '\\') " +
+            "OR COALESCE(" + EFFECTIVE_CATEGORY + ", '') LIKE '%' || :search || '%' ESCAPE '\\') " +
             "ORDER BY posted_at_millis DESC, id DESC LIMIT :limit",
     )
     fun observeHistory(
@@ -83,13 +88,13 @@ interface NotificationEventDao {
             "AND (:includeExcluded = 1 OR undone = 0) " +
             "AND (:packageName IS NULL OR package_name = :packageName) " +
             "AND (:channelId IS NULL OR channel_id = :channelId) " +
-            "AND (:category IS NULL OR COALESCE(ml_category, category) = :category) " +
+            "AND (:category IS NULL OR " + EFFECTIVE_CATEGORY + " = :category) " +
             "AND (:ruleId IS NULL OR matched_rule_id = :ruleId) " +
             "AND (:action IS NULL OR action = :action) " +
             "AND (:search = '' OR package_name LIKE '%' || :search || '%' ESCAPE '\\' " +
             "OR COALESCE(channel_name, '') LIKE '%' || :search || '%' ESCAPE '\\' " +
             "OR COALESCE(channel_id, '') LIKE '%' || :search || '%' ESCAPE '\\' " +
-            "OR COALESCE(ml_category, category, '') LIKE '%' || :search || '%' ESCAPE '\\')",
+            "OR COALESCE(" + EFFECTIVE_CATEGORY + ", '') LIKE '%' || :search || '%' ESCAPE '\\')",
     )
     fun observeHistoryCount(
         startMillis: Long,
@@ -127,6 +132,8 @@ interface NotificationEventDao {
     @Query(
         "SELECT COUNT(*) AS total_event_count, MIN(posted_at_millis) AS oldest_posted_at_millis, " +
             "MAX(posted_at_millis) AS newest_posted_at_millis, " +
+            "COALESCE(SUM(CASE WHEN matched_rule_id IS NOT NULL OR monitored_rule_id IS NOT NULL " +
+            "THEN 1 ELSE 0 END), 0) AS trace_eligible_event_count, " +
             "(SELECT COUNT(DISTINCT event_id) FROM notification_decision_traces) AS trace_event_count " +
             "FROM notification_events",
     )
@@ -154,12 +161,14 @@ interface NotificationEventDao {
     @Query(
         "SELECT action, COUNT(*) AS count FROM notification_events " +
             "WHERE ((posted_epoch_day = :epochDay) OR " +
-            "(posted_epoch_day IS NULL AND posted_at_millis >= :legacyStartMillis)) " +
+            "(posted_epoch_day IS NULL AND posted_at_millis >= :legacyStartMillis " +
+            "AND posted_at_millis < :legacyEndMillis)) " +
             "AND undone = 0 GROUP BY action",
     )
     fun observeActionCountsForDay(
         epochDay: Long,
         legacyStartMillis: Long,
+        legacyEndMillis: Long,
     ): Flow<List<ActionCountRow>>
 
     /** Excludes a logged event from insight counts; it cannot restore a dismissed notification. */
@@ -172,6 +181,19 @@ interface NotificationEventDao {
 
     @Query("DELETE FROM notification_events")
     suspend fun deleteAll(): Int
+
+    /**
+     * Removes content-free history for an exact package/channel set. Used by debug device
+     * validation to clean only its private probe channels instead of wiping real user history.
+     */
+    @Query(
+        "DELETE FROM notification_events WHERE package_name = :packageName " +
+            "AND channel_id IN (:channelIds)",
+    )
+    suspend fun deleteForPackageChannels(
+        packageName: String,
+        channelIds: List<String>,
+    ): Int
 
     @Query("SELECT COUNT(*) FROM encrypted_notification_contents")
     suspend fun countEncryptedContents(): Int
@@ -206,7 +228,9 @@ interface NotificationEventDao {
 
     @Query(
         "SELECT MIN(posted_at_millis) AS oldest_posted_at_millis, " +
-            "MAX(posted_at_millis) AS newest_posted_at_millis FROM notification_events",
+            "MAX(posted_at_millis) AS newest_posted_at_millis, " +
+            "MIN(posted_epoch_day) AS oldest_posted_epoch_day, " +
+            "MAX(posted_epoch_day) AS newest_posted_epoch_day FROM notification_events",
     )
     suspend fun getPostedAtBounds(): EventTimeBoundsRow
 
@@ -227,8 +251,9 @@ interface NotificationEventDao {
     ): List<PackageCount>
 
     @Query(
-        "SELECT DISTINCT package_name, channel_id, posted_at_millis FROM notification_events " +
-            "WHERE posted_at_millis >= :sinceMillis ORDER BY posted_at_millis ASC",
+        "SELECT package_name, channel_id, posted_at_millis FROM notification_events " +
+            "WHERE posted_at_millis >= :sinceMillis " +
+            "ORDER BY posted_at_millis DESC, id DESC LIMIT 10000",
     )
     suspend fun rateHistorySince(sinceMillis: Long): List<RateHistoryRow>
 }
@@ -261,6 +286,8 @@ data class NotificationSourceRow(
 data class EventTimeBoundsRow(
     @ColumnInfo(name = "oldest_posted_at_millis") val oldestPostedAtMillis: Long?,
     @ColumnInfo(name = "newest_posted_at_millis") val newestPostedAtMillis: Long?,
+    @ColumnInfo(name = "oldest_posted_epoch_day") val oldestPostedEpochDay: Long?,
+    @ColumnInfo(name = "newest_posted_epoch_day") val newestPostedEpochDay: Long?,
 )
 
 data class HistoryCoverageRow(
@@ -268,4 +295,5 @@ data class HistoryCoverageRow(
     @ColumnInfo(name = "oldest_posted_at_millis") val oldestPostedAtMillis: Long?,
     @ColumnInfo(name = "newest_posted_at_millis") val newestPostedAtMillis: Long?,
     @ColumnInfo(name = "trace_event_count") val traceEventCount: Int,
+    @ColumnInfo(name = "trace_eligible_event_count") val traceEligibleEventCount: Int,
 )
