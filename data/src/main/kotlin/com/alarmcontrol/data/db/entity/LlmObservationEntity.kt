@@ -6,7 +6,7 @@ import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
 
-/** Content-free output of one optional local LLM analysis, linked to its activity record. */
+/** Content-free output of one local semantic analysis, linked to its activity record. */
 @Entity(
     tableName = "llm_observations",
     foreignKeys = [

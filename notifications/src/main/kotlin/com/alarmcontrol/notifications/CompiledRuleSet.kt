@@ -37,3 +37,11 @@ data class RuleSignalRequirements(
     val semanticIntent: Boolean = false,
     val rateSignals: Set<com.alarmcontrol.core.filtering.RateSignal> = emptySet(),
 )
+
+/** Whether resolving the trusted semantic intent can change either lane's selected rule. */
+data class SemanticResolutionRequirements(
+    val activeNeedsSemantic: Boolean,
+    val monitorNeedsSemantic: Boolean,
+) {
+    val any: Boolean = activeNeedsSemantic || monitorNeedsSemantic
+}

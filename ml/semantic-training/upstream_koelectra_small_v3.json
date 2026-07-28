@@ -1,0 +1,29 @@
+{
+  "schema_version": "semantic-upstream-model-provenance-v1",
+  "repository_id": "monologg/koelectra-small-v3-discriminator",
+  "revision": "7488f8db0f208beff4a1f3f9bb3ed04650a89ed7",
+  "license": "Apache-2.0",
+  "evidence_urls": {
+    "model_revision": "https://huggingface.co/monologg/koelectra-small-v3-discriminator/tree/7488f8db0f208beff4a1f3f9bb3ed04650a89ed7",
+    "license": "https://github.com/monologg/KoELECTRA/blob/master/LICENSE"
+  },
+  "verification_method": "pinned-revision-and-local-sha256",
+  "files": {
+    "config.json": {
+      "sha256": "f243c4994815a04b20a084cd2ec24cc78326842d56a4923a8c6751ca0ea40c25",
+      "size_bytes": 458
+    },
+    "pytorch_model.bin": {
+      "sha256": "cb3a73908dd25ea9f5ccac1aafc164b941339f11f3499ea6f1a08a8435bb7522",
+      "size_bytes": 56577499
+    },
+    "tokenizer_config.json": {
+      "sha256": "cd074f01387ed507bc657bebc91c9653874194ba612ceecffe72e6d5c631988c",
+      "size_bytes": 61
+    },
+    "vocab.txt": {
+      "sha256": "9f50b0a44b0272dcf78bfd7a52a0815588f69918bb87ec60b21ca235c5aa0eb4",
+      "size_bytes": 263326
+    }
+  }
+}

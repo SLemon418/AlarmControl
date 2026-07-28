@@ -81,6 +81,32 @@ class AdFeedbackRepositoryImplTest {
             assertEquals(listOf(9L), dailyInsightDao.invalidatedEventIds)
         }
 
+    @Test
+    fun `delayed prediction update preserves an existing semantic correction`() =
+        runTest {
+            repository.recordObservation(observation("10", "com.shop", isAd = true))
+            repository.recordCorrection("10", SemanticIntent.SECURITY)
+
+            repository.recordObservation(
+                AdObservation(
+                    notificationEventId = "10",
+                    packageName = "com.shop",
+                    predictedIsAdvertisement = false,
+                    predictedIntent = SemanticIntent.DELIVERY,
+                    confidenceScore = 0.95f,
+                    analyzedAtMillis = 20L,
+                ),
+            )
+
+            repository.observeByEvent().test {
+                val updated = awaitItem().getValue("10")
+                assertEquals(SemanticIntent.DELIVERY, updated.predictedIntent)
+                assertEquals(0.95f, updated.confidenceScore)
+                assertEquals(SemanticIntent.SECURITY, updated.correctedIntent)
+                cancelAndIgnoreRemainingEvents()
+            }
+        }
+
     private fun observation(
         eventId: String,
         packageName: String,

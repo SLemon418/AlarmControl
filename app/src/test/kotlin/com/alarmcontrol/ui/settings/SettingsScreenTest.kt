@@ -43,7 +43,8 @@ class SettingsScreenTest {
             destination = SettingsDestination.LOCAL_AI,
         )
 
-        composeRule.onNodeWithText("Use local LLM ad analysis").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Use deferred local LLM analysis").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Allow LLM verdicts to trigger rules").assertDoesNotExist()
         composeRule.onNodeWithText("Model status: ready").performScrollTo().assertIsDisplayed()
         composeRule
             .onNodeWithText(
@@ -63,17 +64,43 @@ class SettingsScreenTest {
     fun `local LLM switch hoists its change`() {
         var enabled = false
         setScreen(
-            state = SettingsUiState(llmAnalysisEnabled = false),
+            state =
+                SettingsUiState(
+                    llmAnalysisEnabled = false,
+                    llmBackgroundAnalysisAvailable = true,
+                ),
             destination = SettingsDestination.LOCAL_AI,
             onLlmAnalysisChange = { enabled = it },
         )
 
         composeRule
-            .onNodeWithContentDescription("Use local LLM ad analysis")
+            .onNodeWithContentDescription("Use deferred local LLM analysis")
             .performScrollTo()
             .performClick()
 
         assertTrue(enabled)
+    }
+
+    @Test
+    fun `unverified background model keeps automatic analysis disabled`() {
+        setScreen(
+            state =
+                SettingsUiState(
+                    llmAnalysisEnabled = false,
+                    llmBackgroundAnalysisAvailable = false,
+                ),
+            destination = SettingsDestination.LOCAL_AI,
+        )
+
+        composeRule
+            .onNodeWithContentDescription("Use deferred local LLM analysis")
+            .performScrollTo()
+            .assertIsNotEnabled()
+        composeRule
+            .onNodeWithText(
+                "Automatic background LLM analysis is unavailable",
+                substring = true,
+            ).assertIsDisplayed()
     }
 
     @Test

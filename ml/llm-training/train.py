@@ -17,6 +17,18 @@ HERE = Path(__file__).resolve().parent
 DEFAULT_DATASET = HERE / "artifacts" / "dataset"
 DEFAULT_OUTPUT = HERE / "artifacts" / "training"
 SEED = 20260727
+LORA_TARGET_PROFILES = {
+    "attention": ("q_proj", "k_proj", "v_proj", "o_proj"),
+    "attention-mlp": (
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    ),
+}
 
 # Model access is deliberately local-only. Accepting the Gemma terms and obtaining
 # the base weights is a user action, never an implicit trainer side effect.
@@ -54,7 +66,12 @@ def encode_rows(
     rows: list[dict[str, Any]],
     tokenizer: Any,
     max_length: int,
+    *,
+    loss_scope: str = "full",
 ) -> list[dict[str, list[int]]]:
+    if loss_scope not in {"full", "intent"}:
+        raise ValueError(f"Unsupported loss scope: {loss_scope}")
+
     encoded: list[dict[str, list[int]]] = []
     for row in rows:
         messages = row["messages"]
@@ -76,7 +93,34 @@ def encode_rows(
             raise ValueError(
                 f"{row['id']}: {len(full_ids)} tokens exceeds --max-length={max_length}"
             )
-        labels = [-100] * len(prompt_ids) + full_ids[len(prompt_ids) :]
+        if loss_scope == "intent":
+            try:
+                intent = json.loads(messages[-1]["content"])["intent"]
+            except (KeyError, TypeError, json.JSONDecodeError) as error:
+                raise ValueError(
+                    f"{row['id']}: assistant response has no JSON intent"
+                ) from error
+            intent_ids = list(
+                tokenizer.encode(
+                    intent,
+                    add_special_tokens=False,
+                )
+            )
+            assistant_ids = full_ids[len(prompt_ids) :]
+            matches = [
+                index
+                for index in range(len(assistant_ids) - len(intent_ids) + 1)
+                if assistant_ids[index : index + len(intent_ids)] == intent_ids
+            ]
+            if len(matches) != 1:
+                raise ValueError(
+                    f"{row['id']}: expected one tokenized intent, found {len(matches)}"
+                )
+            labels = [-100] * len(full_ids)
+            start = len(prompt_ids) + matches[0]
+            labels[start : start + len(intent_ids)] = intent_ids
+        else:
+            labels = [-100] * len(prompt_ids) + full_ids[len(prompt_ids) :]
         if not any(label != -100 for label in labels):
             raise ValueError(f"{row['id']}: assistant response has no trainable tokens")
         encoded.append({"input_ids": full_ids, "labels": labels})
@@ -158,10 +202,99 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def tokenizer_artifact_paths(model_dir: Path) -> list[Path]:
+    """Return the local tokenizer artifacts accepted by Transformers."""
+
+    return [
+        path
+        for path in (
+            model_dir / "tokenizer.json",
+            model_dir / "tokenizer.model",
+        )
+        if path.is_file()
+    ]
+
+
+def validate_initial_adapter(
+    method: str,
+    initial_adapter: Path | None,
+) -> Path | None:
+    """Validate an optional trainable PEFT adapter used as the starting point."""
+
+    if initial_adapter is None:
+        return None
+    if method != "lora":
+        raise SystemExit("--initial-adapter is supported only with --method=lora")
+    resolved = initial_adapter.resolve()
+    if not resolved.is_dir():
+        raise SystemExit(f"Initial adapter directory not found: {resolved}")
+    for required in ("adapter_config.json", "adapter_model.safetensors"):
+        if not (resolved / required).is_file():
+            raise SystemExit(f"Initial adapter is missing {required}: {resolved}")
+    return resolved
+
+
+def validate_lora_target_profile(
+    method: str,
+    profile: str,
+) -> tuple[str, ...]:
+    """Return a fixed LoRA target profile after validating the method."""
+
+    try:
+        targets = LORA_TARGET_PROFILES[profile]
+    except KeyError as error:
+        raise ValueError(f"Unsupported LoRA target profile: {profile}") from error
+    if method != "lora" and profile != "attention":
+        raise SystemExit(
+            "--lora-target-profile is supported only with --method=lora"
+        )
+    return targets
+
+
+def validate_loaded_adapter_contract(
+    configs: Mapping[str, Any],
+    *,
+    expected_rank: int,
+    expected_targets: tuple[str, ...],
+) -> None:
+    """Require a continued adapter to match the requested LoRA contract."""
+
+    loaded_ranks = {config.r for config in configs.values()}
+    if loaded_ranks != {expected_rank}:
+        raise SystemExit(
+            "Initial adapter rank does not match --lora-rank: "
+            f"{sorted(loaded_ranks)} != [{expected_rank}]"
+        )
+    expected_target_set = frozenset(expected_targets)
+    loaded_target_sets = {
+        frozenset(
+            (config.target_modules,)
+            if isinstance(config.target_modules, str)
+            else config.target_modules
+        )
+        for config in configs.values()
+    }
+    if loaded_target_sets != {expected_target_set}:
+        raise SystemExit(
+            "Initial adapter target modules do not match "
+            "--lora-target-profile"
+        )
+
+
 def configure_mps_allocator() -> None:
     """Bound unified-memory use unless the caller explicitly overrides it."""
-    os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "1.0")
+    os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "1.1")
     os.environ.setdefault("PYTORCH_MPS_LOW_WATERMARK_RATIO", "0.9")
+
+
+def trainer_evaluation_enabled(
+    *,
+    smoke_test: bool,
+    skip_trainer_evaluation: bool,
+) -> bool:
+    """Return whether Trainer should run its memory-heavy loss evaluation."""
+
+    return not smoke_test and not skip_trainer_evaluation
 
 
 def parse_args() -> argparse.Namespace:
@@ -185,8 +318,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
     parser.add_argument("--learning-rate", type=float)
     parser.add_argument("--max-length", type=int, default=1_024)
+    parser.add_argument(
+        "--loss-scope",
+        choices=("full", "intent"),
+        default="full",
+        help=(
+            "Train the full assistant JSON or only its intent-label tokens; "
+            "intent is for bounded follow-up adaptation of a format-stable model"
+        ),
+    )
     parser.add_argument("--lora-rank", type=int, default=16)
+    parser.add_argument(
+        "--lora-target-profile",
+        choices=tuple(LORA_TARGET_PROFILES),
+        default="attention",
+    )
     parser.add_argument("--save-total-limit", type=int, default=4)
+    parser.add_argument(
+        "--checkpoint-steps",
+        type=int,
+        default=0,
+        help="Save every N optimizer steps; zero saves at each epoch",
+    )
     parser.add_argument(
         "--mps-dtype",
         choices=("float32", "bfloat16"),
@@ -204,7 +357,23 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run bounded training without evaluation, checkpoints, or final artifacts",
     )
+    parser.add_argument(
+        "--skip-trainer-evaluation",
+        action="store_true",
+        help=(
+            "Skip Trainer loss evaluation on memory-limited hosts; run evaluate.py "
+            "against every saved epoch checkpoint before selecting a model"
+        ),
+    )
     parser.add_argument("--gradient-checkpointing", action="store_true")
+    parser.add_argument(
+        "--initial-adapter",
+        type=Path,
+        help=(
+            "Existing local PEFT adapter to continue with a fresh optimizer "
+            "and scheduler; valid only for --method=lora"
+        ),
+    )
     parser.add_argument("--resume-from-checkpoint", type=Path)
     return parser.parse_args()
 
@@ -213,6 +382,8 @@ def main() -> None:
     args = parse_args()
     if args.save_total_limit < 1:
         raise SystemExit("--save-total-limit must be at least 1")
+    if args.checkpoint_steps < 0:
+        raise SystemExit("--checkpoint-steps cannot be negative")
     if args.max_steps == 0 or args.max_steps < -1:
         raise SystemExit("--max-steps must be -1 or a positive integer")
     if args.smoke_test and args.max_steps < 1:
@@ -220,11 +391,24 @@ def main() -> None:
     base_model = args.base_model.resolve()
     dataset_dir = args.dataset_dir.resolve()
     output_dir = args.output_dir.resolve()
+    lora_target_modules = validate_lora_target_profile(
+        args.method,
+        args.lora_target_profile,
+    )
+    initial_adapter = validate_initial_adapter(
+        args.method,
+        args.initial_adapter,
+    )
     if not base_model.is_dir():
         raise SystemExit(f"Base model directory not found: {base_model}")
-    for required in ("config.json", "tokenizer.model"):
-        if not (base_model / required).is_file():
-            raise SystemExit(f"Base model is missing {required}: {base_model}")
+    if not (base_model / "config.json").is_file():
+        raise SystemExit(f"Base model is missing config.json: {base_model}")
+    tokenizer_files = tokenizer_artifact_paths(base_model)
+    if not tokenizer_files:
+        raise SystemExit(
+            "Base model is missing tokenizer.json or tokenizer.model: "
+            f"{base_model}"
+        )
     base_weight_files = sorted(base_model.glob("*.safetensors"))
     if not base_weight_files:
         raise SystemExit(f"Base model has no safetensors weights: {base_model}")
@@ -270,34 +454,55 @@ def main() -> None:
         model.gradient_checkpointing_enable()
 
     if args.method == "lora":
-        from peft import LoraConfig, get_peft_model
+        if initial_adapter is not None:
+            from peft import PeftModel
 
-        model = get_peft_model(
-            model,
-            LoraConfig(
-                r=args.lora_rank,
-                lora_alpha=args.lora_rank * 2,
-                lora_dropout=0.05,
-                bias="none",
-                task_type="CAUSAL_LM",
-                target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-            ),
-        )
+            model = PeftModel.from_pretrained(
+                model,
+                str(initial_adapter),
+                is_trainable=True,
+                local_files_only=True,
+            )
+            validate_loaded_adapter_contract(
+                model.peft_config,
+                expected_rank=args.lora_rank,
+                expected_targets=lora_target_modules,
+            )
+        else:
+            from peft import LoraConfig, get_peft_model
+
+            model = get_peft_model(
+                model,
+                LoraConfig(
+                    r=args.lora_rank,
+                    lora_alpha=args.lora_rank * 2,
+                    lora_dropout=0.05,
+                    bias="none",
+                    task_type="CAUSAL_LM",
+                    target_modules=list(lora_target_modules),
+                ),
+            )
         model.print_trainable_parameters()
 
     train_rows = encode_rows(
         load_rows(dataset_dir / "train.jsonl"),
         tokenizer,
         args.max_length,
+        loss_scope=args.loss_scope,
     )
     validation_rows = encode_rows(
         load_rows(dataset_dir / "validation.jsonl"),
         tokenizer,
         args.max_length,
+        loss_scope=args.loss_scope,
     )
     checkpoints_dir = output_dir / "checkpoints"
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
     learning_rate = args.learning_rate or (2e-4 if args.method == "lora" else 5e-5)
+    run_trainer_evaluation = trainer_evaluation_enabled(
+        smoke_test=args.smoke_test,
+        skip_trainer_evaluation=args.skip_trainer_evaluation,
+    )
     training_args = TrainingArguments(
         output_dir=str(checkpoints_dir),
         num_train_epochs=args.epochs,
@@ -309,10 +514,15 @@ def main() -> None:
         warmup_ratio=0.1,
         weight_decay=0.01,
         logging_steps=1,
-        eval_strategy="no" if args.smoke_test else "epoch",
-        save_strategy="no" if args.smoke_test else "epoch",
+        eval_strategy="epoch" if run_trainer_evaluation else "no",
+        save_strategy=(
+            "no"
+            if args.smoke_test
+            else ("steps" if args.checkpoint_steps else "epoch")
+        ),
+        save_steps=args.checkpoint_steps or 500,
         save_total_limit=args.save_total_limit,
-        load_best_model_at_end=not args.smoke_test,
+        load_best_model_at_end=run_trainer_evaluation,
         metric_for_best_model="eval_loss",
         greater_is_better=False,
         fp16=use_fp16,
@@ -395,10 +605,11 @@ def main() -> None:
             path.name: file_sha256(path)
             for path in [
                 base_model / "config.json",
-                base_model / "tokenizer.model",
+                *tokenizer_files,
                 *base_weight_files,
             ]
         },
+        "checkpoint_steps": args.checkpoint_steps or None,
         "dataset_manifest_sha256": file_sha256(dataset_dir / "manifest.json"),
         "dependency_versions": {
             dependency: importlib.metadata.version(dependency)
@@ -413,8 +624,31 @@ def main() -> None:
         },
         "epochs": args.epochs,
         "learning_rate": learning_rate,
+        "loss_scope": args.loss_scope,
+        "lora_rank": args.lora_rank if args.method == "lora" else None,
+        "lora_target_modules": (
+            list(lora_target_modules) if args.method == "lora" else None
+        ),
+        "lora_target_profile": (
+            args.lora_target_profile if args.method == "lora" else None
+        ),
+        "initial_adapter": (
+            {
+                "directory_name": initial_adapter.name,
+                "file_sha256": {
+                    name: file_sha256(initial_adapter / name)
+                    for name in (
+                        "adapter_config.json",
+                        "adapter_model.safetensors",
+                    )
+                },
+            }
+            if initial_adapter is not None
+            else None
+        ),
         "method": args.method,
         "seed": SEED,
+        "trainer_evaluation_enabled": run_trainer_evaluation,
         "training_device": device,
         "training_dtype": str(dtype),
         "mps_allocator_high_watermark_ratio": os.environ[

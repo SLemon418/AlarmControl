@@ -75,8 +75,9 @@ export ALARMCONTROL_KEY_PASSWORD="..."
 
 Providing only some of the variables fails configuration intentionally. `releaseCandidate` runs
 all device-independent quality/offline checks, compiles the instrumented-test and Baseline Profile
-variants, enforces the 60 MiB AAB limit, and reads every bundle entry to cryptographically verify
-the JAR signature. The verified bundle is written under
+variants, enforces a 60 MiB non-semantic payload cap, a 30 MiB semantic-classifier target with a
+45 MiB hard cap, and a 105 MiB complete physical-AAB cap, and reads every bundle entry to
+cryptographically verify the JAR signature. The verified bundle is written under
 `app/build/outputs/bundle/release/`; Play then generates optimized ABI-specific device APKs.
 
 ## Instrumented tests

@@ -7,13 +7,17 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.InputStream
 import java.util.concurrent.atomic.AtomicBoolean
@@ -30,6 +34,7 @@ internal class DefaultOnDeviceLlmManager(
     dispatcher: CoroutineDispatcher,
     private val modelStore: LocalLlmModelStore? = null,
     private val feedbackAdjuster: LlmFeedbackAdjuster = LlmFeedbackAdjuster { _, result -> result },
+    private val idleTtlMillis: Long = DEFAULT_IDLE_TTL_MILLIS,
 ) : OnDeviceLlmManager {
     private val _initState = MutableStateFlow<LlmInitState>(LlmInitState.Idle)
     override val initState: StateFlow<LlmInitState> = _initState.asStateFlow()
@@ -40,36 +45,54 @@ internal class DefaultOnDeviceLlmManager(
     private val generation = AtomicLong(0)
     private val analysisSlots = Semaphore(ANALYSIS_CAPACITY)
     private val commands = Channel<EngineCommand>(COMMAND_CAPACITY)
+    private val submissionMutex = Mutex()
     private val actorScope = CoroutineScope(SupervisorJob() + dispatcher)
     private val installInProgress = AtomicBoolean(false)
+    private val idleCloseLock = Any()
+    private val idleCloseSequence = AtomicLong(0)
+    private var idleCloseJob: Job? = null
 
     init {
         actorScope.launch {
-            for (command in commands) process(command)
+            for (command in commands) processSafely(command)
         }
     }
 
     override suspend fun initialize() {
-        val (requestedGeneration, previousState) =
-            synchronized(stateLock) {
-                val current = _initState.value
-                when (current) {
-                    LlmInitState.Loading, LlmInitState.Ready -> return
-                    is LlmInitState.Installing -> return
-                    LlmInitState.Idle, is LlmInitState.Unavailable -> {
-                        _initState.value = LlmInitState.Loading
-                        generation.get() to current
-                    }
-                }
-            }
+        var requestedGeneration: Long? = null
+        var previousState: LlmInitState? = null
         val reply = CompletableDeferred<Unit>()
         var enqueued = false
         try {
-            commands.send(EngineCommand.Initialize(requestedGeneration, reply))
-            enqueued = true
+            val submitted =
+                submissionMutex.withLock {
+                    val request =
+                        synchronized(stateLock) {
+                            val current = _initState.value
+                            when (current) {
+                                LlmInitState.Loading, LlmInitState.Ready -> null
+                                is LlmInitState.Installing -> null
+                                LlmInitState.Idle, is LlmInitState.Unavailable -> {
+                                    previousState = current
+                                    generation.incrementAndGet().also { requested ->
+                                        requestedGeneration = requested
+                                        _initState.value = LlmInitState.Loading
+                                    }
+                                }
+                            }
+                        } ?: return@withLock false
+                    commands.send(EngineCommand.Initialize(request, reply))
+                    enqueued = true
+                    true
+                }
+            if (!submitted) return
             reply.await()
         } catch (error: CancellationException) {
-            if (!enqueued) updateState(requestedGeneration, previousState)
+            val requested = requestedGeneration
+            val previous = previousState
+            if (!enqueued && requested != null && previous != null) {
+                updateState(requested, previous)
+            }
             throw error
         }
     }
@@ -84,11 +107,15 @@ internal class DefaultOnDeviceLlmManager(
                 generation.get()
             }
         if (!analysisSlots.tryAcquire()) return null
+        cancelIdleClose()
 
         val reply = CompletableDeferred<LlmAnalysisResult?>()
         val sent = commands.trySend(EngineCommand.Analyze(requestedGeneration, text, packageName, reply))
         if (sent.isFailure) {
             analysisSlots.release()
+            if (isCurrent(requestedGeneration, LlmInitState.Ready)) {
+                scheduleIdleClose(requestedGeneration)
+            }
             return null
         }
         val result = reply.await()
@@ -103,39 +130,46 @@ internal class DefaultOnDeviceLlmManager(
         source: InputStream,
         expectedBytes: Long?,
     ): DataResult<Unit> {
+        cancelIdleClose()
         if (!installInProgress.compareAndSet(false, true)) {
             return DataResult.Failure(IllegalStateException("Model installation is already running"))
         }
-        val previousState: LlmInitState
-        val requestedGeneration: Long
-        synchronized(stateLock) {
-            previousState = _initState.value
-            requestedGeneration = generation.incrementAndGet()
-            _initState.value = LlmInitState.Installing(copiedBytes = 0, totalBytes = expectedBytes)
-        }
+        var previousState: LlmInitState? = null
+        var requestedGeneration: Long? = null
         val reply = CompletableDeferred<DataResult<Unit>>()
         var enqueued = false
         return try {
-            commands.send(
-                EngineCommand.Install(
-                    generation = requestedGeneration,
-                    source = source,
-                    expectedBytes = expectedBytes,
-                    previousState = previousState,
-                    reply = reply,
-                ),
-            )
-            enqueued = true
+            submissionMutex.withLock {
+                synchronized(stateLock) {
+                    previousState = _initState.value
+                    requestedGeneration = generation.incrementAndGet()
+                    _initState.value = LlmInitState.Installing(copiedBytes = 0, totalBytes = expectedBytes)
+                }
+                commands.send(
+                    EngineCommand.Install(
+                        generation = requireNotNull(requestedGeneration),
+                        source = source,
+                        expectedBytes = expectedBytes,
+                        previousState = requireNotNull(previousState),
+                        reply = reply,
+                    ),
+                )
+                enqueued = true
+            }
             reply.await()
         } catch (error: CancellationException) {
+            val requested = requestedGeneration
+            val previous = previousState
             if (!enqueued) {
-                updateState(requestedGeneration, previousState)
+                if (requested != null && previous != null) updateState(requested, previous)
                 installInProgress.set(false)
             }
             throw error
         } catch (error: Exception) {
+            val requested = requestedGeneration
+            val previous = previousState
             if (!enqueued) {
-                updateState(requestedGeneration, previousState)
+                if (requested != null && previous != null) updateState(requested, previous)
                 installInProgress.set(false)
             }
             DataResult.Failure(error)
@@ -143,38 +177,109 @@ internal class DefaultOnDeviceLlmManager(
     }
 
     override suspend fun removeModel(): DataResult<Unit> {
-        val (requestedGeneration, previousState) =
-            synchronized(stateLock) {
-                val current = _initState.value
-                generation.incrementAndGet().also { _initState.value = LlmInitState.Idle } to current
-            }
+        cancelIdleClose()
+        var requestedGeneration: Long? = null
+        var previousState: LlmInitState? = null
         val reply = CompletableDeferred<DataResult<Unit>>()
         var enqueued = false
         return try {
-            commands.send(EngineCommand.Remove(requestedGeneration, reply))
-            enqueued = true
+            submissionMutex.withLock {
+                synchronized(stateLock) {
+                    previousState = _initState.value
+                    requestedGeneration = generation.incrementAndGet()
+                    _initState.value = LlmInitState.Idle
+                }
+                commands.send(EngineCommand.Remove(requireNotNull(requestedGeneration), reply))
+                enqueued = true
+            }
             reply.await()
         } catch (error: CancellationException) {
-            if (!enqueued) updateState(requestedGeneration, previousState)
+            val requested = requestedGeneration
+            val previous = previousState
+            if (!enqueued && requested != null && previous != null) {
+                updateState(requested, previous)
+            }
             throw error
         }
     }
 
     override suspend fun close() {
-        val (requestedGeneration, previousState) =
-            synchronized(stateLock) {
-                val current = _initState.value
-                generation.incrementAndGet().also { _initState.value = LlmInitState.Idle } to current
-            }
+        cancelIdleClose()
+        var requestedGeneration: Long? = null
+        var previousState: LlmInitState? = null
         val reply = CompletableDeferred<Unit>()
         var enqueued = false
         try {
-            commands.send(EngineCommand.Close(requestedGeneration, reply))
-            enqueued = true
+            submissionMutex.withLock {
+                synchronized(stateLock) {
+                    previousState = _initState.value
+                    requestedGeneration = generation.incrementAndGet()
+                    _initState.value = LlmInitState.Idle
+                }
+                commands.send(EngineCommand.Close(requireNotNull(requestedGeneration), reply))
+                enqueued = true
+            }
             reply.await()
         } catch (error: CancellationException) {
-            if (!enqueued) updateState(requestedGeneration, previousState)
+            val requested = requestedGeneration
+            val previous = previousState
+            if (!enqueued && requested != null && previous != null) {
+                updateState(requested, previous)
+            }
             throw error
+        }
+    }
+
+    private suspend fun processSafely(command: EngineCommand) {
+        try {
+            process(command)
+        } catch (error: CancellationException) {
+            command.completeExceptionally(error)
+            throw error
+        } catch (error: LinkageError) {
+            failUnexpectedCommand(command, error)
+        } catch (error: OutOfMemoryError) {
+            failUnexpectedCommand(command, error)
+        } catch (error: Exception) {
+            failUnexpectedCommand(command, error)
+        }
+    }
+
+    private fun failUnexpectedCommand(
+        command: EngineCommand,
+        error: Throwable,
+    ) {
+        when (command) {
+            is EngineCommand.Initialize -> {
+                engine.closeBestEffort()
+                updateState(command.generation, LlmInitState.Unavailable(LlmFailure.LOAD_FAILED))
+                command.reply.complete(Unit)
+            }
+            is EngineCommand.Analyze -> {
+                engine.closeBestEffort()
+                updateState(command.generation, LlmInitState.Unavailable(LlmFailure.LOAD_FAILED))
+                command.reply.complete(null)
+            }
+            is EngineCommand.Install -> {
+                engine.closeBestEffort()
+                updateState(command.generation, LlmInitState.Unavailable(LlmFailure.LOAD_FAILED))
+                installInProgress.set(false)
+                command.reply.complete(DataResult.Failure(error))
+            }
+            is EngineCommand.Remove -> {
+                engine.closeBestEffort()
+                updateState(command.generation, LlmInitState.Unavailable(LlmFailure.STORAGE_FAILURE))
+                command.reply.complete(DataResult.Failure(error))
+            }
+            is EngineCommand.Close -> {
+                engine.closeBestEffort()
+                updateState(command.generation, LlmInitState.Idle)
+                command.reply.complete(Unit)
+            }
+            is EngineCommand.CloseIfIdle -> {
+                engine.closeBestEffort()
+                command.reply.complete(Unit)
+            }
         }
     }
 
@@ -184,7 +289,30 @@ internal class DefaultOnDeviceLlmManager(
             is EngineCommand.Analyze -> processAnalyze(command)
             is EngineCommand.Install -> processInstall(command)
             is EngineCommand.Remove -> processRemove(command)
-            is EngineCommand.Close -> processClose(command)
+            is EngineCommand.Close -> {
+                if (generation.isCurrent(stateLock, command.generation)) {
+                    engine.closeBestEffort()
+                    updateState(command.generation, LlmInitState.Idle)
+                }
+                command.reply.complete(Unit)
+            }
+            is EngineCommand.CloseIfIdle -> {
+                val shouldClose =
+                    synchronized(stateLock) {
+                        if (generation.get() == command.generation &&
+                            idleCloseSequence.get() == command.idleSequence &&
+                            _initState.value == LlmInitState.Ready
+                        ) {
+                            generation.incrementAndGet()
+                            _initState.value = LlmInitState.Idle
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                if (shouldClose) engine.closeBestEffort()
+                command.reply.complete(Unit)
+            }
         }
     }
 
@@ -202,6 +330,7 @@ internal class DefaultOnDeviceLlmManager(
                 val loadedInfo = loadVerifiedOrPreviousModel(engine, modelStore, verifiedInfo)
                 updateModelInfo(command.generation, loadedInfo)
                 updateState(command.generation, LlmInitState.Ready)
+                scheduleIdleClose(command.generation)
             }
         } catch (_: ModelIntegrityException) {
             updateModelInfo(command.generation, null)
@@ -212,7 +341,7 @@ internal class DefaultOnDeviceLlmManager(
         } catch (_: OutOfMemoryError) {
             engine.closeBestEffort()
             updateState(command.generation, LlmInitState.Unavailable(LlmFailure.LOAD_FAILED))
-        } catch (error: Exception) {
+        } catch (_: Exception) {
             engine.closeBestEffort()
             updateState(command.generation, LlmInitState.Unavailable(LlmFailure.LOAD_FAILED))
         } finally {
@@ -237,6 +366,9 @@ internal class DefaultOnDeviceLlmManager(
             command.reply.complete(null)
         } finally {
             analysisSlots.release()
+            if (isCurrent(command.generation, LlmInitState.Ready)) {
+                scheduleIdleClose(command.generation)
+            }
         }
     }
 
@@ -269,6 +401,9 @@ internal class DefaultOnDeviceLlmManager(
             command.reply.complete(DataResult.Failure(error))
         } finally {
             installInProgress.set(false)
+            if (isCurrent(command.generation, LlmInitState.Ready)) {
+                scheduleIdleClose(command.generation)
+            }
         }
     }
 
@@ -289,22 +424,29 @@ internal class DefaultOnDeviceLlmManager(
             try {
                 val staged =
                     store.stage(command.source, command.expectedBytes) { copied ->
-                        requireCurrentInstallation(command.generation)
+                        generation.requireCurrentInstallation(stateLock, command.generation)
                         updateState(
                             command.generation,
                             LlmInitState.Installing(copied, command.expectedBytes),
                         )
                     }
                 try {
-                    requireCurrentInstallation(command.generation)
+                    generation.requireCurrentInstallation(stateLock, command.generation)
                     updateState(command.generation, LlmInitState.Loading)
                     engine.close()
-                    requireCurrentInstallation(command.generation)
+                    generation.requireCurrentInstallation(stateLock, command.generation)
                     staged.activate()
-                    requireCurrentInstallation(command.generation)
+                    generation.requireCurrentInstallation(stateLock, command.generation)
                     check(engine.isModelAvailable()) { MODEL_MISSING_MESSAGE }
                     engine.load()
-                    commitInstallationIfCurrent(command.generation, staged)
+                    generation.commitInstallationIfCurrent(
+                        lock = stateLock,
+                        requestedGeneration = command.generation,
+                    ) {
+                        staged.commit()
+                        _modelInfo.value = staged.modelInfo
+                        _initState.value = LlmInitState.Ready
+                    }
                     DataResult.Success(Unit)
                 } catch (error: CancellationException) {
                     throw error
@@ -322,7 +464,11 @@ internal class DefaultOnDeviceLlmManager(
                     staged.rollback()
                     updateState(
                         command.generation,
-                        restorePreviousEngine(command.generation, command.previousState),
+                        restorePreviousEngine(
+                            engine = engine,
+                            modelStore = modelStore,
+                            previousState = command.previousState,
+                        ) { updateModelInfo(command.generation, it) },
                     )
                     DataResult.Failure(error)
                 } catch (error: Exception) {
@@ -330,7 +476,11 @@ internal class DefaultOnDeviceLlmManager(
                     staged.rollback()
                     updateState(
                         command.generation,
-                        restorePreviousEngine(command.generation, command.previousState),
+                        restorePreviousEngine(
+                            engine = engine,
+                            modelStore = modelStore,
+                            previousState = command.previousState,
+                        ) { updateModelInfo(command.generation, it) },
                     )
                     DataResult.Failure(error)
                 }
@@ -344,27 +494,11 @@ internal class DefaultOnDeviceLlmManager(
         command.reply.complete(result)
     }
 
-    private fun requireCurrentInstallation(requestedGeneration: Long) {
-        if (!generation.isCurrent(stateLock, requestedGeneration)) {
-            throw ModelInstallationSupersededException()
-        }
-    }
-
-    private fun commitInstallationIfCurrent(
-        requestedGeneration: Long,
-        staged: LocalLlmModelStore.StagedModel,
-    ) {
-        synchronized(stateLock) {
-            if (generation.get() != requestedGeneration) {
-                throw ModelInstallationSupersededException()
-            }
-            staged.commit()
-            _modelInfo.value = staged.modelInfo
-            _initState.value = LlmInitState.Ready
-        }
-    }
-
     private fun processRemove(command: EngineCommand.Remove) {
+        if (!generation.isCurrent(stateLock, command.generation)) {
+            command.reply.complete(DataResult.Failure(IllegalStateException("Model removal was superseded")))
+            return
+        }
         val store = modelStore
         val result =
             if (store == null) {
@@ -384,38 +518,32 @@ internal class DefaultOnDeviceLlmManager(
         command.reply.complete(result)
     }
 
-    private fun processClose(command: EngineCommand.Close) {
-        engine.closeBestEffort()
-        updateState(command.generation, LlmInitState.Idle)
-        command.reply.complete(Unit)
+    private fun scheduleIdleClose(requestedGeneration: Long) {
+        cancelIdleClose()
+        val idleSequence = idleCloseSequence.incrementAndGet()
+        val newJob =
+            actorScope.launch {
+                if (idleTtlMillis > 0) delay(idleTtlMillis)
+                val reply = CompletableDeferred<Unit>()
+                commands.send(
+                    EngineCommand.CloseIfIdle(
+                        generation = requestedGeneration,
+                        idleSequence = idleSequence,
+                        reply = reply,
+                    ),
+                )
+                reply.await()
+            }
+        synchronized(idleCloseLock) {
+            idleCloseJob = newJob
+        }
     }
 
-    private fun restorePreviousEngine(
-        requestedGeneration: Long,
-        previousState: LlmInitState,
-    ): LlmInitState {
-        if (previousState != LlmInitState.Ready || !engine.isModelAvailable()) {
-            updateModelInfo(requestedGeneration, null)
-            return LlmInitState.Unavailable(LlmFailure.MODEL_INVALID)
-        }
-        return try {
-            val verifiedInfo = modelStore?.verifyInstalledModel()
-            if (modelStore != null && verifiedInfo == null) {
-                updateModelInfo(requestedGeneration, null)
-                return LlmInitState.Unavailable(LlmFailure.MODEL_MISSING)
-            }
-            engine.load()
-            updateModelInfo(requestedGeneration, verifiedInfo)
-            LlmInitState.Ready
-        } catch (_: ModelIntegrityException) {
-            updateModelInfo(requestedGeneration, null)
-            LlmInitState.Unavailable(LlmFailure.MODEL_INTEGRITY_FAILED)
-        } catch (_: LinkageError) {
-            LlmInitState.Unavailable(LlmFailure.LOAD_FAILED)
-        } catch (_: OutOfMemoryError) {
-            LlmInitState.Unavailable(LlmFailure.LOAD_FAILED)
-        } catch (_: Exception) {
-            LlmInitState.Unavailable(LlmFailure.LOAD_FAILED)
+    private fun cancelIdleClose() {
+        idleCloseSequence.incrementAndGet()
+        synchronized(idleCloseLock) {
+            idleCloseJob?.cancel()
+            idleCloseJob = null
         }
     }
 
@@ -445,45 +573,63 @@ internal class DefaultOnDeviceLlmManager(
         }
     }
 
-    private sealed interface EngineCommand {
-        val generation: Long
-
-        data class Initialize(
-            override val generation: Long,
-            val reply: CompletableDeferred<Unit>,
-        ) : EngineCommand
-
-        data class Analyze(
-            override val generation: Long,
-            val text: String,
-            val packageName: String?,
-            val reply: CompletableDeferred<LlmAnalysisResult?>,
-        ) : EngineCommand
-
-        data class Install(
-            override val generation: Long,
-            val source: InputStream,
-            val expectedBytes: Long?,
-            val previousState: LlmInitState,
-            val reply: CompletableDeferred<DataResult<Unit>>,
-        ) : EngineCommand
-
-        data class Remove(
-            override val generation: Long,
-            val reply: CompletableDeferred<DataResult<Unit>>,
-        ) : EngineCommand
-
-        data class Close(
-            override val generation: Long,
-            val reply: CompletableDeferred<Unit>,
-        ) : EngineCommand
-    }
-
     private companion object {
         const val MIN_TRUSTED_CONFIDENCE = 0.6f
         const val ANALYSIS_CAPACITY = 2
         const val COMMAND_CAPACITY = 4
         const val ENGINE_ANALYSIS_TIMEOUT_MILLIS = 9_000L
+        const val DEFAULT_IDLE_TTL_MILLIS = 60_000L
+    }
+}
+
+private sealed interface EngineCommand {
+    val generation: Long
+
+    data class Initialize(
+        override val generation: Long,
+        val reply: CompletableDeferred<Unit>,
+    ) : EngineCommand
+
+    data class Analyze(
+        override val generation: Long,
+        val text: String,
+        val packageName: String?,
+        val reply: CompletableDeferred<LlmAnalysisResult?>,
+    ) : EngineCommand
+
+    data class Install(
+        override val generation: Long,
+        val source: InputStream,
+        val expectedBytes: Long?,
+        val previousState: LlmInitState,
+        val reply: CompletableDeferred<DataResult<Unit>>,
+    ) : EngineCommand
+
+    data class Remove(
+        override val generation: Long,
+        val reply: CompletableDeferred<DataResult<Unit>>,
+    ) : EngineCommand
+
+    data class Close(
+        override val generation: Long,
+        val reply: CompletableDeferred<Unit>,
+    ) : EngineCommand
+
+    data class CloseIfIdle(
+        override val generation: Long,
+        val idleSequence: Long,
+        val reply: CompletableDeferred<Unit>,
+    ) : EngineCommand
+}
+
+private fun EngineCommand.completeExceptionally(error: Throwable) {
+    when (this) {
+        is EngineCommand.Initialize -> reply.completeExceptionally(error)
+        is EngineCommand.Analyze -> reply.completeExceptionally(error)
+        is EngineCommand.Install -> reply.completeExceptionally(error)
+        is EngineCommand.Remove -> reply.completeExceptionally(error)
+        is EngineCommand.Close -> reply.completeExceptionally(error)
+        is EngineCommand.CloseIfIdle -> reply.completeExceptionally(error)
     }
 }
 
@@ -515,6 +661,41 @@ private fun restorePreviousModel(
         null
     }
 
+private fun restorePreviousEngine(
+    engine: LlmEngine,
+    modelStore: LocalLlmModelStore?,
+    previousState: LlmInitState,
+    updateModelInfo: (LlmModelInfo?) -> Unit,
+): LlmInitState {
+    if (previousState != LlmInitState.Ready || !engine.isModelAvailable()) {
+        updateModelInfo(null)
+        return LlmInitState.Unavailable(LlmFailure.MODEL_INVALID)
+    }
+    return try {
+        val verifiedInfo = modelStore?.verifyInstalledModel()
+        if (modelStore != null && verifiedInfo == null) {
+            updateModelInfo(null)
+            return LlmInitState.Unavailable(LlmFailure.MODEL_MISSING)
+        }
+        engine.load()
+        updateModelInfo(verifiedInfo)
+        LlmInitState.Ready
+    } catch (_: ModelIntegrityException) {
+        engine.closeBestEffort()
+        updateModelInfo(null)
+        LlmInitState.Unavailable(LlmFailure.MODEL_INTEGRITY_FAILED)
+    } catch (_: LinkageError) {
+        engine.closeBestEffort()
+        LlmInitState.Unavailable(LlmFailure.LOAD_FAILED)
+    } catch (_: OutOfMemoryError) {
+        engine.closeBestEffort()
+        LlmInitState.Unavailable(LlmFailure.LOAD_FAILED)
+    } catch (_: Exception) {
+        engine.closeBestEffort()
+        LlmInitState.Unavailable(LlmFailure.LOAD_FAILED)
+    }
+}
+
 private const val MODEL_MISSING_MESSAGE = "On-device model file is missing"
 
 private class ModelInstallationSupersededException : IllegalStateException("Model installation was superseded")
@@ -538,3 +719,25 @@ private fun AtomicLong.isCurrent(
     lock: Any,
     requestedGeneration: Long,
 ): Boolean = synchronized(lock) { get() == requestedGeneration }
+
+private fun AtomicLong.requireCurrentInstallation(
+    lock: Any,
+    requestedGeneration: Long,
+) {
+    if (!isCurrent(lock, requestedGeneration)) {
+        throw ModelInstallationSupersededException()
+    }
+}
+
+private fun AtomicLong.commitInstallationIfCurrent(
+    lock: Any,
+    requestedGeneration: Long,
+    commit: () -> Unit,
+) {
+    synchronized(lock) {
+        if (get() != requestedGeneration) {
+            throw ModelInstallationSupersededException()
+        }
+        commit()
+    }
+}

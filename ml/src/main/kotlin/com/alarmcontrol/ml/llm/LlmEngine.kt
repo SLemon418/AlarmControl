@@ -12,7 +12,10 @@ internal interface LlmEngine {
     /** Whether the on-device model is present and loadable. Checked before [load]. */
     fun isModelAvailable(): Boolean
 
-    /** Loads the model. Blocking/native — always invoked off the main thread. Throws on failure. */
+    /**
+     * Loads the model, replacing and releasing any previously loaded native instance. Blocking and
+     * native — always invoked off the main thread. Throws on failure.
+     */
     fun load()
 
     /** Runs analysis on [text] using the loaded model without blocking the caller thread. */

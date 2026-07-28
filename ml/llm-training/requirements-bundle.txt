@@ -1,2 +1,9 @@
+# MediaPipe 0.10.35 imports these conversion dependencies eagerly when its
+# bundler module loads, even though its wheel metadata does not declare them.
+jax==0.11.0
+jaxlib==0.11.0
+torch==2.13.0
+sentencepiece==0.2.2
+
 # Align the Python bundler with the Android Tasks GenAI runtime.
 mediapipe==0.10.35

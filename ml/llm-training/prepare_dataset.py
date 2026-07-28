@@ -16,12 +16,22 @@ HERE = Path(__file__).resolve().parent
 DEFAULT_SOURCE = HERE / "data" / "seed_examples.jsonl"
 DEFAULT_OUTPUT = HERE / "artifacts" / "dataset"
 SPLITS = ("train", "validation", "test")
-EXPECTED_PER_INTENT = {"train": 14, "validation": 6, "test": 4}
-AUGMENTATIONS_PER_TRAINING_ROW = 1
-INJECTION_AUGMENTATIONS_PER_TRAINING_ROW = 1
+EXPECTED_PER_INTENT = {"train": 20, "validation": 6, "test": 4}
+AUGMENTATIONS_PER_TRAINING_ROW = 2
+INJECTION_AUGMENTATIONS_PER_TRAINING_ROW = 2
 AUGMENTATIONS_PER_VALIDATION_ROW = 1
 AMBIGUOUS_INJECTION_CONFIDENCE_CAP = 0.42
 CLEAR_INJECTION_CONFIDENCE_CAP = 0.75
+OUT_OF_TAXONOMY_DECOYS = (
+    "STORAGE",
+    "HEALTH",
+    "SHIPPING",
+    "OTP",
+    "PROMOTION",
+    "PAYMENT",
+    "MESSAGE",
+    "UNKNOWN",
+)
 
 
 def load_source(path: Path) -> list[dict[str, Any]]:
@@ -45,8 +55,8 @@ def augment_training_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     expanded = list(rows)
     generated_path = Path("<synthetic-augmentation>")
-    family_index_by_id = {
-        row["id"]: index % 4
+    source_index_by_id = {
+        row["id"]: index
         for split in ("train", "validation")
         for index, row in enumerate(
             sorted(
@@ -57,17 +67,28 @@ def augment_training_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     }
     for row in rows:
         if row["split"] == "train":
+            calibrates_closed_taxonomy = row["id"].endswith("-train-09")
             variants = [
                 _training_injection_variant(
                     row,
-                    family_index_by_id[row["id"]],
+                    (
+                        2 * source_index_by_id[row["id"]]
+                        + augmentation_index
+                    )
+                    % 4,
+                    use_out_of_taxonomy_decoy=(
+                        calibrates_closed_taxonomy and augmentation_index == 1
+                    ),
+                )
+                for augmentation_index in range(
+                    INJECTION_AUGMENTATIONS_PER_TRAINING_ROW
                 )
             ]
         elif row["split"] == "validation":
             variants = [
                 _validation_injection_variant(
                     row,
-                    family_index_by_id[row["id"]],
+                    source_index_by_id[row["id"]] % 4,
                 )
             ]
         else:
@@ -86,6 +107,12 @@ def augment_training_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             tags = [*row["tags"], "augmented", variant_tag]
             if is_injection:
                 tags.append("prompt-injection")
+            if (
+                row["split"] == "train"
+                and row["id"].endswith("-train-09")
+                and variant_index == 1
+            ):
+                tags.append("out-of-taxonomy-decoy")
             augmented = {
                 **row,
                 "id": (
@@ -110,13 +137,25 @@ def augment_training_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _training_injection_variant(
     row: dict[str, Any],
     family_index: int,
+    *,
+    use_out_of_taxonomy_decoy: bool,
 ) -> tuple[str, str, bool]:
     text = row["text"]
     locale = row["locale"]
     digest = hashlib.sha256(row["id"].encode("utf-8")).digest()
-    intent_index = INTENTS.index(row["intent"])
-    decoy_offset = digest[1] % (len(INTENTS) - 1) + 1
-    decoy = INTENTS[(intent_index + decoy_offset) % len(INTENTS)]
+    if use_out_of_taxonomy_decoy:
+        if row["intent"] == "OTHER":
+            decoy = "STORAGE"
+        else:
+            calibration_index = INTENTS.index(row["intent"]) * 2
+            calibration_index += 0 if row["locale"] == "en" else 1
+            decoy = OUT_OF_TAXONOMY_DECOYS[
+                1 + calibration_index % (len(OUT_OF_TAXONOMY_DECOYS) - 1)
+            ]
+    else:
+        intent_index = INTENTS.index(row["intent"])
+        decoy_offset = digest[1] % (len(INTENTS) - 1) + 1
+        decoy = INTENTS[(intent_index + decoy_offset) % len(INTENTS)]
     if locale == "en":
         variants = (
             (

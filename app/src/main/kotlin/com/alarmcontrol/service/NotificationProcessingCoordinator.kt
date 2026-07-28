@@ -122,10 +122,21 @@ internal class NotificationProcessingCoordinator(
     }
 
     fun invalidateAll() {
+        invalidateAllAndUpdate {}
+    }
+
+    /**
+     * Invalidates every existing token and publishes related listener state at one linearization
+     * point. New submissions can only run against [update]'s completed state.
+     */
+    fun invalidateAllAndUpdate(update: () -> Unit) {
         val activeJobs =
             synchronized(lock) {
                 generationSource.incrementAndGet()
-                entries.values.mapNotNull(WorkEntry::job).also { entries.clear() }
+                entries.values.mapNotNull(WorkEntry::job).also {
+                    entries.clear()
+                    update()
+                }
             }
         activeJobs.forEach(Job::cancel)
     }

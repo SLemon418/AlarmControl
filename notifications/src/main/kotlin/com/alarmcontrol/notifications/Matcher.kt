@@ -9,6 +9,7 @@ import com.alarmcontrol.core.filtering.MAX_PERSISTED_TRACE_NODES
 import com.alarmcontrol.core.filtering.NotificationSnapshot
 import com.alarmcontrol.core.filtering.Rule
 import com.alarmcontrol.core.filtering.RuleExecutionMode
+import com.alarmcontrol.core.filtering.SemanticIntent
 
 /**
  * Pure, framework-free rule engine (CLAUDE.md §4/§6): given a [NotificationSnapshot] and the set of
@@ -65,6 +66,19 @@ class Matcher {
         snapshot: NotificationSnapshot,
         compiled: CompiledRuleSet,
     ): MatchDecision = evaluateRules(snapshot, compiled.monitorRules)
+
+    /**
+     * Reports whether trusted semantic inference could let an unresolved higher-priority rule
+     * preempt the lane's current first match. Active and monitor lanes are considered independently.
+     */
+    fun semanticResolutionRequirements(
+        snapshot: NotificationSnapshot,
+        compiled: CompiledRuleSet,
+    ): SemanticResolutionRequirements =
+        SemanticResolutionRequirements(
+            activeNeedsSemantic = laneNeedsSemantic(snapshot, compiled.activeRules),
+            monitorNeedsSemantic = laneNeedsSemantic(snapshot, compiled.monitorRules),
+        )
 
     /**
      * Evaluates both lanes while building the selected rules' traces from the same short-circuiting
@@ -192,7 +206,31 @@ class Matcher {
         val matched = rules.firstOrNull { it.condition.evaluate(snapshot) == ConditionResult.MATCH }
         return matched?.let { MatchDecision.Matched(it, it.action) } ?: MatchDecision.NoMatch
     }
+
+    private fun laneNeedsSemantic(
+        snapshot: NotificationSnapshot,
+        rules: List<Rule>,
+    ): Boolean {
+        for (rule in rules) {
+            if (rule.condition.evaluate(snapshot) == ConditionResult.MATCH) return false
+            if (rule.condition.canMatchWithTrustedSemantic(snapshot)) return true
+        }
+        return false
+    }
 }
+
+private fun Condition.canMatchWithTrustedSemantic(snapshot: NotificationSnapshot): Boolean =
+    SemanticIntent.entries
+        .asSequence()
+        .filterNot { it == SemanticIntent.AMBIGUOUS }
+        .any { intent ->
+            evaluate(
+                snapshot.copy(
+                    semanticIntent = intent,
+                    isAdvertisement = intent.isAdvertisement,
+                ),
+            ) == ConditionResult.MATCH
+        }
 
 private fun EvaluatedCondition.toDecisionTrace(
     lane: DecisionTraceLane,

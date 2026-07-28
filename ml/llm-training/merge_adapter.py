@@ -17,9 +17,16 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 def validate_inputs(base_model: Path, adapter_checkpoint: Path) -> None:
     if not base_model.is_dir():
         raise SystemExit(f"Base model directory not found: {base_model}")
-    for required in ("config.json", "tokenizer.model"):
-        if not (base_model / required).is_file():
-            raise SystemExit(f"Base model is missing {required}: {base_model}")
+    if not (base_model / "config.json").is_file():
+        raise SystemExit(f"Base model is missing config.json: {base_model}")
+    if not any(
+        (base_model / name).is_file()
+        for name in ("tokenizer.json", "tokenizer.model")
+    ):
+        raise SystemExit(
+            "Base model is missing tokenizer.json or tokenizer.model: "
+            f"{base_model}"
+        )
     if not any(base_model.glob("model*.safetensors")):
         raise SystemExit(f"Base model has no safetensors weights: {base_model}")
 
@@ -69,10 +76,12 @@ def merge_adapter(
         max_shard_size="2GB",
     )
     tokenizer.save_pretrained(str(output_dir))
-    shutil.copy2(
-        base_model / "tokenizer.model",
-        output_dir / "tokenizer.model",
-    )
+    tokenizer_model = base_model / "tokenizer.model"
+    if tokenizer_model.is_file():
+        shutil.copy2(
+            tokenizer_model,
+            output_dir / "tokenizer.model",
+        )
 
 
 def parse_args() -> argparse.Namespace:

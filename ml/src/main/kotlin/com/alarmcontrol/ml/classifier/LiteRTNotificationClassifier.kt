@@ -7,6 +7,8 @@ import com.alarmcontrol.ml.feature.FeatureExtractor
 import com.alarmcontrol.ml.feedback.FeedbackBlender
 import com.alarmcontrol.ml.feedback.NoOpFeedbackBlender
 import com.alarmcontrol.ml.inference.InferenceBackend
+import com.alarmcontrol.ml.semantic.BoundedSemanticInferenceRunner
+import com.alarmcontrol.ml.semantic.SemanticInferenceRunner
 import kotlinx.coroutines.CancellationException
 
 /**
@@ -25,12 +27,15 @@ internal class LiteRTNotificationClassifier(
     private val labels: List<String>,
     private val confidenceThreshold: Float,
     private val feedbackBlender: FeedbackBlender = NoOpFeedbackBlender,
+    private val inferenceRunner: SemanticInferenceRunner = BoundedSemanticInferenceRunner(),
 ) : NotificationClassifier {
     override suspend fun classify(snapshot: NotificationSnapshot): ClassificationResult? {
         val content = snapshot.classifiableText() ?: return null
         val rawScores =
             try {
-                backend.run(featureExtractor.extract(content))
+                inferenceRunner.run {
+                    backend.run(featureExtractor.extract(content))
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (_: LinkageError) {

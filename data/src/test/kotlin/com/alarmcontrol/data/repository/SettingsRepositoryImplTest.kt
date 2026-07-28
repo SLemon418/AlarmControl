@@ -3,6 +3,7 @@ package com.alarmcontrol.data.repository
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -204,29 +205,23 @@ class SettingsRepositoryImplTest {
         }
 
     @Test
-    fun `LLM automatic actions are separately opted in and default off`() =
+    fun `retired LLM automatic actions always read false and legacy writes are cleared`() =
         runTest {
-            val repository = repository()
-            repository.setLlmAnalysisEnabled(true)
+            val dataStore =
+                PreferenceDataStoreFactory.create {
+                    File(tempFolder.root, "legacy-llm-auto-actions.preferences_pb")
+                }
+            val legacyKey = booleanPreferencesKey("llm_auto_actions_enabled")
+            dataStore.edit { preferences -> preferences[legacyKey] = true }
+            val repository = SettingsRepositoryImpl(dataStore, NotificationContentAccessGuard())
+
             assertFalse(repository.llmAutoActionsEnabled.first())
+            assertFalse(repository.snapshot().llmAutoActionsEnabled)
 
             repository.setLlmAutoActionsEnabled(true)
 
-            assertTrue(repository.llmAutoActionsEnabled.first())
-        }
-
-    @Test
-    fun `disabling LLM analysis also revokes automatic actions`() =
-        runTest {
-            val repository = repository()
-            repository.setLlmAnalysisEnabled(true)
-            repository.setLlmAutoActionsEnabled(true)
-
-            repository.setLlmAnalysisEnabled(false)
-
-            assertFalse(repository.llmAnalysisEnabled.first())
             assertFalse(repository.llmAutoActionsEnabled.first())
-            assertTrue(runCatching { repository.setLlmAutoActionsEnabled(true) }.isFailure)
+            assertEquals(null, dataStore.data.first()[legacyKey])
         }
 
     @Test
@@ -279,7 +274,7 @@ class SettingsRepositoryImplTest {
     fun `snapshot and restore round-trip all portable preferences atomically`() =
         runTest {
             val repository = repository()
-            val expected =
+            val legacyInput =
                 SettingsSnapshot(
                     filteringEnabled = false,
                     externalAutomationEnabled = true,
@@ -289,8 +284,11 @@ class SettingsRepositoryImplTest {
                     dailyInsightRetentionDays = 730,
                 )
 
-            repository.restore(expected)
+            repository.restore(legacyInput)
 
-            assertEquals(expected, repository.snapshot())
+            assertEquals(
+                legacyInput.copy(llmAutoActionsEnabled = false),
+                repository.snapshot(),
+            )
         }
 }

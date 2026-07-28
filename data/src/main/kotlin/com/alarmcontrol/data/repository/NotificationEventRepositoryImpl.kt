@@ -8,6 +8,7 @@ import com.alarmcontrol.core.filtering.MAX_NOTIFICATION_HISTORY_PAGE_SIZE
 import com.alarmcontrol.core.filtering.MAX_NOTIFICATION_HISTORY_SOURCE_COUNT
 import com.alarmcontrol.core.filtering.NotificationContent
 import com.alarmcontrol.core.filtering.NotificationContentState
+import com.alarmcontrol.core.filtering.NotificationDecisionEnrichment
 import com.alarmcontrol.core.filtering.NotificationEvent
 import com.alarmcontrol.core.filtering.NotificationEventDetail
 import com.alarmcontrol.core.filtering.NotificationEventRepository
@@ -31,6 +32,7 @@ import com.alarmcontrol.data.mapper.toDomain
 import com.alarmcontrol.data.mapper.toEncryptedContent
 import com.alarmcontrol.data.mapper.toEntity
 import com.alarmcontrol.data.mapper.toStored
+import com.alarmcontrol.data.mapper.toStoredType
 import com.alarmcontrol.data.security.NotificationContentAccessGuard
 import com.alarmcontrol.data.security.NotificationContentCipher
 import com.alarmcontrol.data.security.NotificationContentCodec
@@ -90,6 +92,23 @@ class NotificationEventRepositoryImpl
                         ).toString()
                 }
             }
+
+        override suspend fun enrichRecordedDecision(
+            eventId: String,
+            enrichment: NotificationDecisionEnrichment,
+        ) {
+            val storedEventId = eventId.toLongOrNull() ?: return
+            withContext(ioDispatcher) {
+                eventDao.updatePostCommitEnrichmentWithTrace(
+                    eventId = storedEventId,
+                    mlCategory = enrichment.mlCategory,
+                    mlConfidence = enrichment.mlConfidence,
+                    monitoredRuleId = enrichment.monitoredRuleId?.toLongOrNull(),
+                    monitoredAction = enrichment.monitoredAction?.toStoredType(),
+                    trace = enrichment.decisionTrace.map { it.toEntity() },
+                )
+            }
+        }
 
         override fun observeRecent(limit: Int): Flow<List<NotificationEvent>> =
             eventDao

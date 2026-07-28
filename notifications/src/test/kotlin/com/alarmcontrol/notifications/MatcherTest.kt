@@ -12,6 +12,7 @@ import com.alarmcontrol.core.filtering.RuleAction
 import com.alarmcontrol.core.filtering.RuleExecutionMode
 import com.alarmcontrol.core.filtering.SemanticIntent
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -257,6 +258,192 @@ class MatcherTest {
             MatchDecision.Matched(monitor, RuleAction.Cancel),
             matcher.evaluateMonitor(alarmNotification, compiled),
         )
+    }
+
+    @Test
+    fun `semantic resolution requirements keep active and monitor lanes independent`() {
+        val activeSemantic =
+            rule(
+                "active-semantic",
+                Condition.SemanticIntentEquals(SemanticIntent.MARKETING),
+                priority = 10,
+            )
+        val activeFallback = rule("active-fallback", Condition.CategoryEquals("alarm"), priority = 1)
+        val monitorStable =
+            rule(
+                "monitor-stable",
+                Condition.CategoryEquals("alarm"),
+                priority = 10,
+                mode = RuleExecutionMode.MONITOR,
+            )
+
+        val activeOnly =
+            matcher.semanticResolutionRequirements(
+                alarmNotification,
+                matcher.compile(listOf(activeSemantic, activeFallback, monitorStable)),
+            )
+
+        assertTrue(activeOnly.activeNeedsSemantic)
+        assertFalse(activeOnly.monitorNeedsSemantic)
+        assertTrue(activeOnly.any)
+
+        val activeStable = rule("active-stable", Condition.CategoryEquals("alarm"), priority = 10)
+        val monitorSemantic =
+            rule(
+                "monitor-semantic",
+                Condition.SemanticIntentEquals(SemanticIntent.SECURITY),
+                priority = 10,
+                mode = RuleExecutionMode.MONITOR,
+            )
+        val monitorFallback =
+            rule(
+                "monitor-fallback",
+                Condition.CategoryEquals("alarm"),
+                priority = 1,
+                mode = RuleExecutionMode.MONITOR,
+            )
+
+        val monitorOnly =
+            matcher.semanticResolutionRequirements(
+                alarmNotification,
+                matcher.compile(listOf(activeStable, monitorSemantic, monitorFallback)),
+            )
+
+        assertFalse(monitorOnly.activeNeedsSemantic)
+        assertTrue(monitorOnly.monitorNeedsSemantic)
+        assertTrue(monitorOnly.any)
+    }
+
+    @Test
+    fun `stable higher priority non semantic match avoids semantic resolution`() {
+        val stable = rule("stable", Condition.CategoryEquals("alarm"), priority = 100)
+        val lowerSemantic =
+            rule(
+                "lower-semantic",
+                Condition.SemanticIntentEquals(SemanticIntent.MARKETING),
+                priority = 10,
+            )
+
+        val requirements =
+            matcher.semanticResolutionRequirements(
+                alarmNotification,
+                matcher.compile(listOf(lowerSemantic, stable)),
+            )
+
+        assertFalse(requirements.activeNeedsSemantic)
+        assertFalse(requirements.any)
+    }
+
+    @Test
+    fun `higher nested semantic rule can preempt current match`() {
+        val higherSemantic =
+            rule(
+                "higher-semantic",
+                Condition.AnyOf(
+                    listOf(
+                        Condition.AllOf(
+                            listOf(
+                                Condition.SemanticIntentEquals(SemanticIntent.SECURITY),
+                                Condition.Not(Condition.IsAdvertisement(true)),
+                            ),
+                        ),
+                        Condition.PackageEquals("com.example.other"),
+                    ),
+                ),
+                priority = 100,
+            )
+        val fallback = rule("fallback", Condition.CategoryEquals("alarm"), priority = 10)
+
+        val requirements =
+            matcher.semanticResolutionRequirements(
+                alarmNotification,
+                matcher.compile(listOf(fallback, higherSemantic)),
+            )
+
+        assertTrue(requirements.activeNeedsSemantic)
+        assertTrue(requirements.any)
+    }
+
+    @Test
+    fun `false non semantic branch makes higher semantic rule impossible`() {
+        val impossible =
+            rule(
+                "impossible",
+                Condition.AllOf(
+                    listOf(
+                        Condition.CategoryEquals("message"),
+                        Condition.SemanticIntentEquals(SemanticIntent.MARKETING),
+                    ),
+                ),
+                priority = 100,
+            )
+        val fallback = rule("fallback", Condition.CategoryEquals("alarm"), priority = 10)
+
+        val requirements =
+            matcher.semanticResolutionRequirements(
+                alarmNotification,
+                matcher.compile(listOf(fallback, impossible)),
+            )
+
+        assertFalse(requirements.activeNeedsSemantic)
+        assertFalse(requirements.any)
+    }
+
+    @Test
+    fun `advertisement mapping stays consistent with candidate semantic intent`() {
+        val advertisement =
+            rule(
+                "advertisement",
+                Condition.IsAdvertisement(true),
+                priority = 100,
+            )
+        val fallback = rule("fallback", Condition.CategoryEquals("alarm"), priority = 10)
+
+        val advertisementRequirements =
+            matcher.semanticResolutionRequirements(
+                alarmNotification,
+                matcher.compile(listOf(fallback, advertisement)),
+            )
+        assertTrue(advertisementRequirements.activeNeedsSemantic)
+
+        val contradictory =
+            rule(
+                "contradictory",
+                Condition.AllOf(
+                    listOf(
+                        Condition.SemanticIntentEquals(SemanticIntent.MARKETING),
+                        Condition.IsAdvertisement(false),
+                    ),
+                ),
+                priority = 100,
+            )
+        val contradictoryRequirements =
+            matcher.semanticResolutionRequirements(
+                alarmNotification,
+                matcher.compile(listOf(fallback, contradictory)),
+            )
+
+        assertFalse(contradictoryRequirements.activeNeedsSemantic)
+    }
+
+    @Test
+    fun `ambiguous semantic intent cannot trigger resolution`() {
+        val ambiguous =
+            rule(
+                "ambiguous",
+                Condition.SemanticIntentEquals(SemanticIntent.AMBIGUOUS),
+                priority = 100,
+            )
+        val fallback = rule("fallback", Condition.CategoryEquals("alarm"), priority = 10)
+
+        val requirements =
+            matcher.semanticResolutionRequirements(
+                alarmNotification,
+                matcher.compile(listOf(fallback, ambiguous)),
+            )
+
+        assertFalse(requirements.activeNeedsSemantic)
+        assertFalse(requirements.any)
     }
 
     @Test

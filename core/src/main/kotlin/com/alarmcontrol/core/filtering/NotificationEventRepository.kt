@@ -15,6 +15,15 @@ interface NotificationEventRepository {
         content: NotificationContent? = null,
     ): String
 
+    /**
+     * Adds best-effort monitor/classifier metadata to an already persisted decision. This contract
+     * deliberately cannot change the committed active action or matched rule.
+     */
+    suspend fun enrichRecordedDecision(
+        eventId: String,
+        enrichment: NotificationDecisionEnrichment,
+    ) = Unit
+
     /** Streams the most recent decisions (newest first), capped at [limit], for the activity feed. */
     fun observeRecent(limit: Int): Flow<List<NotificationEvent>>
 
@@ -78,6 +87,15 @@ interface NotificationEventRepository {
     /** Deletes encrypted title/body payloads older than [cutoffMillis], retaining event metadata. */
     suspend fun purgeEncryptedContentOlderThan(cutoffMillis: Long): Int
 }
+
+/** Content-free metadata that may finish after the active notification action has committed. */
+data class NotificationDecisionEnrichment(
+    val mlCategory: String?,
+    val mlConfidence: Float?,
+    val monitoredRuleId: String?,
+    val monitoredAction: RuleAction?,
+    val decisionTrace: List<DecisionTraceNode>,
+)
 
 data class NotificationEventTimeBounds(
     val oldestPostedAtMillis: Long,

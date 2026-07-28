@@ -48,7 +48,6 @@ class MergeAdapterTest(unittest.TestCase):
     def test_validation_requires_base_model_artifacts(self) -> None:
         cases = (
             ("config.json", "missing config.json"),
-            ("tokenizer.model", "missing tokenizer.model"),
             ("model.safetensors", "no safetensors weights"),
         )
         for missing, message in cases:
@@ -58,6 +57,27 @@ class MergeAdapterTest(unittest.TestCase):
 
                 with self.assertRaisesRegex(SystemExit, message):
                     validate_inputs(base_model, adapter_checkpoint)
+
+    def test_validation_accepts_fast_tokenizer_without_sentencepiece_file(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base_model, adapter_checkpoint = create_valid_inputs(Path(temporary))
+            (base_model / "tokenizer.model").unlink()
+            (base_model / "tokenizer.json").write_text("{}", encoding="utf-8")
+
+            validate_inputs(base_model, adapter_checkpoint)
+
+    def test_validation_requires_some_tokenizer_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base_model, adapter_checkpoint = create_valid_inputs(Path(temporary))
+            (base_model / "tokenizer.model").unlink()
+
+            with self.assertRaisesRegex(
+                SystemExit,
+                "missing tokenizer.json or tokenizer.model",
+            ):
+                validate_inputs(base_model, adapter_checkpoint)
 
     def test_validation_requires_adapter_checkpoint_artifacts(self) -> None:
         cases = (

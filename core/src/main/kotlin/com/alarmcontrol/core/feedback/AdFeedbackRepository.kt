@@ -4,8 +4,8 @@ import com.alarmcontrol.core.filtering.SemanticIntent
 import kotlinx.coroutines.flow.Flow
 
 /**
- * Local, content-free LLM ad observations and explicit user verdicts. Neither prompts, notification
- * text, nor model reasoning are persisted; only package-level metadata and numeric output remain.
+ * Local, content-free semantic-model observations and explicit user verdicts. Neither notification
+ * text nor generative reasoning is persisted; only package-level metadata and numeric output remain.
  */
 interface AdFeedbackRepository {
     suspend fun recordObservation(observation: AdObservation)

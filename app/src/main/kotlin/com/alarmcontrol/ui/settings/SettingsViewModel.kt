@@ -23,6 +23,7 @@ import com.alarmcontrol.core.result.DataResult
 import com.alarmcontrol.core.result.runCatchingPreservingCancellation
 import com.alarmcontrol.core.settings.SemanticAnalysisScope
 import com.alarmcontrol.core.settings.SettingsRepository
+import com.alarmcontrol.ml.llm.LlmBackgroundAnalysisEligibility
 import com.alarmcontrol.ml.llm.LlmFailure
 import com.alarmcontrol.ml.llm.LlmInitState
 import com.alarmcontrol.ml.llm.LlmModelInfo
@@ -76,11 +77,13 @@ class SettingsViewModel
         private var pendingRestore: PendingRestore? = null
         private val backupImportGeneration = AtomicLong()
         private val appHealth = MutableStateFlow<AppHealthSnapshot?>(null)
+        private val llmBackgroundAnalysisAvailable =
+            llmManager.backgroundAnalysisEligibility ==
+                LlmBackgroundAnalysisEligibility.VERIFIED_COMPATIBLE
 
         private val storedSettings =
             combine(
                 settingsRepository.llmAnalysisEnabled,
-                settingsRepository.llmAutoActionsEnabled,
                 settingsRepository.semanticAnalysisScope,
                 ::LlmSettings,
             ).let { llmSettings ->
@@ -140,7 +143,6 @@ class SettingsViewModel
                         automation.enabled,
                         automation.token,
                         llm.enabled,
-                        llm.autoActions,
                         llm.scope,
                         retention.eventDays,
                         retention.insightDays,
@@ -176,7 +178,7 @@ class SettingsViewModel
                     externalAutomationToken = settings.automationToken,
                     automationAudit = healthAndAudit.audit,
                     llmAnalysisEnabled = settings.llmEnabled,
-                    llmAutoActionsEnabled = settings.llmAutoActions,
+                    llmBackgroundAnalysisAvailable = llmBackgroundAnalysisAvailable,
                     semanticAnalysisScope = settings.semanticScope,
                     eventRetentionDays = settings.eventDays,
                     dailyInsightRetentionDays = settings.insightDays,
@@ -239,18 +241,18 @@ class SettingsViewModel
         }
 
         fun setLlmAnalysisEnabled(enabled: Boolean) {
+            if (enabled && !llmBackgroundAnalysisAvailable) {
+                messages.value = uiText(R.string.message_llm_background_unverified)
+                return
+            }
             launchSettingUpdate {
                 settingsRepository.setLlmAnalysisEnabled(enabled)
-                if (!enabled) settingsRepository.setLlmAutoActionsEnabled(false)
-                if (enabled) llmManager.initialize() else llmManager.close()
+                if (!enabled) llmManager.close()
             }
         }
 
-        fun setLlmAutoActionsEnabled(enabled: Boolean) {
-            launchSettingUpdate { settingsRepository.setLlmAutoActionsEnabled(enabled) }
-        }
-
         fun setSemanticAnalysisScope(scope: SemanticAnalysisScope) {
+            if (!llmBackgroundAnalysisAvailable) return
             launchSettingUpdate { settingsRepository.setSemanticAnalysisScope(scope) }
         }
 
@@ -324,7 +326,6 @@ class SettingsViewModel
                     // cancel/snooze rules survive.
                     attempt { settingsRepository.setFilteringEnabled(false) }
                     attempt { settingsRepository.setNotificationContentStorageEnabled(false) }
-                    attempt { settingsRepository.setLlmAutoActionsEnabled(false) }
                     attempt { settingsRepository.setLlmAnalysisEnabled(false) }
                     attempt { settingsRepository.setExternalAutomationEnabled(false) }
                     attempt { llmManager.close() }
@@ -502,9 +503,7 @@ class SettingsViewModel
                         }
                     messages.value = result.restoreMessage()
                     if (result is DataResult.Success && result.data.settingsRestored) {
-                        if (settingsRepository.llmAnalysisEnabled.first()) {
-                            llmManager.initialize()
-                        } else {
+                        if (!settingsRepository.llmAnalysisEnabled.first()) {
                             llmManager.close()
                         }
                     }
@@ -603,7 +602,6 @@ class SettingsViewModel
             val automation: Boolean,
             val automationToken: String,
             val llmEnabled: Boolean,
-            val llmAutoActions: Boolean,
             val semanticScope: SemanticAnalysisScope,
             val eventDays: Int,
             val insightDays: Int,
@@ -620,7 +618,6 @@ class SettingsViewModel
 
         private data class LlmSettings(
             val enabled: Boolean,
-            val autoActions: Boolean,
             val scope: SemanticAnalysisScope,
         )
 

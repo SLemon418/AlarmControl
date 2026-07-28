@@ -6,11 +6,15 @@ import com.alarmcontrol.core.coroutines.ApplicationScope
 import com.alarmcontrol.core.coroutines.Dispatcher
 import com.alarmcontrol.core.feedback.AdFeedbackRepository
 import com.alarmcontrol.core.feedback.FeedbackRepository
+import com.alarmcontrol.core.filtering.SemanticIntent
 import com.alarmcontrol.ml.MlConfig
 import com.alarmcontrol.ml.NotificationCategories
 import com.alarmcontrol.ml.NotificationClassifier
+import com.alarmcontrol.ml.SemanticNotificationClassifier
 import com.alarmcontrol.ml.asset.ModelAssets
 import com.alarmcontrol.ml.classifier.LiteRTNotificationClassifier
+import com.alarmcontrol.ml.classifier.LiteRTSemanticNotificationClassifier
+import com.alarmcontrol.ml.classifier.UnavailableSemanticNotificationClassifier
 import com.alarmcontrol.ml.feature.BagOfWordsFeatureExtractor
 import com.alarmcontrol.ml.feedback.RepositoryFeedbackBlender
 import com.alarmcontrol.ml.inference.BundledTfLiteBackend
@@ -20,6 +24,10 @@ import com.alarmcontrol.ml.llm.LocalLlmModelStore
 import com.alarmcontrol.ml.llm.MediaPipeLlmEngine
 import com.alarmcontrol.ml.llm.OnDeviceLlmManager
 import com.alarmcontrol.ml.llm.RepositoryLlmFeedbackAdjuster
+import com.alarmcontrol.ml.semantic.LiteRTSemanticEncoder
+import com.alarmcontrol.ml.semantic.RepositorySemanticFeedbackBlender
+import com.alarmcontrol.ml.semantic.SemanticModelAssets
+import com.alarmcontrol.ml.semantic.WordPieceTokenizer
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -55,6 +63,53 @@ object MlModule {
             labels = labels,
             confidenceThreshold = MlConfig.CONFIDENCE_THRESHOLD,
             feedbackBlender = RepositoryFeedbackBlender.from(feedbackRepository, applicationScope),
+        )
+    }
+
+    @Provides
+    @Singleton
+    fun provideSemanticNotificationClassifier(
+        @ApplicationContext context: Context,
+        adFeedbackRepository: AdFeedbackRepository,
+        @ApplicationScope applicationScope: CoroutineScope,
+    ): SemanticNotificationClassifier {
+        val assets =
+            SemanticModelAssets.load(
+                context = context,
+                manifestAsset = MlConfig.SEMANTIC_MODEL_MANIFEST_ASSET,
+                modelAsset = MlConfig.SEMANTIC_MODEL_ASSET,
+                vocabularyAsset = MlConfig.SEMANTIC_VOCAB_ASSET,
+                labelsAsset = MlConfig.SEMANTIC_LABELS_ASSET,
+            )
+                ?: return UnavailableSemanticNotificationClassifier
+        val labels = assets.labels
+        if (labels != SemanticIntent.entries.toList()) {
+            return UnavailableSemanticNotificationClassifier
+        }
+        val encoder =
+            LiteRTSemanticEncoder(
+                context = context,
+                modelAsset = MlConfig.SEMANTIC_MODEL_ASSET,
+                tokenizer =
+                    WordPieceTokenizer(
+                        vocabulary = assets.vocabulary,
+                        maxSequenceLength = assets.maxSequenceLength,
+                    ),
+                maxSequenceLength = assets.maxSequenceLength,
+                outputSize = labels.size,
+                expectedInputNames = assets.inputNames,
+                expectedModelSha256 = assets.modelSha256,
+                expectedModelSizeBytes = assets.modelSizeBytes,
+            )
+        return LiteRTSemanticNotificationClassifier(
+            encoder = encoder,
+            labels = labels,
+            confidenceThresholds = assets.confidenceThresholds,
+            feedbackBlender =
+                RepositorySemanticFeedbackBlender.from(
+                    adFeedbackRepository,
+                    applicationScope,
+                ),
         )
     }
 

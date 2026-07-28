@@ -33,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=HERE / "release" / "alarmcontrol-gemma3-270m-dynint8.zip",
+        default=HERE / "release" / "alarmcontrol-gemma3-1b-dynint8.zip",
     )
     return parser.parse_args()
 
@@ -52,7 +52,10 @@ def main() -> None:
     if task.stat().st_size >= MAX_APP_MODEL_BYTES:
         raise SystemExit("Task is at or above AlarmControl's 4 GiB import limit")
     model_card_text = model_card.read_text(encoding="utf-8")
-    if "Replace this section" in model_card_text or "Paste the generated" in model_card_text:
+    if (
+        "Replace this section" in model_card_text
+        or "Record separately labeled" in model_card_text
+    ):
         raise SystemExit("Complete the model card and evaluation record before release")
 
     output = args.output.resolve()

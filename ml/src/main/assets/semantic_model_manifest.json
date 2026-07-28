@@ -1,0 +1,110 @@
+{
+  "conversion": {
+    "quantization": {
+      "applied": "dynamic-int8",
+      "calibration_used": false,
+      "experimental_backend": true,
+      "fallback_reason": null,
+      "requested": "dynamic-int8"
+    },
+    "quantization_audit": {
+      "int8_tensor_count": 99,
+      "method": "litert-interpreter-tensor-and-operator-inspection",
+      "operator_count": 750,
+      "passed": true,
+      "quantize_operator_count": 24,
+      "schema_version": "koelectra-dynamic-int8-audit-v1",
+      "tensor_count": 1071
+    },
+    "tensor_contract": {
+      "inputs": [
+        {
+          "dtype": "int32",
+          "name": "input_ids",
+          "shape": [
+            1,
+            128
+          ]
+        },
+        {
+          "dtype": "int32",
+          "name": "attention_mask",
+          "shape": [
+            1,
+            128
+          ]
+        }
+      ],
+      "output": {
+        "dtype": "float32",
+        "name": "output_0_output",
+        "shape": [
+          1,
+          7
+        ]
+      }
+    }
+  },
+  "evaluation_provenance": {
+    "development_test": {
+      "backend": "tensorflow-lite",
+      "model_artifact_sha256": "3f79b38362e67087886cf70bf9ecd7abee4eb7daebc22b8f0489c6fdefef6b50",
+      "schema_version": "semantic-evaluation-provenance-v1",
+      "source_manifest_sha256": "3b6e35793f7d287016fdd0d5b06813adb801d9eb03132f8fc09e017abf1da40e",
+      "vocab_sha256": "9f50b0a44b0272dcf78bfd7a52a0815588f69918bb87ec60b21ca235c5aa0eb4"
+    },
+    "sealed_holdout": {
+      "backend": "tensorflow-lite",
+      "model_artifact_sha256": "3f79b38362e67087886cf70bf9ecd7abee4eb7daebc22b8f0489c6fdefef6b50",
+      "schema_version": "semantic-evaluation-provenance-v1",
+      "source_manifest_sha256": "ac413548b78161e8627f81066378daad6b98cd019e6f4400c8d48d8a3486e864",
+      "vocab_sha256": "9f50b0a44b0272dcf78bfd7a52a0815588f69918bb87ec60b21ca235c5aa0eb4"
+    },
+    "threshold_selection": {
+      "backend": "tensorflow-lite",
+      "model_artifact_sha256": "3f79b38362e67087886cf70bf9ecd7abee4eb7daebc22b8f0489c6fdefef6b50",
+      "schema_version": "semantic-evaluation-provenance-v1",
+      "source_manifest_sha256": "3b6e35793f7d287016fdd0d5b06813adb801d9eb03132f8fc09e017abf1da40e",
+      "vocab_sha256": "9f50b0a44b0272dcf78bfd7a52a0815588f69918bb87ec60b21ca235c5aa0eb4"
+    }
+  },
+  "evidence": {
+    "conversion_manifest_sha256": "f06b655a06ca2368e12a47970c36c385a2098562a67e5786062c7eb10906af25",
+    "development_test_gate_sha256": "bb8a8df6315baddbb02dd57de9eed02113049f33f2638bea4eae477f34ccea53",
+    "sealed_holdout_gate_sha256": "7552d1351deb9f2e029b8b37492755b0c0ab39e786fc903b944a06139e29cbb0",
+    "test_parity_report_sha256": "ac00d87f8ea76a501ec5fea3e046c86e3b5a6db814133c4f09d2e295212c9f7e",
+    "threshold_selection_sha256": "cb88028d294de241527c8e224913709357683cf9ed8bd34c912b389164dd4a86"
+  },
+  "files": {
+    "semantic_labels.txt": {
+      "sha256": "442692cd216ffdf3144f42870b04ad92bc5b2871da35a29eb14d7c7fd5e194b6",
+      "size_bytes": 65
+    },
+    "semantic_notification_classifier.tflite": {
+      "sha256": "3f79b38362e67087886cf70bf9ecd7abee4eb7daebc22b8f0489c6fdefef6b50",
+      "size_bytes": 47050248
+    },
+    "semantic_vocab.txt": {
+      "sha256": "9f50b0a44b0272dcf78bfd7a52a0815588f69918bb87ec60b21ca235c5aa0eb4",
+      "size_bytes": 263326
+    }
+  },
+  "general_threshold": 0.949999988079071,
+  "labels": [
+    "MARKETING",
+    "TRANSACTIONAL",
+    "SECURITY",
+    "DELIVERY",
+    "SOCIAL",
+    "OTHER",
+    "AMBIGUOUS"
+  ],
+  "marketing_threshold": 0.9917579889297485,
+  "max_sequence_length": 128,
+  "schema_version": "alarmcontrol-semantic-model-manifest-v2",
+  "tokenizer": {
+    "lowercase": false,
+    "normalization": "nfc",
+    "type": "bert-wordpiece"
+  }
+}

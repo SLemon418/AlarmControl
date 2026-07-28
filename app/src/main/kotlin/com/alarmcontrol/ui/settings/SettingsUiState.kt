@@ -11,7 +11,7 @@ data class SettingsUiState(
     val externalAutomationToken: String = "",
     val automationAudit: List<AutomationAuditUi> = emptyList(),
     val llmAnalysisEnabled: Boolean = false,
-    val llmAutoActionsEnabled: Boolean = false,
+    val llmBackgroundAnalysisAvailable: Boolean = false,
     val semanticAnalysisScope: SemanticAnalysisScope = SemanticAnalysisScope.RULES_ONLY,
     val eventRetentionDays: Int = 30,
     val dailyInsightRetentionDays: Int = 365,

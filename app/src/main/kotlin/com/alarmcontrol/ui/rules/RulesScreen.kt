@@ -1359,13 +1359,15 @@ private fun SemanticIntentSelector(
             onClick = { onChange(null) },
             label = { Text(stringResource(R.string.simulator_unknown)) },
         )
-        SemanticIntent.entries.forEach { intent ->
-            FilterChip(
-                selected = value == intent,
-                onClick = { onChange(intent) },
-                label = { Text(stringResource(intent.labelRes())) },
-            )
-        }
+        SemanticIntent.entries
+            .filterNot { it == SemanticIntent.AMBIGUOUS }
+            .forEach { intent ->
+                FilterChip(
+                    selected = value == intent,
+                    onClick = { onChange(intent) },
+                    label = { Text(stringResource(intent.labelRes())) },
+                )
+            }
     }
 }
 
@@ -1750,7 +1752,10 @@ private fun LeafValueEditor(
         LeafKind.SEMANTIC_INTENT ->
             EnumValueDropdown(
                 value = node.value,
-                values = SemanticIntent.entries.map { it.name },
+                values =
+                    SemanticIntent.entries
+                        .filterNot { it == SemanticIntent.AMBIGUOUS }
+                        .map { it.name },
                 onChange = { onChange(node.copy(value = it)) },
             )
         LeafKind.IMPORTANCE_AT_LEAST ->

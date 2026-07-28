@@ -306,6 +306,51 @@ class NotificationProcessingCoordinatorTest {
         }
 
     @Test
+    fun `bounded post-commit work cannot hold permits needed by a fifth active action`() =
+        runTest {
+            val coordinator =
+                NotificationProcessingCoordinator(
+                    scope = this,
+                    maxTrackedWork = 8,
+                    maxConcurrentWork = 4,
+                )
+            val postCommitStarted = CompletableDeferred<Unit>()
+            val releasePostCommit = CompletableDeferred<Unit>()
+            val postCommitQueue =
+                SemanticObservationQueue<Int>(this) {
+                    postCommitStarted.complete(Unit)
+                    releasePostCommit.await()
+                }
+            val committed = mutableSetOf<Int>()
+
+            try {
+                repeat(4) { index ->
+                    coordinator.submit("key-$index") { token ->
+                        if (token.commit { committed += index }) {
+                            postCommitQueue.offer(index)
+                        }
+                    }
+                }
+                postCommitStarted.await()
+                runCurrent()
+                assertTrue((0..3).all { it in committed })
+
+                coordinator.submit("fifth") { token ->
+                    if (token.commit { committed += 4 }) {
+                        postCommitQueue.offer(4)
+                    }
+                }
+                runCurrent()
+
+                assertTrue(4 in committed)
+            } finally {
+                releasePostCommit.complete(Unit)
+                postCommitQueue.close()
+            }
+            advanceUntilIdle()
+        }
+
+    @Test
     fun `invalidating all generations rejects a late commit`() =
         runTest {
             val coordinator = NotificationProcessingCoordinator(this)
@@ -325,6 +370,61 @@ class NotificationProcessingCoordinatorTest {
 
             assertFalse(committed)
         }
+
+    @Test
+    fun `state publication and generation invalidation are one boundary`() {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val coordinator = NotificationProcessingCoordinator(scope)
+        val updateStarted = CountDownLatch(1)
+        val releaseUpdate = CountDownLatch(1)
+        val updateReturned = CountDownLatch(1)
+        val submitReturned = CountDownLatch(1)
+        val newActionCommitted = CountDownLatch(1)
+        var state = "old"
+        var observedState: String? = null
+
+        try {
+            val updateThread =
+                thread(name = "listener-state-update") {
+                    coordinator.invalidateAllAndUpdate {
+                        updateStarted.countDown()
+                        check(releaseUpdate.await(TEST_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+                        state = "new"
+                    }
+                    updateReturned.countDown()
+                }
+            assertTrue(updateStarted.await(TEST_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+
+            val submitThread =
+                thread(name = "post-during-state-update") {
+                    coordinator.submit("new-generation") { token ->
+                        observedState = state
+                        token.commit(newActionCommitted::countDown)
+                    }
+                    submitReturned.countDown()
+                }
+            assertTrue(
+                awaitThreadBlockedOrReturned(
+                    thread = submitThread,
+                    returned = submitReturned,
+                ),
+            )
+            assertEquals(Thread.State.BLOCKED, submitThread.state)
+
+            releaseUpdate.countDown()
+            assertTrue(updateReturned.await(TEST_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+            assertTrue(submitReturned.await(TEST_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+            assertTrue(newActionCommitted.await(TEST_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+            assertEquals("new", observedState)
+            updateThread.join(TimeUnit.SECONDS.toMillis(TEST_TIMEOUT_SECONDS))
+            submitThread.join(TimeUnit.SECONDS.toMillis(TEST_TIMEOUT_SECONDS))
+            assertFalse(updateThread.isAlive)
+            assertFalse(submitThread.isAlive)
+        } finally {
+            releaseUpdate.countDown()
+            scope.cancel()
+        }
+    }
 
     private fun awaitThreadBlockedOrReturned(
         thread: Thread,

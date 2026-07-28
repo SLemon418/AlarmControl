@@ -7,8 +7,8 @@
 AlarmControl filters, mutes, and categorizes your notifications entirely on-device. Conceptually
 similar to FilterBox, it pairs a rule-based filtering engine with a lightweight on-device ML
 classifier that learns from your corrections — and it does all of this **without any network access
-whatsoever**. There is no cloud, no telemetry, and no account. Your notification data never leaves
-your phone.
+from the installed app**. There is no cloud, no telemetry, and no account. Your notification data
+never leaves your phone.
 
 > "Alarms" here means alarm-*category notifications* detected via `NotificationListenerService`. The
 > app does not schedule alarms or use `AlarmManager`; it can read, **cancel**, and **snooze**
@@ -60,30 +60,50 @@ your phone.
   One stray correction barely moves a confident model; consistent feedback gradually dominates. It's
   pure arithmetic over SQL-aggregated counts — no gradients, no backprop, nothing exported.
 
-### 🔎 Optional on-device semantic ad analysis
-- A **MediaPipe Tasks GenAI** layer can distinguish hidden promotional intent from transactional
-  notices such as bank withdrawals, shipping updates, and security codes.
-- Its strict local JSON contract exposes exactly seven intents: `MARKETING`, `TRANSACTIONAL`,
-  `SECURITY`, `DELIVERY`, `SOCIAL`, `OTHER`, and `AMBIGUOUS`. The legacy advertisement signal is a
-  compatibility view of `MARKETING`.
-- It is explicitly **opt-in and off by default**. The user selects a compatible quantized local model
-  through Android's Storage Access Framework; the app atomically copies it into private storage and
-  never downloads one.
-- A reproducible Gemma 3 fine-tuning, held-out evaluation, dynamic-INT8 conversion, and MediaPipe
+### 🔎 On-device semantic analysis
+- The real-time path stays rule-first. An **Active** rule receives priority inference before its
+  platform action only when semantic intent can change the decision. **Monitor**-only analysis runs
+  after the active decision is committed and can record an expected outcome but cannot change that
+  notification. The bounded single-runner queue lets real-time work displace only queued background
+  work, never running work or another queued real-time request.
+- The promoted bundled encoder is a 44.87 MiB dynamic-INT8 LiteRT model with 128-token WordPiece
+  inputs and seven logits: `MARKETING`, `TRANSACTIONAL`, `SECURITY`, `DELIVERY`, `SOCIAL`, `OTHER`,
+  and `AMBIGUOUS`. Its exact float32 trust thresholds are `0.949999988079071` generally and
+  `0.9917579889297485` for `MARKETING`. Local feedback cannot promote a raw non-marketing or
+  below-marketing-threshold prediction into a trusted marketing signal.
+- The model, vocabulary, labels, and deployment manifest are hash-bound as one four-file payload.
+  Missing or invalid assets, timeout, low confidence, and `AMBIGUOUS` all fail open; no generative
+  JSON or reasoning is on the notification action path. The final fresh-blind v8 aggregate gate
+  passed 420 balanced Korean, English, and mixed-language rows with raw macro-F1 `0.954401`,
+  MARKETING precision `1.000000`, trusted coverage `0.855556`, and zero trusted non-marketing to
+  MARKETING false positives.
+- The reproducible data, training, strict evaluation, LiteRT conversion, and asset packaging pipeline
+  lives in **[ml/semantic-training](ml/semantic-training/README.md)**. Explicit corrections feed the
+  existing seven-way local shrinkage prior without exporting notification data.
+- **MediaPipe Tasks GenAI** remains an optional, deferred observation layer. A late generative result
+  may update future corrections, statistics, or suggestions, but it never cancels or snoozes an
+  already handled notification.
+- The user may import a quantized local `.task` file through Android's Storage Access Framework; the
+  app atomically copies it into private storage and never downloads one. Automatic background use is
+  disabled unless this build has verified that exact model profile. At present no imported profile is
+  marked compatible, and Settings explains that state instead of silently enabling analysis.
+- A reproducible Gemma 3 fine-tuning, held-out evaluation, quantized conversion, and MediaPipe
   bundling kit lives in **[ml/llm-training](ml/llm-training/README.md)**. Base weights and generated
   artifacts remain external because access requires user-accepted terms and the model must pass
   physical-device validation before release.
+- Status as of 2026-07-29: the existing fine-tuned 270M checkpoint is below the release-quality
+  gates. A local macOS ARM64 static preflight also aborts while importing the Gemma 3/converter
+  modules because of an LLVM duplicate-option conflict, although the isolated KV-cache and export
+  configuration imports succeed. No 270M conversion, `.task`, MediaPipe Tasks GenAI `0.10.35`
+  compatibility, or device behavior has been established. The optional LLM therefore remains
+  unverified and manual; automatic background work has no compatible profile.
 - Import records a SHA-256 sidecar atomically with the model. Every later initialization verifies the
   complete local file before native loading; Settings shows the full fingerprint and clearly notes
   that integrity-after-import is not publisher certification. If the process stops midway through a
   replacement, the next initialization restores the last verified model; an incompatible activated
   replacement is also rolled back before inference resumes.
-- Inference runs only when an enabled rule actually needs the advertisement signal. Missing/corrupt
-  models, malformed output, low confidence, or an opted-out setting all resolve to "no signal", so
-  the classical classifier and deterministic rule engine continue to work.
-- Monitor rules may use an enabled LLM analysis path without changing a notification. Active
-  automatic actions still require the separate **LLM automatic actions** opt-in. Corrections use a
-  seven-class local shrinkage prior; old binary ad votes migrate to marketing/transactional votes.
+- Old binary advertisement votes migrate to marketing/transactional votes; generative reasoning and
+  notification content are never persisted in the observation table.
 
 ### 📊 On-device insights, analysis & notification records
 - The Insights screen is organized into **Overview**, **Analysis**, and **Records**. Overview keeps
@@ -192,11 +212,12 @@ Privacy isn't a policy here — it's enforced by the build:
 - **No `INTERNET` permission. Anywhere.** Not in the app, any module, or any debug/test manifest.
   Its absence is the guarantee: the app cannot open an Internet socket, so notification data cannot
   leave through an app network connection. Re-adding it is treated as a release blocker.
-- **No networking dependencies** on the classpath (no Retrofit/OkHttp/Ktor/Firebase/analytics/
-  crash-upload SDKs).
-- **All AI/ML runs locally.** The lightweight classifier is bundled in `:ml/src/main/assets/`. The
-  optional, much larger LLM is selected by the user from local storage and copied into app-private
-  storage. Neither model is ever downloaded by the app; all inference and feedback stay on-device.
+- **No networking dependencies** on Android runtime classpaths (no
+  Retrofit/OkHttp/Ktor/Firebase/analytics/crash-upload SDKs).
+- **All runtime AI/ML runs locally.** The lightweight classifier is bundled in
+  `:ml/src/main/assets/`. The optional, much larger LLM is selected by the user from local storage
+  and copied into app-private storage. Neither model is ever downloaded by the app; all inference
+  and in-app feedback stay on-device.
 - **Data stays local and minimal.** Decision lists, analytics, feedback, backup, and logs never
   contain notification titles or bodies. The optional detail feature stores only bounded
   AES-GCM ciphertext in a separate Room child table for seven days and decrypts one selected row
@@ -205,10 +226,13 @@ Privacy isn't a policy here — it's enforced by the build:
   per-install token, rate-limits request storms, and changes only the local master switch or an
   explicitly targeted profile/rule.
 
-The bundled compact model is produced by an **offline training pipeline** (`ml/training/`, a
-build-time dev tool — not shipped and not part of the Gradle build). The optional LLM has a separate
-local-only model pipeline in [`ml/llm-training/`](ml/llm-training/README.md); neither its base weights
-nor generated artifacts are committed or packaged in the app.
+The bundled compact model is produced by a **build-time training pipeline** (`ml/training/`, a
+developer tool — not shipped and not part of the Gradle build). The optional LLM has a separate
+pipeline in [`ml/llm-training/`](ml/llm-training/README.md). Developer machines may download public
+dependencies and user-authorized base weights, and developer-only jobs using synthetic or
+rights-cleared data may use the network. They must never receive user notification data. The
+resulting tools, credentials, base weights, and generated artifacts are never packaged in the app.
+The installed Android runtime remains network-free.
 
 ---
 
@@ -405,11 +429,16 @@ Detailed behavior and privacy fields are documented in the
   automation token copies are marked sensitive and expire after 60 seconds, data deletion steps are
   failure-isolated, duplicate profile names are rejected case-insensitively, and rule warnings stay
   collapsed until requested.
-- **Release gates.** The release AAB must remain at or below 60 MiB, and detekt, ktlint, all local
-  tests, migration/test APK compilation, dependency verification, and offline guards remain
-  mandatory. `bundleRelease` may intentionally be unsigned for CI compilation; the publishable
-  path is `:app:releaseCandidate`, which requires the complete signing configuration and
-  cryptographically verifies signed AAB payload entries.
+- **Release gates.** The non-semantic AAB payload is capped at 60 MiB. The bundled semantic
+  classifier has a 30 MiB target and a 45 MiB hard cap, while the complete physical AAB is capped
+  at 105 MiB. Detekt, ktlint, all local tests, migration/test APK compilation, dependency
+  verification, and offline guards remain mandatory. `bundleRelease` may intentionally be unsigned
+  for CI compilation; the publishable path is `:app:releaseCandidate`, which requires the complete
+  signing configuration and cryptographically verifies signed AAB payload entries. The verified
+  `bundleRelease` output is 98,983,815 bytes (94.40 MiB), but is not itself a signed distribution
+  candidate. It contains all four supported native ABIs, while Play's ABI split delivers only the
+  device-matching native libraries; the ABI-independent semantic model is a base asset and is
+  delivered to every compatible installation.
 
 ## Physical Galaxy validation
 
@@ -433,13 +462,21 @@ On 2026-07-27, a Galaxy Note20 5G (`SM-N981N`, Android 13 / API 33, One UI 5.1) 
 
 The temporary test rule and activity records were removed after validation.
 
+On 2026-07-29, the same Note20 also loaded the real bundled semantic LiteRT assets and passed
+tokenizer parity plus input-dependent-logit instrumentation. Across warm-up and 40 measured
+inferences, cold initialization was 121.037 ms, p50 was 65.506 ms, and p95 was 68.623 ms. Process
+PSS increased from 45,531 to 96,117 KiB, RSS from 122,420 to 173,308 KiB, and native heap from
+5,972,016 to 22,291,072 bytes. There was no OOM; thermal status stayed `0`, and the sampled charge
+counter stayed at 3,332,000 µAh. These are measurements from that device and run, not a guarantee
+for every device.
+
 ## Roadmap
 
 - Validate Doze/battery behavior and notification ranking across additional One UI/API versions, and
   run the authenticated exported-Intent contract from actual Tasker/MacroDroid sender apps.
 - Run the new v13 migration, guided editor, range analysis, Records detail, retention, and Keystore
   deletion scenarios on the connected Galaxy before publishing this milestone.
-- Validate representative MediaPipe quantized models and latency/thermal behavior across a physical
-  device matrix; this cannot be proven by local JVM or managed-emulator tests.
+- Resolve the 270M converter-host conflict, then require exact-SHA `.task` bundling and physical
+  MediaPipe validation before adding any compatible automatic background LLM profile.
 - Expand the bilingual classifier dataset with anonymized, hand-authored fixtures for more languages
   and additional transactional categories without collecting user notification content.

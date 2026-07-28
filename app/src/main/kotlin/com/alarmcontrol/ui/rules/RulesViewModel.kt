@@ -14,6 +14,7 @@ import com.alarmcontrol.core.filtering.Rule
 import com.alarmcontrol.core.filtering.RuleAnalyzer
 import com.alarmcontrol.core.filtering.RuleExecutionMode
 import com.alarmcontrol.core.filtering.RuleRepository
+import com.alarmcontrol.core.filtering.SemanticIntent
 import com.alarmcontrol.core.profile.ProfileRepository
 import com.alarmcontrol.core.result.DataResult
 import com.alarmcontrol.core.result.asDataResult
@@ -369,7 +370,7 @@ class RulesViewModel
                 mlCategory = sample.mlCategory.takeIf { it.isNotBlank() },
                 postedMinuteOfDay = parseMinuteOfDay(sample.localTime),
                 isAdvertisement = sample.advertisement,
-                semanticIntent = sample.semanticIntent,
+                semanticIntent = sample.semanticIntent?.takeUnless { it == SemanticIntent.AMBIGUOUS },
                 importance = sample.importance,
                 isConversation = sample.conversation,
                 isForegroundService = sample.foregroundService,

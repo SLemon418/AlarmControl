@@ -16,13 +16,33 @@ class FakeLlmObservationDao : LlmObservationDao {
     private val semanticPriors = MutableStateFlow<List<SemanticFeedbackPriorEntity>>(emptyList())
     private var nextId = 1L
 
-    override suspend fun upsert(observation: LlmObservationEntity): Long {
+    override suspend fun insertIfAbsent(observation: LlmObservationEntity): Long {
         val existing = rows.value.firstOrNull { it.notificationEventId == observation.notificationEventId }
-        val id = existing?.id ?: observation.id.takeIf { it != 0L } ?: nextId++
-        rows.value =
-            rows.value.filterNot { it.notificationEventId == observation.notificationEventId } +
-            observation.copy(id = id)
+        if (existing != null) return -1L
+        val id = observation.id.takeIf { it != 0L } ?: nextId++
+        rows.value = rows.value + observation.copy(id = id)
         return id
+    }
+
+    override suspend fun updatePrediction(
+        notificationEventId: Long,
+        packageName: String,
+        predictedIsAdvertisement: Boolean,
+        predictedIntent: String,
+        confidenceScore: Float,
+        analyzedAtMillis: Long,
+    ): Int {
+        val existing = rows.value.firstOrNull { it.notificationEventId == notificationEventId } ?: return 0
+        rows.value =
+            rows.value.filterNot { it.notificationEventId == notificationEventId } +
+            existing.copy(
+                packageName = packageName,
+                predictedIsAdvertisement = predictedIsAdvertisement,
+                predictedIntent = predictedIntent,
+                confidenceScore = confidenceScore,
+                analyzedAtMillis = analyzedAtMillis,
+            )
+        return 1
     }
 
     override suspend fun setCorrection(

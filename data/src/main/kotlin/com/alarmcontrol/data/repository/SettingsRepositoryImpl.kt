@@ -16,6 +16,7 @@ import com.alarmcontrol.data.security.NotificationContentAccessGuard
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import java.io.IOException
 import java.security.SecureRandom
@@ -54,10 +55,7 @@ class SettingsRepositoryImpl
                 .catch { error -> if (error is IOException) emit(emptyPreferences()) else throw error }
                 .map { prefs -> prefs[LLM_ANALYSIS_ENABLED] ?: false }
 
-        override val llmAutoActionsEnabled: Flow<Boolean> =
-            dataStore.data
-                .catch { error -> if (error is IOException) emit(emptyPreferences()) else throw error }
-                .map { prefs -> prefs[LLM_AUTO_ACTIONS_ENABLED] ?: false }
+        override val llmAutoActionsEnabled: Flow<Boolean> = flowOf(false)
 
         override val semanticAnalysisScope: Flow<SemanticAnalysisScope> =
             dataStore.data
@@ -135,17 +133,12 @@ class SettingsRepositoryImpl
         override suspend fun setLlmAnalysisEnabled(enabled: Boolean) {
             dataStore.edit { prefs ->
                 prefs[LLM_ANALYSIS_ENABLED] = enabled
-                if (!enabled) prefs[LLM_AUTO_ACTIONS_ENABLED] = false
+                prefs.remove(LLM_AUTO_ACTIONS_ENABLED)
             }
         }
 
         override suspend fun setLlmAutoActionsEnabled(enabled: Boolean) {
-            dataStore.edit { prefs ->
-                require(!enabled || prefs[LLM_ANALYSIS_ENABLED] == true) {
-                    "LLM automatic actions require analysis"
-                }
-                prefs[LLM_AUTO_ACTIONS_ENABLED] = enabled
-            }
+            dataStore.edit { prefs -> prefs.remove(LLM_AUTO_ACTIONS_ENABLED) }
         }
 
         override suspend fun setSemanticAnalysisScope(scope: SemanticAnalysisScope) {
@@ -193,7 +186,7 @@ class SettingsRepositoryImpl
                 filteringEnabled = prefs[FILTERING_ENABLED] ?: true,
                 externalAutomationEnabled = prefs[EXTERNAL_AUTOMATION_ENABLED] ?: false,
                 llmAnalysisEnabled = prefs[LLM_ANALYSIS_ENABLED] ?: false,
-                llmAutoActionsEnabled = prefs[LLM_AUTO_ACTIONS_ENABLED] ?: false,
+                llmAutoActionsEnabled = false,
                 semanticAnalysisScope =
                     prefs[SEMANTIC_ANALYSIS_SCOPE]
                         ?.let { stored -> enumValues<SemanticAnalysisScope>().firstOrNull { it.name == stored } }
@@ -223,7 +216,7 @@ class SettingsRepositoryImpl
                     prefs[EXTERNAL_AUTOMATION_TOKEN] = newAutomationToken()
                 }
                 prefs[LLM_ANALYSIS_ENABLED] = snapshot.llmAnalysisEnabled
-                prefs[LLM_AUTO_ACTIONS_ENABLED] = snapshot.llmAnalysisEnabled && snapshot.llmAutoActionsEnabled
+                prefs.remove(LLM_AUTO_ACTIONS_ENABLED)
                 prefs[SEMANTIC_ANALYSIS_SCOPE] = snapshot.semanticAnalysisScope.name
                 prefs[EVENT_RETENTION_DAYS] = snapshot.eventRetentionDays
                 prefs[DAILY_INSIGHT_RETENTION_DAYS] = snapshot.dailyInsightRetentionDays

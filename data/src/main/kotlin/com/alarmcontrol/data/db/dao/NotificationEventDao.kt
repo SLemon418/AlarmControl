@@ -48,6 +48,49 @@ interface NotificationEventDao {
         return eventId
     }
 
+    @Query(
+        "UPDATE notification_events SET " +
+            "ml_category = COALESCE(:mlCategory, ml_category), " +
+            "ml_confidence = COALESCE(:mlConfidence, ml_confidence), " +
+            "monitored_rule_id = :monitoredRuleId, " +
+            "monitored_action = :monitoredAction " +
+            "WHERE id = :eventId",
+    )
+    suspend fun updatePostCommitEnrichment(
+        eventId: Long,
+        mlCategory: String?,
+        mlConfidence: Float?,
+        monitoredRuleId: Long?,
+        monitoredAction: StoredRuleAction?,
+    ): Int
+
+    @Query("DELETE FROM notification_decision_traces WHERE event_id = :eventId")
+    suspend fun deleteTraceForEvent(eventId: Long)
+
+    @Transaction
+    suspend fun updatePostCommitEnrichmentWithTrace(
+        eventId: Long,
+        mlCategory: String?,
+        mlConfidence: Float?,
+        monitoredRuleId: Long?,
+        monitoredAction: StoredRuleAction?,
+        trace: List<NotificationDecisionTraceEntity>,
+    ) {
+        if (
+            updatePostCommitEnrichment(
+                eventId = eventId,
+                mlCategory = mlCategory,
+                mlConfidence = mlConfidence,
+                monitoredRuleId = monitoredRuleId,
+                monitoredAction = monitoredAction,
+            ) == 0
+        ) {
+            return
+        }
+        deleteTraceForEvent(eventId)
+        if (trace.isNotEmpty()) insertTrace(trace.map { it.copy(eventId = eventId) })
+    }
+
     /** Most recent decisions first, for the activity and statistics-exclusion feed. */
     @Transaction
     @Query("SELECT * FROM notification_events ORDER BY posted_at_millis DESC, id DESC LIMIT :limit")

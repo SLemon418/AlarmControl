@@ -144,6 +144,31 @@ class BackupCodecTest {
     }
 
     @Test
+    fun `retired LLM auto actions are omitted from exports and ignored from old backups`() {
+        val root =
+            JSONObject(
+                BackupCodec.encode(
+                    sample.copy(
+                        settings =
+                            SettingsSnapshot(
+                                llmAnalysisEnabled = true,
+                                llmAutoActionsEnabled = true,
+                            ),
+                    ),
+                ),
+            )
+        val settings = root.getJSONObject("settings")
+
+        assertEquals(false, settings.has("llmAutoActionsEnabled"))
+
+        settings.put("llmAutoActionsEnabled", true)
+        val restored = BackupCodec.decode(root.toString())
+
+        assertEquals(false, restored.settings?.llmAutoActionsEnabled)
+        assertEquals(true, restored.settings?.llmAnalysisEnabled)
+    }
+
+    @Test
     fun `decode rejects an unsupported format version`() {
         val unsupported = JSONObject(BackupCodec.encode(sample)).put("version", 99).toString()
 

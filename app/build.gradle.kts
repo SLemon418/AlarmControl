@@ -1,4 +1,8 @@
+import groovy.json.JsonOutput
 import java.util.jar.JarFile
+import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
+import java.util.zip.ZipOutputStream
 
 plugins {
     alias(libs.plugins.android.application)
@@ -7,6 +11,175 @@ plugins {
     alias(libs.plugins.ksp)
     alias(libs.plugins.hilt)
     alias(libs.plugins.androidx.baselineprofile)
+}
+
+data class ReleaseBundleSizeReport(
+    val nonSemanticAabPhysicalBytes: Long,
+    val semanticClassifierRawBytes: Long,
+    val semanticPayloadRawBytes: Long,
+    val semanticPayloadCompressedBytes: Long,
+    val totalPhysicalBytes: Long,
+    val hasSemanticClassifier: Boolean,
+)
+
+val semanticBundleEntries =
+    setOf(
+        "base/assets/semantic_notification_classifier.tflite",
+        "base/assets/semantic_vocab.txt",
+        "base/assets/semantic_labels.txt",
+        "base/assets/semantic_model_manifest.json",
+    )
+val semanticClassifierBundleEntry = "base/assets/semantic_notification_classifier.tflite"
+val semanticAssetEntryPattern = Regex("""(?:^|.*/)assets/(?:.*/)?semantic_[^/]+$""")
+val semanticClassifierTargetBytes = 30L * 1_024 * 1_024
+val maxSemanticClassifierBytes = 45L * 1_024 * 1_024
+// This is an internal full-AAB budget after subtracting the semantic entries. It is deliberately
+// not described as Play's device-specific compressed download size.
+val maxNonSemanticAabPhysicalBytes = 60L * 1_024 * 1_024
+val maxPhysicalBundleBytes = 105L * 1_024 * 1_024
+
+@Suppress("UNCHECKED_CAST")
+val semanticAssetPayloadVerifier =
+    rootProject.extra["semanticAssetPayloadVerifier"] as
+        (Map<String, ByteArray>, Boolean) -> Boolean
+
+@Suppress("UNCHECKED_CAST")
+val semanticAssetSha256 =
+    rootProject.extra["semanticAssetSha256"] as (ByteArray) -> String
+
+@Suppress("UNCHECKED_CAST")
+val semanticAssetMaximumBytes =
+    rootProject.extra["semanticAssetMaximumBytes"] as Map<String, Long>
+
+fun requireSemanticClassifierSize(sizeBytes: Long) {
+    check(sizeBytes <= maxSemanticClassifierBytes) {
+        "Release AAB semantic classifier is $sizeBytes raw bytes; " +
+            "hard limit is $maxSemanticClassifierBytes bytes"
+    }
+}
+
+fun requireReleaseBundleSizeLimits(
+    nonSemanticAabPhysicalBytes: Long,
+    totalPhysicalBytes: Long,
+) {
+    check(nonSemanticAabPhysicalBytes <= maxNonSemanticAabPhysicalBytes) {
+        "Release AAB non-semantic physical payload is $nonSemanticAabPhysicalBytes bytes " +
+            "after subtracting semantic entry compressed sizes; internal limit is " +
+            "$maxNonSemanticAabPhysicalBytes bytes"
+    }
+    check(totalPhysicalBytes <= maxPhysicalBundleBytes) {
+        "Release AAB physical size is $totalPhysicalBytes bytes; " +
+            "limit is $maxPhysicalBundleBytes bytes"
+    }
+}
+
+fun requireSemanticAabEntrySize(
+    entryName: String,
+    sizeBytes: Long,
+) {
+    val assetName = entryName.removePrefix("base/assets/")
+    check(sizeBytes in 1..semanticAssetMaximumBytes.getValue(assetName)) {
+        "Semantic model AAB entry exceeds its pre-read size limit: $entryName"
+    }
+}
+
+fun inspectReleaseBundleSize(bundle: File): ReleaseBundleSizeReport {
+    check(bundle.isFile) {
+        "Release AAB does not exist: ${bundle.absolutePath}"
+    }
+    val expectedEntryCounts = semanticBundleEntries.associateWith { 0 }.toMutableMap()
+    val unexpectedSemanticEntries = mutableListOf<String>()
+    var semanticClassifierRawBytes = 0L
+    var semanticPayloadRawBytes = 0L
+    var semanticPayloadCompressedBytes = 0L
+    val semanticPayloadBytes = mutableMapOf<String, ByteArray>()
+
+    ZipFile(bundle).use { zip ->
+        val entries = zip.entries()
+        while (entries.hasMoreElements()) {
+            val entry = entries.nextElement()
+            if (entry.name in semanticBundleEntries) {
+                check(!entry.isDirectory) {
+                    "Semantic model AAB entry must be a file: ${entry.name}"
+                }
+                check(entry.size >= 0L && entry.compressedSize >= 0L) {
+                    "Semantic model AAB entry has unknown size: ${entry.name}"
+                }
+                val assetName = entry.name.removePrefix("base/assets/")
+                requireSemanticAabEntrySize(entry.name, entry.size)
+                expectedEntryCounts[entry.name] = expectedEntryCounts.getValue(entry.name) + 1
+                semanticPayloadRawBytes += entry.size
+                semanticPayloadCompressedBytes += entry.compressedSize
+                val bytes = zip.getInputStream(entry).use { input -> input.readBytes() }
+                check(bytes.size.toLong() == entry.size) {
+                    "Semantic model AAB entry size changed while reading: ${entry.name}"
+                }
+                semanticPayloadBytes[assetName] = bytes
+                if (entry.name == semanticClassifierBundleEntry) {
+                    semanticClassifierRawBytes += entry.size
+                }
+            } else if (!entry.isDirectory && semanticAssetEntryPattern.matches(entry.name)) {
+                unexpectedSemanticEntries += entry.name
+            }
+        }
+    }
+
+    check(unexpectedSemanticEntries.isEmpty()) {
+        "Release AAB contains unexpected semantic model assets: " +
+            unexpectedSemanticEntries.sorted().joinToString()
+    }
+    val duplicateEntries =
+        expectedEntryCounts
+            .filterValues { count -> count > 1 }
+            .keys
+            .sorted()
+    check(duplicateEntries.isEmpty()) {
+        "Release AAB contains duplicate semantic model entries: ${duplicateEntries.joinToString()}"
+    }
+
+    val hasSemanticClassifier = expectedEntryCounts.getValue(semanticClassifierBundleEntry) == 1
+    if (hasSemanticClassifier) {
+        val missingEntries =
+            expectedEntryCounts
+                .filterValues { count -> count != 1 }
+                .keys
+                .sorted()
+        check(missingEntries.isEmpty()) {
+            "Release AAB semantic model payload is incomplete; expected each entry exactly once. " +
+                "Missing: ${missingEntries.joinToString()}"
+        }
+    }
+    check(
+        semanticAssetPayloadVerifier(
+            semanticPayloadBytes,
+            true,
+        ) == hasSemanticClassifier,
+    ) {
+        "Semantic AAB payload presence is inconsistent"
+    }
+
+    val totalPhysicalBytes = bundle.length()
+    val nonSemanticAabPhysicalBytes = totalPhysicalBytes - semanticPayloadCompressedBytes
+    check(nonSemanticAabPhysicalBytes >= 0L) {
+        "Release AAB semantic compressed size exceeds its physical file size"
+    }
+    requireSemanticClassifierSize(semanticClassifierRawBytes)
+    requireReleaseBundleSizeLimits(nonSemanticAabPhysicalBytes, totalPhysicalBytes)
+
+    return ReleaseBundleSizeReport(
+        nonSemanticAabPhysicalBytes = nonSemanticAabPhysicalBytes,
+        semanticClassifierRawBytes = semanticClassifierRawBytes,
+        semanticPayloadRawBytes = semanticPayloadRawBytes,
+        semanticPayloadCompressedBytes = semanticPayloadCompressedBytes,
+        totalPhysicalBytes = totalPhysicalBytes,
+        hasSemanticClassifier = hasSemanticClassifier,
+    )
+}
+
+fun requireReleaseSemanticPayload(report: ReleaseBundleSizeReport) {
+    check(report.hasSemanticClassifier) {
+        "Release candidate must contain $semanticClassifierBundleEntry and all semantic sidecars"
+    }
 }
 
 val releaseSigningValues =
@@ -62,6 +235,14 @@ android {
     buildFeatures {
         buildConfig = true
         compose = true
+    }
+
+    // Preserve every ABI supplied by runtime dependencies in the AAB. Play then delivers only the
+    // matching ABI to each device. Do not add filters that narrow dependency-provided compatibility.
+    bundle {
+        abi {
+            enableSplit = true
+        }
     }
 
     // Robolectric needs merged Android resources to run Compose UI tests on the local JVM.
@@ -219,8 +400,6 @@ tasks
         dependsOn(offlineGuard)
     }
 
-val maxReleaseBundleBytes = 60L * 1_024 * 1_024
-
 tasks
     .matching { it.name == "bundleRelease" }
     .configureEach {
@@ -236,11 +415,391 @@ tasks
                 "Expected one release AAB, found ${bundles.size}"
             }
             val bundle = bundles.single()
-            check(bundle.length() <= maxReleaseBundleBytes) {
-                "Release AAB is ${bundle.length()} bytes; limit is $maxReleaseBundleBytes bytes"
+            val report = inspectReleaseBundleSize(bundle)
+            if (!report.hasSemanticClassifier) {
+                logger.lifecycle(
+                    "Semantic classifier is not present; exact four-entry completeness " +
+                        "will be required when $semanticClassifierBundleEntry is packaged.",
+                )
             }
+            if (report.semanticClassifierRawBytes > semanticClassifierTargetBytes) {
+                logger.warn(
+                    "Release AAB semantic classifier exceeds the 30 MiB target: " +
+                        "${report.semanticClassifierRawBytes} raw bytes",
+                )
+            }
+            logger.lifecycle(
+                "Release AAB size accounting: nonSemanticPhysical=" +
+                    "${report.nonSemanticAabPhysicalBytes} bytes, " +
+                    "classifier=${report.semanticClassifierRawBytes} raw bytes, " +
+                    "semanticPayload=${report.semanticPayloadRawBytes} raw bytes " +
+                    "(${report.semanticPayloadCompressedBytes} compressed bytes), " +
+                    "total=${report.totalPhysicalBytes} bytes",
+            )
         }
     }
+
+val verifyReleaseBundleSizeAccountingFixture by tasks.registering {
+    group = "verification"
+    description = "Checks semantic AAB size and content integrity with tiny synthetic ZIP fixtures."
+
+    doLast {
+        fun runtimeSemanticEntries(mutateManifest: (MutableMap<String, Any?>) -> Unit = {}): Map<String, ByteArray> {
+            val payloads =
+                mapOf(
+                    "semantic_notification_classifier.tflite" to "tiny-tflite".toByteArray(),
+                    "semantic_vocab.txt" to "[PAD]\n[UNK]\n[CLS]\n[SEP]\n".toByteArray(),
+                    "semantic_labels.txt" to
+                        (
+                            "MARKETING\nTRANSACTIONAL\nSECURITY\nDELIVERY\n" +
+                                "SOCIAL\nOTHER\nAMBIGUOUS\n"
+                        ).toByteArray(),
+                )
+            val files =
+                payloads.mapValues { (_, content) ->
+                    mapOf(
+                        "sha256" to semanticAssetSha256(content),
+                        "size_bytes" to content.size,
+                    )
+                }
+            val modelHash = files.getValue("semantic_notification_classifier.tflite").getValue("sha256")
+            val vocabHash = files.getValue("semantic_vocab.txt").getValue("sha256")
+
+            fun provenance(sourceHash: String) =
+                mapOf(
+                    "schema_version" to "semantic-evaluation-provenance-v1",
+                    "source_manifest_sha256" to sourceHash,
+                    "backend" to "tensorflow-lite",
+                    "model_artifact_sha256" to modelHash,
+                    "vocab_sha256" to vocabHash,
+                )
+            val manifest =
+                mutableMapOf<String, Any?>(
+                    "schema_version" to "alarmcontrol-semantic-model-manifest-v2",
+                    "files" to files,
+                    "labels" to
+                        listOf(
+                            "MARKETING",
+                            "TRANSACTIONAL",
+                            "SECURITY",
+                            "DELIVERY",
+                            "SOCIAL",
+                            "OTHER",
+                            "AMBIGUOUS",
+                        ),
+                    "max_sequence_length" to 128,
+                    "general_threshold" to 0.949999988079071,
+                    "marketing_threshold" to 1.0,
+                    "tokenizer" to
+                        mapOf(
+                            "type" to "bert-wordpiece",
+                            "normalization" to "nfc",
+                            "lowercase" to false,
+                        ),
+                    "conversion" to
+                        mutableMapOf<String, Any?>(
+                            "quantization" to
+                                mapOf(
+                                    "requested" to "dynamic-int8",
+                                    "applied" to "dynamic-int8",
+                                    "calibration_used" to false,
+                                    "experimental_backend" to true,
+                                    "fallback_reason" to null,
+                                ),
+                            "quantization_audit" to
+                                mutableMapOf<String, Any?>(
+                                    "schema_version" to "koelectra-dynamic-int8-audit-v1",
+                                    "method" to
+                                        "litert-interpreter-tensor-and-operator-inspection",
+                                    "tensor_count" to 100,
+                                    "int8_tensor_count" to 20,
+                                    "operator_count" to 50,
+                                    "quantize_operator_count" to 10,
+                                    "passed" to true,
+                                ),
+                            "tensor_contract" to
+                                mapOf(
+                                    "inputs" to
+                                        listOf(
+                                            mapOf(
+                                                "name" to "input_ids",
+                                                "dtype" to "int32",
+                                                "shape" to listOf(1, 128),
+                                            ),
+                                            mapOf(
+                                                "name" to "attention_mask",
+                                                "dtype" to "int32",
+                                                "shape" to listOf(1, 128),
+                                            ),
+                                        ),
+                                    "output" to
+                                        mapOf(
+                                            "name" to "logits",
+                                            "dtype" to "float32",
+                                            "shape" to listOf(1, 7),
+                                        ),
+                                ),
+                        ),
+                    "evidence" to
+                        mutableMapOf<String, Any?>(
+                            "conversion_manifest_sha256" to "a".repeat(64),
+                            "threshold_selection_sha256" to "b".repeat(64),
+                            "development_test_gate_sha256" to "c".repeat(64),
+                            "test_parity_report_sha256" to "d".repeat(64),
+                            "sealed_holdout_gate_sha256" to "e".repeat(64),
+                        ),
+                    "evaluation_provenance" to
+                        mapOf(
+                            "threshold_selection" to provenance("f".repeat(64)),
+                            "development_test" to provenance("a".repeat(64)),
+                            "sealed_holdout" to provenance("b".repeat(64)),
+                        ),
+                )
+            mutateManifest(manifest)
+            return payloads.mapKeys { (name, _) -> "base/assets/$name" } +
+                mapOf(
+                    "base/assets/semantic_model_manifest.json" to
+                        (JsonOutput.toJson(manifest) + "\n").toByteArray(),
+                )
+        }
+
+        val semanticFixtureEntries = runtimeSemanticEntries()
+
+        fun writeFixture(
+            target: File,
+            semanticEntries: Map<String, ByteArray> = semanticFixtureEntries,
+            extraEntries: Map<String, ByteArray> = emptyMap(),
+            omittedEntries: Set<String> = emptySet(),
+        ) {
+            target.parentFile.mkdirs()
+            ZipOutputStream(target.outputStream().buffered()).use { output ->
+                val entries =
+                    semanticEntries.filterKeys { name -> name !in omittedEntries } +
+                        extraEntries +
+                        mapOf("base/dex/classes.dex" to ByteArray(128) { it.toByte() })
+                entries.forEach { (name, content) ->
+                    output.putNextEntry(ZipEntry(name))
+                    output.write(content)
+                    output.closeEntry()
+                }
+            }
+        }
+
+        val completeBundle = temporaryDir.resolve("complete.aab")
+        writeFixture(completeBundle)
+        val completeReport = inspectReleaseBundleSize(completeBundle)
+        val expectedRawBytes =
+            semanticFixtureEntries.values.sumOf { content -> content.size.toLong() }
+        check(completeReport.hasSemanticClassifier)
+        check(completeReport.semanticPayloadRawBytes == expectedRawBytes)
+        check(
+            completeReport.semanticClassifierRawBytes ==
+                semanticFixtureEntries.getValue(semanticClassifierBundleEntry).size.toLong(),
+        )
+        check(
+            completeReport.nonSemanticAabPhysicalBytes ==
+                completeBundle.length() - completeReport.semanticPayloadCompressedBytes,
+        )
+        requireReleaseSemanticPayload(completeReport)
+        requireSemanticClassifierSize(maxSemanticClassifierBytes)
+        val classifierLimitFailure =
+            runCatching {
+                requireSemanticClassifierSize(maxSemanticClassifierBytes + 1L)
+            }.exceptionOrNull()
+        check(classifierLimitFailure?.message?.contains("hard limit") == true) {
+            "Semantic classifier hard-cap boundary did not reject 45 MiB + 1 byte"
+        }
+        val preReadLimitFailure =
+            runCatching {
+                requireSemanticAabEntrySize(
+                    semanticClassifierBundleEntry,
+                    maxSemanticClassifierBytes + 1L,
+                )
+            }.exceptionOrNull()
+        check(preReadLimitFailure?.message?.contains("pre-read size limit") == true) {
+            "Semantic AAB entry pre-read cap did not reject 45 MiB + 1 byte"
+        }
+        requireReleaseBundleSizeLimits(
+            nonSemanticAabPhysicalBytes = maxNonSemanticAabPhysicalBytes,
+            totalPhysicalBytes = maxPhysicalBundleBytes,
+        )
+        val nonSemanticLimitFailure =
+            runCatching {
+                requireReleaseBundleSizeLimits(
+                    nonSemanticAabPhysicalBytes = maxNonSemanticAabPhysicalBytes + 1L,
+                    totalPhysicalBytes = maxPhysicalBundleBytes,
+                )
+            }.exceptionOrNull()
+        check(nonSemanticLimitFailure?.message?.contains("non-semantic physical payload") == true) {
+            "Non-semantic AAB boundary did not reject 60 MiB + 1 byte"
+        }
+        val physicalBundleLimitFailure =
+            runCatching {
+                requireReleaseBundleSizeLimits(
+                    nonSemanticAabPhysicalBytes = maxNonSemanticAabPhysicalBytes,
+                    totalPhysicalBytes = maxPhysicalBundleBytes + 1L,
+                )
+            }.exceptionOrNull()
+        check(physicalBundleLimitFailure?.message?.contains("physical size") == true) {
+            "Physical AAB boundary did not reject 105 MiB + 1 byte"
+        }
+
+        fun assertAabManifestRejected(
+            name: String,
+            expectedMessage: String,
+            mutation: (MutableMap<String, Any?>) -> Unit,
+        ) {
+            val bundle = temporaryDir.resolve("$name.aab")
+            writeFixture(
+                target = bundle,
+                semanticEntries = runtimeSemanticEntries(mutation),
+            )
+            val failure = runCatching { inspectReleaseBundleSize(bundle) }.exceptionOrNull()
+            check(failure?.message?.contains(expectedMessage) == true) {
+                "$name AAB semantic fixture did not fail closed: ${failure?.message}"
+            }
+        }
+
+        assertAabManifestRejected(
+            name = "non-float32-general-threshold",
+            expectedMessage = "exactly representable as float32",
+        ) { manifest ->
+            manifest["general_threshold"] = 0.95
+        }
+        assertAabManifestRejected(
+            name = "non-float32-marketing-threshold",
+            expectedMessage = "exactly representable as float32",
+        ) { manifest ->
+            manifest["marketing_threshold"] = 0.95
+        }
+        assertAabManifestRejected(
+            name = "below-floor-threshold",
+            expectedMessage = "below the runtime safety floor",
+        ) { manifest ->
+            manifest["general_threshold"] = 0.9499999284744263
+        }
+        assertAabManifestRejected(
+            name = "above-ceiling-threshold",
+            expectedMessage = "above 1.0",
+        ) { manifest ->
+            manifest["marketing_threshold"] = 1.0000001192092896
+        }
+        assertAabManifestRejected(
+            name = "reversed-threshold-pair",
+            expectedMessage = "greater than or equal",
+        ) { manifest ->
+            manifest["general_threshold"] = 1.0
+            manifest["marketing_threshold"] = 0.949999988079071
+        }
+        assertAabManifestRejected(
+            name = "old-scalar-threshold-schema",
+            expectedMessage = "fields mismatch",
+        ) { manifest ->
+            manifest["schema_version"] = "alarmcontrol-semantic-model-manifest-v1"
+            manifest.remove("general_threshold")
+            manifest.remove("marketing_threshold")
+            manifest["confidence_threshold"] = 0.949999988079071
+        }
+        assertAabManifestRejected(
+            name = "missing-marketing-threshold",
+            expectedMessage = "fields mismatch",
+        ) { manifest ->
+            manifest.remove("marketing_threshold")
+        }
+        assertAabManifestRejected(
+            name = "failed-quantization-audit",
+            expectedMessage = "audit must pass",
+        ) { manifest ->
+            @Suppress("UNCHECKED_CAST")
+            val conversion = manifest.getValue("conversion") as MutableMap<String, Any?>
+
+            @Suppress("UNCHECKED_CAST")
+            val audit = conversion.getValue("quantization_audit") as MutableMap<String, Any?>
+            audit["passed"] = false
+        }
+        assertAabManifestRejected(
+            name = "missing-test-parity-evidence",
+            expectedMessage = "fields mismatch",
+        ) { manifest ->
+            @Suppress("UNCHECKED_CAST")
+            val evidence = manifest.getValue("evidence") as MutableMap<String, Any?>
+            evidence.remove("test_parity_report_sha256")
+        }
+
+        val corruptBundle = temporaryDir.resolve("corrupt.aab")
+        writeFixture(
+            corruptBundle,
+            extraEntries =
+                mapOf(
+                    "base/assets/semantic_vocab.txt" to "corrupt".toByteArray(),
+                ),
+        )
+        val corruptFailure =
+            runCatching { inspectReleaseBundleSize(corruptBundle) }.exceptionOrNull()
+        check(corruptFailure?.message?.contains("does not match its manifest") == true) {
+            "Corrupt packaged semantic fixture did not fail closed"
+        }
+
+        val incompleteBundle = temporaryDir.resolve("incomplete.aab")
+        writeFixture(
+            incompleteBundle,
+            omittedEntries = setOf("base/assets/semantic_model_manifest.json"),
+        )
+        val incompleteFailure =
+            runCatching { inspectReleaseBundleSize(incompleteBundle) }.exceptionOrNull()
+        check(incompleteFailure?.message?.contains("payload is incomplete") == true) {
+            "Incomplete semantic fixture did not fail closed"
+        }
+
+        val classifierMissingBundle = temporaryDir.resolve("classifier-missing.aab")
+        writeFixture(
+            classifierMissingBundle,
+            semanticEntries =
+                mapOf(
+                    "base/assets/semantic_labels.txt" to
+                        semanticFixtureEntries.getValue("base/assets/semantic_labels.txt"),
+                ),
+        )
+        val classifierMissingReport = inspectReleaseBundleSize(classifierMissingBundle)
+        val classifierMissingFailure =
+            runCatching {
+                requireReleaseSemanticPayload(classifierMissingReport)
+            }.exceptionOrNull()
+        check(classifierMissingFailure?.message?.contains("must contain") == true) {
+            "Release-candidate semantic fixture did not fail when the classifier was absent"
+        }
+
+        val partialPrePromotionBundle = temporaryDir.resolve("partial-pre-promotion.aab")
+        writeFixture(
+            partialPrePromotionBundle,
+            omittedEntries = setOf(semanticClassifierBundleEntry),
+        )
+        val partialPrePromotionFailure =
+            runCatching { inspectReleaseBundleSize(partialPrePromotionBundle) }.exceptionOrNull()
+        check(partialPrePromotionFailure?.message?.contains("payload is incomplete") == true) {
+            "Partial pre-promotion AAB semantic payload did not fail closed"
+        }
+
+        val unexpectedBundle = temporaryDir.resolve("unexpected.aab")
+        writeFixture(
+            unexpectedBundle,
+            extraEntries =
+                mapOf(
+                    "base/assets/semantic_shadow_model.tflite" to
+                        byteArrayOf(1, 2, 3),
+                ),
+        )
+        val unexpectedFailure =
+            runCatching { inspectReleaseBundleSize(unexpectedBundle) }.exceptionOrNull()
+        check(unexpectedFailure?.message?.contains("unexpected semantic model assets") == true) {
+            "Unexpected semantic asset fixture did not fail closed"
+        }
+    }
+}
+
+tasks.named("check").configure {
+    dependsOn(verifyReleaseBundleSizeAccountingFixture)
+}
 
 // Normal local/CI compilation may intentionally produce an unsigned release artifact. Distribution
 // uses the explicit releaseCandidate gate below so an unsigned AAB can never be mistaken for a
@@ -280,6 +839,7 @@ val verifyReleaseBundleSigning by tasks.registering {
             "Expected one release AAB, found ${bundles.size}"
         }
         val bundle = bundles.single()
+        requireReleaseSemanticPayload(inspectReleaseBundleSize(bundle))
         val entryNames = mutableSetOf<String>()
         var signedPayloadEntries = 0
         val unsignedPayloadEntries = mutableListOf<String>()
@@ -334,6 +894,7 @@ tasks.register("releaseCandidate") {
         ":automation:check",
         ":app:check",
         ":baselineprofile:check",
+        ":ml:verifyBundledSemanticAssets",
         ":app:assembleRelease",
         ":app:assembleDebugAndroidTest",
         ":data:assembleDebugAndroidTest",

@@ -109,7 +109,6 @@ fun SettingsRoute(
         onRotateAutomationToken = viewModel::rotateExternalAutomationToken,
         onCopyAutomationToken = viewModel::copyAutomationToken,
         onLlmAnalysisChange = viewModel::setLlmAnalysisEnabled,
-        onLlmAutoActionsChange = viewModel::setLlmAutoActionsEnabled,
         onSemanticAnalysisScopeChange = viewModel::setSemanticAnalysisScope,
         onEventRetentionChange = viewModel::setEventRetentionDays,
         onInsightRetentionChange = viewModel::setDailyInsightRetentionDays,
@@ -154,7 +153,6 @@ fun SettingsScreen(
     onExport: (Uri, CharArray?, Boolean) -> Unit,
     onImport: (Uri, CharArray?) -> Unit,
     onUserMessageShown: () -> Unit,
-    onLlmAutoActionsChange: (Boolean) -> Unit = {},
     onSemanticAnalysisScopeChange: (SemanticAnalysisScope) -> Unit = {},
     onRemoveLlmModel: () -> Unit = {},
     onEventRetentionChange: (Int) -> Unit = {},
@@ -225,7 +223,6 @@ fun SettingsScreen(
         onRotateAutomationToken = onRotateAutomationToken,
         onCopyAutomationToken = onCopyAutomationToken,
         onLlmAnalysisChange = onLlmAnalysisChange,
-        onLlmAutoActionsChange = onLlmAutoActionsChange,
         onSemanticAnalysisScopeChange = onSemanticAnalysisScopeChange,
         onChooseModel = { modelImportLauncher.launch(arrayOf("application/octet-stream", "application/zip")) },
         onRemoveLlmModel = onRemoveLlmModel,
@@ -285,7 +282,6 @@ private fun SettingsContent(
     onRotateAutomationToken: () -> Unit,
     onCopyAutomationToken: (String) -> Unit,
     onLlmAnalysisChange: (Boolean) -> Unit,
-    onLlmAutoActionsChange: (Boolean) -> Unit,
     onSemanticAnalysisScopeChange: (SemanticAnalysisScope) -> Unit,
     onChooseModel: () -> Unit,
     onRemoveLlmModel: () -> Unit,
@@ -352,7 +348,6 @@ private fun SettingsContent(
                             LlmSettingsSection(
                                 state,
                                 onLlmAnalysisChange,
-                                onLlmAutoActionsChange,
                                 onSemanticAnalysisScopeChange,
                                 onChooseModel,
                                 onRemoveLlmModel,
@@ -787,23 +782,23 @@ private val AutomationOutcomeUi.labelRes: Int
 private fun LlmSettingsSection(
     state: SettingsUiState,
     onLlmAnalysisChange: (Boolean) -> Unit,
-    onLlmAutoActionsChange: (Boolean) -> Unit,
     onSemanticAnalysisScopeChange: (SemanticAnalysisScope) -> Unit,
     onChooseModel: () -> Unit,
     onRemoveModel: () -> Unit,
 ) {
     SettingSwitchRow(
         title = stringResource(R.string.settings_llm_enabled),
-        subtitle = stringResource(R.string.settings_llm_summary),
+        subtitle =
+            stringResource(
+                if (state.llmBackgroundAnalysisAvailable) {
+                    R.string.settings_llm_summary
+                } else {
+                    R.string.settings_llm_summary_unverified
+                },
+            ),
         checked = state.llmAnalysisEnabled,
+        enabled = state.llmBackgroundAnalysisAvailable || state.llmAnalysisEnabled,
         onCheckedChange = onLlmAnalysisChange,
-    )
-    SettingSwitchRow(
-        title = stringResource(R.string.settings_llm_auto_actions),
-        subtitle = stringResource(R.string.settings_llm_auto_actions_summary),
-        checked = state.llmAutoActionsEnabled,
-        enabled = state.llmAnalysisEnabled,
-        onCheckedChange = onLlmAutoActionsChange,
     )
     Text(
         stringResource(R.string.settings_llm_scope),
@@ -814,13 +809,13 @@ private fun LlmSettingsSection(
         FilterChip(
             selected = state.semanticAnalysisScope == SemanticAnalysisScope.RULES_ONLY,
             onClick = { onSemanticAnalysisScopeChange(SemanticAnalysisScope.RULES_ONLY) },
-            enabled = state.llmAnalysisEnabled,
+            enabled = state.llmAnalysisEnabled && state.llmBackgroundAnalysisAvailable,
             label = { Text(stringResource(R.string.settings_llm_scope_rules)) },
         )
         FilterChip(
             selected = state.semanticAnalysisScope == SemanticAnalysisScope.ALL_NOTIFICATIONS,
             onClick = { onSemanticAnalysisScopeChange(SemanticAnalysisScope.ALL_NOTIFICATIONS) },
-            enabled = state.llmAnalysisEnabled,
+            enabled = state.llmAnalysisEnabled && state.llmBackgroundAnalysisAvailable,
             label = { Text(stringResource(R.string.settings_llm_scope_all)) },
         )
     }

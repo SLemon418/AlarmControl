@@ -49,6 +49,32 @@ class FakeNotificationEventDao : NotificationEventDao {
         revision.value++
     }
 
+    override suspend fun updatePostCommitEnrichment(
+        eventId: Long,
+        mlCategory: String?,
+        mlConfidence: Float?,
+        monitoredRuleId: Long?,
+        monitoredAction: StoredRuleAction?,
+    ): Int {
+        val index = events.indexOfFirst { it.id == eventId }
+        if (index < 0) return 0
+        val existing = events[index]
+        events[index] =
+            existing.copy(
+                mlCategory = mlCategory ?: existing.mlCategory,
+                mlConfidence = mlConfidence ?: existing.mlConfidence,
+                monitoredRuleId = monitoredRuleId,
+                monitoredAction = monitoredAction,
+            )
+        revision.value++
+        return 1
+    }
+
+    override suspend fun deleteTraceForEvent(eventId: Long) {
+        traces.removeAll { it.eventId == eventId }
+        revision.value++
+    }
+
     override fun observeRecent(limit: Int): Flow<List<NotificationEventWithTrace>> =
         revision.map {
             events.sortedByDescending { it.recordedAtMillis }.take(limit).map { event ->

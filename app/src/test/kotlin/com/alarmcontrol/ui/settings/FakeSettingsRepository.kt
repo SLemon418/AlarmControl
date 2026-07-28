@@ -11,7 +11,6 @@ class FakeSettingsRepository(
     enabled: Boolean = false,
     filtering: Boolean = true,
     llmEnabled: Boolean = false,
-    llmAutoActions: Boolean = false,
     eventDays: Int = RetentionDefaults.EVENT_DAYS,
     insightDays: Int = RetentionDefaults.DAILY_INSIGHT_DAYS,
     dynamicColor: Boolean = false,
@@ -21,7 +20,6 @@ class FakeSettingsRepository(
     private val state = MutableStateFlow(enabled)
     private val filteringState = MutableStateFlow(filtering)
     private val llmState = MutableStateFlow(llmEnabled)
-    private val llmAutoActionsState = MutableStateFlow(llmAutoActions)
     private val eventRetentionState = MutableStateFlow(eventDays)
     private val insightRetentionState = MutableStateFlow(insightDays)
     private val tokenState = MutableStateFlow("")
@@ -35,8 +33,6 @@ class FakeSettingsRepository(
     override val externalAutomationToken: Flow<String> = tokenState
 
     override val llmAnalysisEnabled: Flow<Boolean> = llmState
-
-    override val llmAutoActionsEnabled: Flow<Boolean> = llmAutoActionsState
 
     override val eventRetentionDays: Flow<Int> = eventRetentionState
 
@@ -63,10 +59,6 @@ class FakeSettingsRepository(
 
     override suspend fun setLlmAnalysisEnabled(enabled: Boolean) {
         llmState.value = enabled
-    }
-
-    override suspend fun setLlmAutoActionsEnabled(enabled: Boolean) {
-        llmAutoActionsState.value = enabled
     }
 
     override suspend fun setEventRetentionDays(days: Int) {
@@ -97,7 +89,6 @@ class FakeSettingsRepository(
             filteringEnabled = filteringState.value,
             externalAutomationEnabled = state.value,
             llmAnalysisEnabled = llmState.value,
-            llmAutoActionsEnabled = llmAutoActionsState.value,
             eventRetentionDays = eventRetentionState.value,
             dailyInsightRetentionDays = insightRetentionState.value,
         )
@@ -106,7 +97,6 @@ class FakeSettingsRepository(
         filteringState.value = snapshot.filteringEnabled
         state.value = snapshot.externalAutomationEnabled
         llmState.value = snapshot.llmAnalysisEnabled
-        llmAutoActionsState.value = snapshot.llmAutoActionsEnabled
         eventRetentionState.value = snapshot.eventRetentionDays
         insightRetentionState.value = snapshot.dailyInsightRetentionDays
     }
@@ -116,7 +106,6 @@ class FakeSettingsRepository(
         state.value = false
         filteringState.value = false
         llmState.value = false
-        llmAutoActionsState.value = false
         eventRetentionState.value = RetentionDefaults.EVENT_DAYS
         insightRetentionState.value = RetentionDefaults.DAILY_INSIGHT_DAYS
         tokenState.value = ""

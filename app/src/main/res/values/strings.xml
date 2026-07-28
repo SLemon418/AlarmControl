@@ -79,10 +79,9 @@
     <string name="automation_outcome_invalid">Invalid request</string>
     <string name="automation_outcome_not_found">Target not found</string>
     <string name="settings_llm_section">On-device semantic analysis</string>
-    <string name="settings_llm_enabled">Use local LLM ad analysis</string>
+    <string name="settings_llm_enabled">Use deferred local LLM analysis</string>
     <string name="settings_llm_summary">Optional and off by default. Select a compatible quantized MediaPipe .task model already stored on this device.</string>
-    <string name="settings_llm_auto_actions">Allow LLM verdicts to trigger rules</string>
-    <string name="settings_llm_auto_actions_summary">Off by default. When off, local ad analysis is observation-only and never dismisses or snoozes a notification.</string>
+    <string name="settings_llm_summary_unverified">Automatic background LLM analysis is unavailable until this build verifies a compatible model profile. You may still import a local model for compatibility checks.</string>
     <string name="settings_llm_scope">Semantic history analysis</string>
     <string name="settings_llm_scope_rules">Only when rules need it</string>
     <string name="settings_llm_scope_all">All notifications</string>
@@ -104,6 +103,7 @@
     <string name="settings_model_fingerprint">SHA-256: %1$s</string>
     <string name="settings_model_fingerprint_note">This detects changes after import; it does not certify the model publisher.</string>
     <string name="settings_model_trust_warning">Import models only from a source you trust. A model file is processed by native on-device code; its hash detects later changes but does not certify its publisher.</string>
+    <string name="message_llm_background_unverified">This build has not verified a model for automatic background LLM analysis.</string>
     <string name="settings_backup_section">Backup &amp; restore</string>
     <string name="settings_backup_summary">Save your rules and history to a file, or restore from one. AlarmControl requests device-only storage and never uploads the file; choose a device storage location in the picker.</string>
     <string name="settings_backup_password">Backup password (optional)</string>

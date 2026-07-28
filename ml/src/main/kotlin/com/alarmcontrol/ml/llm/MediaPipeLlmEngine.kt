@@ -35,6 +35,9 @@ internal class MediaPipeLlmEngine(
     override fun isModelAvailable(): Boolean = modelFile.isFile && modelFile.length() > 0
 
     override fun load() {
+        // A newer initialize command may supersede a queued close. Replacing here keeps the engine
+        // contract leak-free even when the manager correctly skips that stale close command.
+        close()
         val options =
             LlmInferenceOptions
                 .builder()

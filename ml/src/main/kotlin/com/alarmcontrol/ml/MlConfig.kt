@@ -17,6 +17,11 @@ internal object MlConfig {
     /** Minimum top score for a categorization to be trusted; mirrored by the trainer's verification. */
     const val CONFIDENCE_THRESHOLD = 0.6f
 
+    const val SEMANTIC_MODEL_ASSET = "semantic_notification_classifier.tflite"
+    const val SEMANTIC_VOCAB_ASSET = "semantic_vocab.txt"
+    const val SEMANTIC_LABELS_ASSET = "semantic_labels.txt"
+    const val SEMANTIC_MODEL_MANIFEST_ASSET = "semantic_model_manifest.json"
+
     /**
      * Path (relative to the app's private `filesDir`) where the on-device generative LLM model is
      * expected (Milestone 4). The model is **not** bundled in the APK — it's far too large — so it's

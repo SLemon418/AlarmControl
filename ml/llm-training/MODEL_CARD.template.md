@@ -4,7 +4,17 @@
 
 Replace this section with the training date, exact base-model revision, evaluator commit, and
 whether every release gate passed. A checkpoint or `.task` must not be described as production
-ready until the quantized artifact passes the held-out and physical-device checks.
+ready until the frozen merged candidate passes the one-shot final holdout, and the quantized
+`.task` passes non-final validation/development agreement plus physical-device checks. Do not rerun
+the one-shot final holdout on the quantized artifact. A holdout exposed before the candidate is
+frozen is retired and cannot supply release evidence; create its replacement only after every
+non-final result is fixed.
+
+- Validation gate: `not run | pass | fail` (metrics path and model hash)
+- Development-regression gate: `not run | pass | fail` (metrics path)
+- One-shot final holdout: `not created | sealed | pass | fail` (hash, run count, and evidence path)
+- LiteRT/MediaPipe `.task` conversion: `not run | pass | fail` (task SHA-256)
+- Physical Android validation: `not run | pass | fail` (device and measurements)
 
 ## Intended use
 
@@ -20,8 +30,10 @@ enables that setting.
 ## Training data
 
 - Source: `data/seed_examples.jsonl`
-- Composition: 140 synthetic, content-free examples; seven balanced intents; balanced English and
-  Korean; fixed train/validation/test splits
+- Composition: 210 synthetic, content-free examples; seven balanced intents; balanced English and
+  Korean; fixed 140/42/28 train/validation/development splits
+- Rendered full dataset: 420/84/28 train/validation/development rows; record any curriculum subset
+  separately with its exact manifest hash
 - Hard cases: promotion disguised as account or delivery notices, real transactions, OTP/security
   alerts, mixed notices, prompt injection inside notification text, control characters, and
   insufficient context
@@ -32,7 +44,7 @@ and irreversibly redacted examples. App data must never be sent to hosted traini
 
 ## Base and adaptation
 
-- Base: `google/gemma-3-270m-it` (record the exact revision here)
+- Base: `google/gemma-3-1b-it` (record the exact revision here)
 - Method: record `lora` or `full`, hyperparameters, seed, and training hardware here
 - Deployment: merged Hugging Face safetensors -> LiteRT dynamic INT8 -> MediaPipe Task Bundle
 - Context: 4,096 combined prompt and output tokens
@@ -40,13 +52,15 @@ and irreversibly redacted examples. App data must never be sent to hosted traini
 
 ## Required evaluation record
 
-Paste the generated `artifacts/evaluation/metrics.json` here and add:
+Record separately labeled validation, development-regression, and one-shot-final metrics paths,
+model hashes, commands, and results here. Then add:
 
 - quantized `.task` agreement with the merged checkpoint
 - JSON and enum validity
 - macro-F1 and every class's recall
 - `MARKETING` precision
 - prompt-injection hard-set accuracy
+- non-`AMBIGUOUS` prompt-injection accuracy and false-`AMBIGUOUS` abstention rate
 - wrong actionable prediction rate at the app's 0.6 gate
 - English and Korean accuracy
 - actual device cold-load time, RSS, p50/p95 latency, thermal behavior, and repeated-call result

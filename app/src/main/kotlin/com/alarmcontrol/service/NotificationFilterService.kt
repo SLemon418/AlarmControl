@@ -10,9 +10,13 @@ import com.alarmcontrol.core.coroutines.ApplicationScope
 import com.alarmcontrol.core.coroutines.Dispatcher
 import com.alarmcontrol.core.feedback.AdFeedbackRepository
 import com.alarmcontrol.core.feedback.AdObservation
+import com.alarmcontrol.core.filtering.DecisionTraceLane
+import com.alarmcontrol.core.filtering.DecisionTraceNode
+import com.alarmcontrol.core.filtering.MAX_PERSISTED_TRACE_NODES
 import com.alarmcontrol.core.filtering.MAX_RATE_WINDOW_MILLIS
 import com.alarmcontrol.core.filtering.NotificationContent
 import com.alarmcontrol.core.filtering.NotificationContentVisibility
+import com.alarmcontrol.core.filtering.NotificationDecisionEnrichment
 import com.alarmcontrol.core.filtering.NotificationEvent
 import com.alarmcontrol.core.filtering.NotificationEventRepository
 import com.alarmcontrol.core.filtering.NotificationSnapshot
@@ -22,8 +26,13 @@ import com.alarmcontrol.core.filtering.SemanticIntent
 import com.alarmcontrol.core.result.runCatchingPreservingCancellation
 import com.alarmcontrol.core.settings.SemanticAnalysisScope
 import com.alarmcontrol.core.settings.SettingsRepository
+import com.alarmcontrol.ml.ClassificationResult
 import com.alarmcontrol.ml.NotificationClassifier
+import com.alarmcontrol.ml.SemanticClassificationResult
+import com.alarmcontrol.ml.SemanticInferenceUrgency
+import com.alarmcontrol.ml.SemanticNotificationClassifier
 import com.alarmcontrol.ml.llm.LlmAnalysisResult
+import com.alarmcontrol.ml.llm.LlmBackgroundAnalysisEligibility
 import com.alarmcontrol.ml.llm.OnDeviceLlmManager
 import com.alarmcontrol.notifications.CompiledRuleSet
 import com.alarmcontrol.notifications.MatchDecision
@@ -43,27 +52,30 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.time.Clock
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 
 /**
  * The app's `NotificationListenerService` entry point (CLAUDE.md §4). It is a thin shell: every
  * callback translates the framework notification to a pure [NotificationSnapshot], asks the
- * on-device [NotificationClassifier] for an optional category, delegates the decision to the
- * framework-free [Matcher], performs the platform side-effect, and records the outcome (§6). No
- * filtering logic lives here — the classifier and matcher are the only deciders.
+ * on-device classifiers for optional category and semantic signals, delegates the decision to the
+ * framework-free [Matcher], performs the platform side-effect, and records the outcome (§6).
  *
  * This is the "processing pipeline" that populates `mlCategory` (§0): the classifier lives in `:ml`
  * and the matcher in `:notifications`, so enriching here keeps `:notifications` pure and free of any
  * `:ml` dependency (§4).
+ *
+ * The Android listener lifecycle keeps orchestration state in one owner while inference and queues
+ * remain separate collaborators, so this boundary intentionally exceeds detekt's class-size metric.
  */
 @AndroidEntryPoint
-@Suppress("TooManyFunctions")
+@Suppress("LargeClass", "TooManyFunctions")
 class NotificationFilterService : NotificationListenerService() {
     @Inject lateinit var matcher: Matcher
 
     @Inject lateinit var classifier: NotificationClassifier
+
+    @Inject lateinit var semanticClassifier: SemanticNotificationClassifier
 
     @Inject lateinit var llmManager: OnDeviceLlmManager
 
@@ -88,6 +100,13 @@ class NotificationFilterService : NotificationListenerService() {
     // Service-scoped structured concurrency (§8): cancelled in onDestroy, never GlobalScope.
     private val scope by lazy { CoroutineScope(SupervisorJob() + dispatcher) }
     private val processingCoordinator by lazy { NotificationProcessingCoordinator(scope) }
+    private val semanticRuleResolver by lazy {
+        RealtimeSemanticRuleResolver(matcher, semanticClassifier)
+    }
+    private val llmLifecycle by lazy { SemanticLlmLifecycle(llmManager) }
+    private val categoryRuleResolver by lazy {
+        RealtimeCategoryRuleResolver(classifier)
+    }
     private val rateTracker = NotificationRateTracker()
     private val semanticObservationQueue by lazy {
         SemanticObservationQueue(
@@ -96,32 +115,37 @@ class NotificationFilterService : NotificationListenerService() {
             handler = ::processSemanticObservation,
         )
     }
+    private val postCommitWorkDispatcher by lazy {
+        PostCommitWorkDispatcher(
+            persistenceScope = applicationScope,
+            enrichmentScope = scope,
+            persist = ::persistCommittedEvaluation,
+            onPersistenceFailure = {
+                Log.w(TAG, "Post-commit notification persistence failed")
+            },
+            onEnrichmentFailure = { Log.w(TAG, "Post-commit notification enrichment failed") },
+            enrich = ::processPostCommitEvaluation,
+        )
+    }
 
     // Active rules cached in-memory and recompiled only when they change, so each notification
     // evaluates against this hot snapshot instead of re-reading the DB per event (M3 performance).
     private val compiledRules = MutableStateFlow<CompiledRuleSet?>(null)
     private val filteringEnabled = MutableStateFlow<Boolean?>(null)
     private val llmAnalysisEnabled = MutableStateFlow<Boolean?>(null)
-    private val llmAutoActionsEnabled = MutableStateFlow<Boolean?>(null)
     private val semanticAnalysisScope = MutableStateFlow<SemanticAnalysisScope?>(null)
     private val contentStorageEnabled = MutableStateFlow<Boolean?>(null)
     private val contentExcludedPackages = MutableStateFlow<Set<String>?>(null)
     private var rulesJob: Job? = null
     private var settingsJob: Job? = null
     private var rateSeedJob: Job? = null
-    private val llmInitializationStarted = AtomicBoolean(false)
     private val semanticGeneration = AtomicLong(0)
-    private val llmLifecycleLock = Any()
-    private var llmCloseJob: Job? = null
 
     override fun onListenerConnected() {
         super.onListenerConnected()
         seedRateCacheIfNeeded()
         observeRulesIfNeeded()
         observeSettingsIfNeeded()
-        if (llmAnalysisEnabled.value == true) {
-            initializeLlmOnce()
-        }
     }
 
     private fun seedRateCacheIfNeeded() {
@@ -151,20 +175,24 @@ class NotificationFilterService : NotificationListenerService() {
                     runCatchingPreservingCancellation {
                         ruleRepository.observeRules().collect { rules ->
                             val compiled = matcher.compile(rules)
-                            val hadCompiledRules = compiledRules.value != null
-                            compiledRules.value = compiled
-                            if (hadCompiledRules) {
-                                // A slow ML/LLM result must never act on a deleted or disabled rule.
-                                processingCoordinator.invalidateAll()
-                            }
-                            if (llmAnalysisEnabled.value == true) {
-                                initializeLlmOnce()
+                            if (compiledRules.value == null) {
+                                compiledRules.value = compiled
+                            } else {
+                                // A slow classifier result must never act on a deleted or disabled rule.
+                                processingCoordinator.invalidateAllAndUpdate {
+                                    semanticGeneration.incrementAndGet()
+                                    compiledRules.value = compiled
+                                }
+                                semanticObservationQueue.clearPending()
                             }
                         }
                     }.onFailure {
                         // Never keep evaluating a stale destructive cache after a persistence failure.
-                        compiledRules.value = CompiledRuleSet.EMPTY
-                        processingCoordinator.invalidateAll()
+                        processingCoordinator.invalidateAllAndUpdate {
+                            semanticGeneration.incrementAndGet()
+                            compiledRules.value = CompiledRuleSet.EMPTY
+                        }
+                        semanticObservationQueue.clearPending()
                         Log.w(TAG, "Rule cache stopped")
                     }
                 }
@@ -179,7 +207,6 @@ class NotificationFilterService : NotificationListenerService() {
                         val llmSettings =
                             combine(
                                 settingsRepository.llmAnalysisEnabled,
-                                settingsRepository.llmAutoActionsEnabled,
                                 settingsRepository.semanticAnalysisScope,
                                 ::ListenerLlmSettings,
                             )
@@ -192,7 +219,6 @@ class NotificationFilterService : NotificationListenerService() {
                             ListenerSettings(
                                 filtering,
                                 llm.enabled,
-                                llm.autoActions,
                                 llm.scope,
                                 storeContent,
                                 excludedPackages,
@@ -210,26 +236,28 @@ class NotificationFilterService : NotificationListenerService() {
 
     private suspend fun applySettings(settings: ListenerSettings) {
         val previous = currentSettings()
-        val wasLlmEnabled = llmAnalysisEnabled.value
+        if (previous == null) {
+            publishSettings(settings)
+        } else if (previous != settings) {
+            // Includes privacy reductions such as new content exclusions.
+            processingCoordinator.invalidateAllAndUpdate {
+                semanticGeneration.incrementAndGet()
+                publishSettings(settings)
+            }
+            semanticObservationQueue.clearPending()
+        }
+        if (!settings.llmEnabled && previous?.llmEnabled == true) {
+            semanticObservationQueue.clearPending()
+            llmLifecycle.close()
+        }
+    }
+
+    private fun publishSettings(settings: ListenerSettings) {
         filteringEnabled.value = settings.filtering
         llmAnalysisEnabled.value = settings.llmEnabled
-        llmAutoActionsEnabled.value = settings.llmAutoActions
         semanticAnalysisScope.value = settings.semanticScope
         contentStorageEnabled.value = settings.storeContent
         contentExcludedPackages.value = settings.excludedPackages
-        if (previous != null && previous != settings) {
-            // Includes privacy reductions such as new content exclusions.
-            semanticGeneration.incrementAndGet()
-            semanticObservationQueue.clearPending()
-            processingCoordinator.invalidateAll()
-        }
-        if (settings.llmEnabled) {
-            initializeLlmOnce()
-        } else if (wasLlmEnabled == true) {
-            semanticObservationQueue.clearPending()
-            llmInitializationStarted.set(false)
-            llmManager.close()
-        }
     }
 
     private fun currentSettings(): ListenerSettings? =
@@ -237,7 +265,6 @@ class NotificationFilterService : NotificationListenerService() {
             ListenerSettings(
                 filtering = filtering,
                 llmEnabled = llmAnalysisEnabled.value ?: false,
-                llmAutoActions = llmAutoActionsEnabled.value ?: false,
                 semanticScope = semanticAnalysisScope.value ?: SemanticAnalysisScope.RULES_ONLY,
                 storeContent = contentStorageEnabled.value ?: false,
                 excludedPackages = contentExcludedPackages.value.orEmpty(),
@@ -246,17 +273,20 @@ class NotificationFilterService : NotificationListenerService() {
 
     private suspend fun resetSettingsCache() {
         // Fail closed: unknown settings must never activate destructive filtering.
-        filteringEnabled.value = false
-        llmAnalysisEnabled.value = false
-        llmAutoActionsEnabled.value = false
-        semanticAnalysisScope.value = SemanticAnalysisScope.RULES_ONLY
-        contentStorageEnabled.value = false
-        contentExcludedPackages.value = emptySet()
-        llmInitializationStarted.set(false)
-        semanticGeneration.incrementAndGet()
+        processingCoordinator.invalidateAllAndUpdate {
+            semanticGeneration.incrementAndGet()
+            publishSettings(
+                ListenerSettings(
+                    filtering = false,
+                    llmEnabled = false,
+                    semanticScope = SemanticAnalysisScope.RULES_ONLY,
+                    storeContent = false,
+                    excludedPackages = emptySet(),
+                ),
+            )
+        }
         semanticObservationQueue.clearPending()
-        processingCoordinator.invalidateAll()
-        llmManager.close()
+        llmLifecycle.close()
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
@@ -312,7 +342,6 @@ class NotificationFilterService : NotificationListenerService() {
                 ListenerRuntime(
                     filtering = filteringEnabled.filterNotNull().first(),
                     llmEnabled = llmAnalysisEnabled.filterNotNull().first(),
-                    llmAutoActions = llmAutoActionsEnabled.filterNotNull().first(),
                     storeContent = contentStorageEnabled.filterNotNull().first(),
                     excludedPackages = contentExcludedPackages.filterNotNull().first(),
                     semanticScope = semanticAnalysisScope.filterNotNull().first(),
@@ -325,95 +354,174 @@ class NotificationFilterService : NotificationListenerService() {
             prepareEvaluation(
                 snapshot,
                 runtime.compiledRules,
-                runtime.llmEnabled,
-                runtime.llmAutoActions,
                 runtime.semanticGeneration,
                 token,
             ) ?: return
         if (!token.commit { applyAction(key, evaluated.action) }) return
-        persistEvaluation(
-            evaluated,
-            runtime.llmEnabled,
-            runtime.storeContent,
-            runtime.excludedPackages,
-            runtime.semanticScope,
+        postCommitWorkDispatcher.submit(
+            PostCommitEvaluationRequest(
+                evaluated = evaluated,
+                runtime = runtime,
+            ),
         )
+    }
+
+    private suspend fun processPostCommitEvaluation(request: PersistedPostCommitEvaluationRequest) {
+        val runtime = request.original.runtime
+        val originalEvaluation = request.original.evaluated
+        if (semanticGeneration.get() != originalEvaluation.semanticGeneration) return
+        var evaluated = originalEvaluation
+        val categoryClassification =
+            if (evaluated.monitorNeedsPostCommitMlCategory) {
+                categoryRuleResolver.resolveMonitorAfterCommit(evaluated.common)
+            } else {
+                null
+            }
+        val enrichedCommon =
+            categoryClassification?.let { classification ->
+                evaluated.common.copy(mlCategory = classification.category)
+            } ?: evaluated.common
+        if (semanticGeneration.get() != evaluated.semanticGeneration) return
+        val postCommitNeedsSemantic =
+            evaluated.monitorNeedsPostCommitSemantic ||
+                matcher
+                    .semanticResolutionRequirements(
+                        enrichedCommon,
+                        runtime.compiledRules,
+                    ).monitorNeedsSemantic
+        val monitorEvaluation =
+            semanticRuleResolver.resolveMonitorAfterCommit(
+                snapshot = enrichedCommon,
+                compiled = runtime.compiledRules,
+                existingClassification = evaluated.semanticClassification,
+                classifySemantic = postCommitNeedsSemantic,
+                existingDecisionTrace = evaluated.decisionTrace,
+            )
+        if (semanticGeneration.get() != evaluated.semanticGeneration) return
+        evaluated =
+            evaluated.copy(
+                common = enrichedCommon,
+                monitoredAction = monitorEvaluation.monitoredAction,
+                monitoredRuleId = monitorEvaluation.monitoredRuleId,
+                mlConfidence =
+                    categoryClassification?.confidence
+                        ?: evaluated.mlConfidence,
+                semanticClassification = monitorEvaluation.classification,
+                needsDelayedSemanticObservation =
+                    evaluated.needsDelayedSemanticObservation ||
+                        monitorEvaluation.needsDelayedObservation,
+                decisionTrace = monitorEvaluation.decisionTrace,
+                monitorNeedsPostCommitMlCategory = false,
+                monitorNeedsPostCommitSemantic = false,
+            )
+        completePostCommitEnrichment(
+            request = request,
+            originalEvaluation = originalEvaluation,
+            evaluated = evaluated,
+            postCommitNeedsSemantic = postCommitNeedsSemantic,
+            postCommitNeedsDelayedObservation = monitorEvaluation.needsDelayedObservation,
+        )
+    }
+
+    private suspend fun completePostCommitEnrichment(
+        request: PersistedPostCommitEvaluationRequest,
+        originalEvaluation: EvaluatedNotification,
+        evaluated: EvaluatedNotification,
+        postCommitNeedsSemantic: Boolean,
+        postCommitNeedsDelayedObservation: Boolean,
+    ) {
+        val runtime = request.original.runtime
+        eventRepository.enrichRecordedDecision(
+            eventId = request.eventId,
+            enrichment =
+                NotificationDecisionEnrichment(
+                    mlCategory = evaluated.common.mlCategory,
+                    mlConfidence = evaluated.mlConfidence,
+                    monitoredRuleId = evaluated.monitoredRuleId,
+                    monitoredAction = evaluated.monitoredAction,
+                    decisionTrace = evaluated.decisionTrace,
+                ),
+        )
+        evaluated.semanticClassification
+            ?.takeUnless { it == originalEvaluation.semanticClassification }
+            ?.let { result ->
+                recordSemanticObservation(
+                    eventId = request.eventId,
+                    packageName = request.persistedSnapshot.packageName,
+                    intent = result.intent,
+                    confidenceScore = result.confidence,
+                )
+            }
+        val observationWasDeferred =
+            !originalEvaluation.needsDelayedSemanticObservation &&
+                (
+                    originalEvaluation.monitorNeedsPostCommitMlCategory ||
+                        originalEvaluation.monitorNeedsPostCommitSemantic
+                )
+        val shouldRunDeferredObservation =
+            postCommitNeedsDelayedObservation ||
+                (
+                    !postCommitNeedsSemantic &&
+                        runtime.semanticScope == SemanticAnalysisScope.ALL_NOTIFICATIONS
+                )
+        if (observationWasDeferred && shouldRunDeferredObservation) {
+            enqueueSemanticObservationIfEligible(
+                eventId = request.eventId,
+                snapshot = request.persistedSnapshot,
+                evaluated = evaluated,
+                runtime = runtime,
+            )
+        }
     }
 
     private suspend fun prepareEvaluation(
         snapshot: NotificationSnapshot,
         compiled: CompiledRuleSet,
-        llmEnabled: Boolean,
-        llmAutoActions: Boolean,
         semanticGeneration: Long,
         token: NotificationProcessingCoordinator.ProcessingToken,
     ): EvaluatedNotification? {
         if (!token.isCurrent()) return null
         val requirements = compiled.requiredSignals
-        val classification = if (requirements.mlCategory) classifier.classify(snapshot) else null
-        if (!token.isCurrent()) return null
-        val activeNeedsLlm = compiled.activeRequiredSignals.needsLlm()
-        val monitorNeedsLlm = compiled.monitorRequiredSignals.needsLlm()
-        val useLlmForActive = activeNeedsLlm && llmEnabled && llmAutoActions
-        val useLlmForMonitor = monitorNeedsLlm && llmEnabled
-        val decisionAnalysis =
-            if (useLlmForActive || useLlmForMonitor) analyzeAdvertisement(snapshot) else null
-        val trustedIntent =
-            decisionAnalysis
-                ?.takeIf { it.confidenceScore >= LLM_SEMANTIC_CONFIDENCE }
-                ?.intent
-                ?.takeUnless { it == SemanticIntent.AMBIGUOUS }
-        if (!token.isCurrent()) return null
         val rateCounts =
             rateTracker.counts(
                 snapshot,
                 requirements.rateSignals,
             )
+        val categoryEvaluation =
+            categoryRuleResolver.resolveBeforeActiveCommit(
+                snapshot.copy(rateCounts = rateCounts),
+                compiled,
+            )
+        if (!token.isCurrent()) return null
         val common =
             snapshot.copy(
-                mlCategory = classification?.category,
+                mlCategory = categoryEvaluation.classification?.category,
                 rateCounts = rateCounts,
             )
-        val activeSnapshot =
-            common.copy(
-                semanticIntent = trustedIntent.takeIf { useLlmForActive },
-                isAdvertisement = trustedIntent?.isAdvertisement.takeIf { useLlmForActive },
-            )
-        val monitorSnapshot =
-            common.copy(
-                semanticIntent = trustedIntent.takeIf { useLlmForMonitor },
-                isAdvertisement = trustedIntent?.isAdvertisement.takeIf { useLlmForMonitor },
-            )
-        val matchEvaluation =
-            matcher.evaluateWithTraces(
-                activeSnapshot = activeSnapshot,
-                monitorSnapshot = monitorSnapshot,
-                compiled = compiled,
-            )
-        val decision = matchEvaluation.activeDecision
-        val monitorDecision = matchEvaluation.monitorDecision
-        val active = decision.resolve(RuleAction.Keep)
-        val monitor = monitorDecision.resolve(null)
+        val semanticEvaluation = semanticRuleResolver.resolve(common, compiled)
+        if (!token.isCurrent()) return null
         return EvaluatedNotification(
             common = common,
-            action = requireNotNull(active.action),
-            matchedRuleId = active.ruleId,
-            monitoredAction = monitor.action,
-            monitoredRuleId = monitor.ruleId,
-            mlConfidence = classification?.confidence,
-            analysis = decisionAnalysis,
-            decisionTrace = matchEvaluation.decisionTrace,
+            action = semanticEvaluation.action,
+            matchedRuleId = semanticEvaluation.matchedRuleId,
+            monitoredAction = semanticEvaluation.monitoredAction,
+            monitoredRuleId = semanticEvaluation.monitoredRuleId,
+            mlConfidence = categoryEvaluation.classification?.confidence,
+            semanticClassification = semanticEvaluation.classification,
+            needsDelayedSemanticObservation = semanticEvaluation.needsDelayedObservation,
+            decisionTrace = semanticEvaluation.decisionTrace,
+            monitorNeedsPostCommitMlCategory =
+                categoryEvaluation.monitorNeedsPostCommitClassification,
+            monitorNeedsPostCommitSemantic = semanticEvaluation.monitorNeedsPostCommitSemantic,
             semanticGeneration = semanticGeneration,
         )
     }
 
-    private suspend fun persistEvaluation(
-        evaluated: EvaluatedNotification,
-        llmEnabled: Boolean,
-        storeContent: Boolean,
-        excludedPackages: Set<String>,
-        semanticScope: SemanticAnalysisScope,
-    ) {
+    private suspend fun persistCommittedEvaluation(
+        request: PostCommitEvaluationRequest,
+    ): PersistedPostCommitEvaluationRequest? {
+        val evaluated = request.evaluated
+        val runtime = request.runtime
         val analyticsClassification =
             if (evaluated.common.mlCategory == null) {
                 withTimeoutOrNull(ANALYTICS_CLASSIFICATION_TIMEOUT_MILLIS) {
@@ -430,9 +538,9 @@ class NotificationFilterService : NotificationListenerService() {
         val encryptedContent =
             persistedSnapshot
                 .takeIf {
-                    storeContent &&
+                    runtime.storeContent &&
                         it.contentVisibility != NotificationContentVisibility.SECRET &&
-                        it.packageName !in excludedPackages
+                        it.packageName !in runtime.excludedPackages
                 }?.let { NotificationContent(it.title, it.text) }
         val eventId =
             eventRepository.record(
@@ -458,28 +566,110 @@ class NotificationFilterService : NotificationListenerService() {
                 ),
                 encryptedContent,
             )
-        if (evaluated.analysis != null && isSemanticAnalysisCurrent(evaluated.semanticGeneration)) {
-            recordSemanticObservation(eventId, persistedSnapshot.packageName, evaluated.analysis)
-        } else if (
-            llmEnabled &&
-            semanticScope == SemanticAnalysisScope.ALL_NOTIFICATIONS &&
-            isSemanticAnalysisCurrent(evaluated.semanticGeneration, requireAllNotifications = true)
-        ) {
-            semanticObservationQueue.offer(
-                SemanticObservationRequest(
-                    eventId = eventId,
-                    snapshot = persistedSnapshot,
-                    semanticGeneration = evaluated.semanticGeneration,
-                ),
+        evaluated.semanticClassification?.let { result ->
+            recordSemanticObservation(
+                eventId = eventId,
+                packageName = persistedSnapshot.packageName,
+                intent = result.intent,
+                confidenceScore = result.confidence,
             )
+        }
+        val observationNeedsPostCommitResolution =
+            !evaluated.needsDelayedSemanticObservation &&
+                (
+                    evaluated.monitorNeedsPostCommitMlCategory ||
+                        evaluated.monitorNeedsPostCommitSemantic
+                )
+        if (!observationNeedsPostCommitResolution) {
+            enqueueSemanticObservationIfEligible(
+                eventId = eventId,
+                snapshot = persistedSnapshot,
+                evaluated = evaluated,
+                runtime = runtime,
+            )
+        }
+        return if (
+            evaluated.monitorNeedsPostCommitMlCategory ||
+            evaluated.monitorNeedsPostCommitSemantic
+        ) {
+            PersistedPostCommitEvaluationRequest(
+                original = request,
+                eventId = eventId,
+                persistedSnapshot = persistedSnapshot,
+            )
+        } else {
+            null
         }
     }
 
+    private fun enqueueSemanticObservationIfEligible(
+        eventId: String,
+        snapshot: NotificationSnapshot,
+        evaluated: EvaluatedNotification,
+        runtime: ListenerRuntime,
+    ) {
+        val requireAllNotifications = !evaluated.needsDelayedSemanticObservation
+        val scopeAllowsObservation =
+            evaluated.needsDelayedSemanticObservation ||
+                runtime.semanticScope == SemanticAnalysisScope.ALL_NOTIFICATIONS
+        val modelAllowsObservation =
+            runtime.llmEnabled &&
+                llmManager.backgroundAnalysisEligibility ==
+                LlmBackgroundAnalysisEligibility.VERIFIED_COMPATIBLE &&
+                snapshot.hasClassifiableText()
+        if (!scopeAllowsObservation || !modelAllowsObservation) return
+        if (
+            !isSemanticAnalysisCurrent(
+                evaluated.semanticGeneration,
+                requireAllNotifications = requireAllNotifications,
+            )
+        ) {
+            return
+        }
+        semanticObservationQueue.offer(
+            SemanticObservationRequest(
+                eventId = eventId,
+                snapshot = snapshot,
+                semanticGeneration = evaluated.semanticGeneration,
+                requireAllNotifications = requireAllNotifications,
+            ),
+        )
+    }
+
     private suspend fun processSemanticObservation(request: SemanticObservationRequest) {
-        if (!isSemanticAnalysisCurrent(request.semanticGeneration, requireAllNotifications = true)) return
+        if (
+            llmManager.backgroundAnalysisEligibility !=
+            LlmBackgroundAnalysisEligibility.VERIFIED_COMPATIBLE ||
+            !request.snapshot.hasClassifiableText() ||
+            !isSemanticAnalysisCurrent(
+                request.semanticGeneration,
+                requireAllNotifications = request.requireAllNotifications,
+            )
+        ) {
+            return
+        }
+        if (!initializeLlmForObservation(request)) return
+        if (
+            !isSemanticAnalysisCurrent(
+                request.semanticGeneration,
+                requireAllNotifications = request.requireAllNotifications,
+            )
+        ) {
+            return
+        }
         analyzeAdvertisement(request.snapshot)?.let { result ->
-            if (isSemanticAnalysisCurrent(request.semanticGeneration, requireAllNotifications = true)) {
-                recordSemanticObservation(request.eventId, request.snapshot.packageName, result)
+            if (
+                isSemanticAnalysisCurrent(
+                    request.semanticGeneration,
+                    requireAllNotifications = request.requireAllNotifications,
+                )
+            ) {
+                recordSemanticObservation(
+                    eventId = request.eventId,
+                    packageName = request.snapshot.packageName,
+                    intent = result.intent,
+                    confidenceScore = result.confidenceScore,
+                )
             }
         }
     }
@@ -495,59 +685,45 @@ class NotificationFilterService : NotificationListenerService() {
     private suspend fun recordSemanticObservation(
         eventId: String,
         packageName: String,
-        result: LlmAnalysisResult,
+        intent: SemanticIntent,
+        confidenceScore: Float,
     ) {
-        if (result.confidenceScore <= 0f) return
+        if (!confidenceScore.isFinite() || confidenceScore <= 0f) return
         adFeedbackRepository.recordObservation(
             AdObservation(
                 notificationEventId = eventId,
                 packageName = packageName,
-                predictedIsAdvertisement = result.isAdvertisement,
-                predictedIntent = result.intent,
-                confidenceScore = result.confidenceScore,
+                predictedIsAdvertisement = intent.isAdvertisement,
+                predictedIntent = intent,
+                confidenceScore = confidenceScore,
                 analyzedAtMillis = clock.millis(),
             ),
         )
     }
 
-    private fun MatchDecision.resolve(fallbackAction: RuleAction?): ResolvedDecision =
-        when (this) {
-            is MatchDecision.Matched -> ResolvedDecision(action, rule.id)
-            MatchDecision.NoMatch -> ResolvedDecision(fallbackAction, null)
-        }
-
     /**
      * Runs optional local semantic analysis with a hard caller deadline. The manager retains native
      * ownership after a timeout, so a late result is discarded and cannot apply an action.
      */
-    private suspend fun analyzeAdvertisement(snapshot: NotificationSnapshot): LlmAnalysisResult? {
-        val text = listOfNotNull(snapshot.title, snapshot.text).joinToString(separator = " ").ifBlank { return null }
-        return withTimeoutOrNull(LLM_ANALYSIS_TIMEOUT_MILLIS) {
-            llmManager.analyze(text, snapshot.packageName)
-        }
-    }
+    private suspend fun analyzeAdvertisement(snapshot: NotificationSnapshot): LlmAnalysisResult? =
+        analyzeDelayedSemanticObservation(
+            snapshot = snapshot,
+            llmManager = llmManager,
+            timeoutMillis = LLM_ANALYSIS_TIMEOUT_MILLIS,
+        )
 
-    private fun initializeLlmOnce() {
-        if (!llmInitializationStarted.compareAndSet(false, true)) return
-        val pendingClose = synchronized(llmLifecycleLock) { llmCloseJob }
-        scope.launch {
-            pendingClose?.join()
-            if (llmInitializationStarted.get() && llmAnalysisEnabled.value == true) {
-                llmManager.initialize()
-            }
+    private suspend fun initializeLlmForObservation(request: SemanticObservationRequest): Boolean =
+        llmLifecycle.initializeIfCurrent {
+            isSemanticAnalysisCurrent(
+                request.semanticGeneration,
+                requireAllNotifications = request.requireAllNotifications,
+            )
         }
-    }
 
     private fun releaseLlmAsync() {
         semanticObservationQueue.clearPending()
-        llmInitializationStarted.set(false)
-        synchronized(llmLifecycleLock) {
-            val previousClose = llmCloseJob
-            llmCloseJob =
-                applicationScope.launch {
-                    previousClose?.join()
-                    llmManager.close()
-                }
+        applicationScope.launch {
+            llmLifecycle.close()
         }
     }
 
@@ -566,6 +742,8 @@ class NotificationFilterService : NotificationListenerService() {
         processingCoordinator.invalidateAll()
         semanticGeneration.incrementAndGet()
         releaseLlmAsync()
+        postCommitWorkDispatcher.clearPending()
+        postCommitWorkDispatcher.close()
         scope.cancel()
         super.onDestroy()
     }
@@ -577,21 +755,17 @@ class NotificationFilterService : NotificationListenerService() {
         val monitoredAction: RuleAction?,
         val monitoredRuleId: String?,
         val mlConfidence: Float?,
-        val analysis: LlmAnalysisResult?,
-        val decisionTrace: List<com.alarmcontrol.core.filtering.DecisionTraceNode>,
+        val semanticClassification: SemanticClassificationResult?,
+        val needsDelayedSemanticObservation: Boolean,
+        val decisionTrace: List<DecisionTraceNode>,
+        val monitorNeedsPostCommitMlCategory: Boolean,
+        val monitorNeedsPostCommitSemantic: Boolean,
         val semanticGeneration: Long,
-    )
-
-    private data class ResolvedDecision(
-        val action: RuleAction?,
-        val ruleId: String?,
     )
 
     private companion object {
         const val TAG = "NotificationFilter"
 
-        /** Minimum LLM confidence for its ad verdict to be trusted as a rule signal. */
-        const val LLM_SEMANTIC_CONFIDENCE = 0.6f
         const val LLM_ANALYSIS_TIMEOUT_MILLIS = 10_000L
         const val CACHE_READY_TIMEOUT_MILLIS = 2_000L
         const val ANALYTICS_CLASSIFICATION_TIMEOUT_MILLIS = 500L
@@ -600,7 +774,6 @@ class NotificationFilterService : NotificationListenerService() {
     private data class ListenerSettings(
         val filtering: Boolean,
         val llmEnabled: Boolean,
-        val llmAutoActions: Boolean,
         val semanticScope: SemanticAnalysisScope,
         val storeContent: Boolean,
         val excludedPackages: Set<String>,
@@ -609,7 +782,6 @@ class NotificationFilterService : NotificationListenerService() {
     private data class ListenerRuntime(
         val filtering: Boolean,
         val llmEnabled: Boolean,
-        val llmAutoActions: Boolean,
         val storeContent: Boolean,
         val excludedPackages: Set<String>,
         val semanticScope: SemanticAnalysisScope,
@@ -619,7 +791,6 @@ class NotificationFilterService : NotificationListenerService() {
 
     private data class ListenerLlmSettings(
         val enabled: Boolean,
-        val autoActions: Boolean,
         val scope: SemanticAnalysisScope,
     )
 
@@ -627,7 +798,237 @@ class NotificationFilterService : NotificationListenerService() {
         val eventId: String,
         val snapshot: NotificationSnapshot,
         val semanticGeneration: Long,
+        val requireAllNotifications: Boolean,
+    )
+
+    private data class PostCommitEvaluationRequest(
+        val evaluated: EvaluatedNotification,
+        val runtime: ListenerRuntime,
+    )
+
+    private data class PersistedPostCommitEvaluationRequest(
+        val original: PostCommitEvaluationRequest,
+        val eventId: String,
+        val persistedSnapshot: NotificationSnapshot,
     )
 }
 
-private fun com.alarmcontrol.notifications.RuleSignalRequirements.needsLlm(): Boolean = advertisement || semanticIntent
+internal class RealtimeCategoryRuleResolver(
+    private val classifier: NotificationClassifier,
+    private val timeoutMillis: Long = CATEGORY_CLASSIFICATION_TIMEOUT_MILLIS,
+) {
+    suspend fun resolveBeforeActiveCommit(
+        snapshot: NotificationSnapshot,
+        compiled: CompiledRuleSet,
+    ): RealtimeCategoryRuleEvaluation {
+        val activeNeedsClassification = compiled.activeRequiredSignals.mlCategory
+        return RealtimeCategoryRuleEvaluation(
+            classification =
+                if (activeNeedsClassification) {
+                    classify(snapshot)
+                } else {
+                    null
+                },
+            monitorNeedsPostCommitClassification =
+                !activeNeedsClassification &&
+                    compiled.monitorRequiredSignals.mlCategory,
+        )
+    }
+
+    suspend fun resolveMonitorAfterCommit(snapshot: NotificationSnapshot): ClassificationResult? = classify(snapshot)
+
+    private suspend fun classify(snapshot: NotificationSnapshot): ClassificationResult? =
+        runCatchingPreservingCancellation {
+            withTimeoutOrNull(timeoutMillis) {
+                classifier.classify(snapshot)
+            }
+        }.getOrNull()
+
+    private companion object {
+        const val CATEGORY_CLASSIFICATION_TIMEOUT_MILLIS = 500L
+    }
+}
+
+internal data class RealtimeCategoryRuleEvaluation(
+    val classification: ClassificationResult?,
+    val monitorNeedsPostCommitClassification: Boolean,
+)
+
+internal class RealtimeSemanticRuleResolver(
+    private val matcher: Matcher,
+    private val classifier: SemanticNotificationClassifier,
+    private val timeoutMillis: Long = SEMANTIC_CLASSIFICATION_TIMEOUT_MILLIS,
+) {
+    suspend fun resolve(
+        snapshot: NotificationSnapshot,
+        compiled: CompiledRuleSet,
+    ): RealtimeSemanticRuleEvaluation {
+        val requirements = matcher.semanticResolutionRequirements(snapshot, compiled)
+        val classification =
+            if (requirements.activeNeedsSemantic) {
+                classify(snapshot, SemanticInferenceUrgency.REALTIME)
+            } else {
+                null
+            }
+        val trustedIntent = classification?.trustedIntent
+        val needsDelayedObservation =
+            requirements.activeNeedsSemantic &&
+                trustedIntent == null
+        if (requirements.activeNeedsSemantic && trustedIntent == null) {
+            val monitorDecision = matcher.evaluateMonitor(snapshot, compiled)
+            val monitor = monitorDecision.resolve(null)
+            return RealtimeSemanticRuleEvaluation(
+                action = RuleAction.Keep,
+                matchedRuleId = null,
+                monitoredAction = monitor.action,
+                monitoredRuleId = monitor.ruleId,
+                classification = classification,
+                needsDelayedObservation = true,
+                decisionTrace =
+                    matcher.decisionTrace(
+                        snapshot,
+                        monitorDecision,
+                        DecisionTraceLane.MONITOR,
+                    ),
+                monitorNeedsPostCommitSemantic = false,
+            )
+        }
+        val resolvedSnapshot =
+            trustedIntent?.let { intent ->
+                snapshot.copy(
+                    semanticIntent = intent,
+                    isAdvertisement = intent.isAdvertisement,
+                )
+            } ?: snapshot
+        val evaluation =
+            matcher.evaluateWithTraces(
+                activeSnapshot = resolvedSnapshot,
+                monitorSnapshot = resolvedSnapshot,
+                compiled = compiled,
+            )
+        val active = evaluation.activeDecision.resolve(RuleAction.Keep)
+        val monitor = evaluation.monitorDecision.resolve(null)
+        return RealtimeSemanticRuleEvaluation(
+            action = requireNotNull(active.action),
+            matchedRuleId = active.ruleId,
+            monitoredAction = monitor.action,
+            monitoredRuleId = monitor.ruleId,
+            classification = classification,
+            needsDelayedObservation = needsDelayedObservation,
+            decisionTrace = evaluation.decisionTrace,
+            monitorNeedsPostCommitSemantic =
+                !requirements.activeNeedsSemantic && requirements.monitorNeedsSemantic,
+        )
+    }
+
+    /**
+     * Enriches only the record-only monitor lane after the caller has committed the active action.
+     * The return type deliberately carries no active action, so late inference cannot change it.
+     */
+    suspend fun resolveMonitorAfterCommit(
+        snapshot: NotificationSnapshot,
+        compiled: CompiledRuleSet,
+        existingClassification: SemanticClassificationResult? = null,
+        classifySemantic: Boolean = true,
+        existingDecisionTrace: List<DecisionTraceNode> = emptyList(),
+    ): PostCommitMonitorSemanticEvaluation {
+        val classification =
+            existingClassification
+                ?: if (classifySemantic) {
+                    classify(snapshot, SemanticInferenceUrgency.BACKGROUND)
+                } else {
+                    null
+                }
+        val trustedIntent = classification?.trustedIntent
+        val monitorSnapshot =
+            trustedIntent?.let { intent ->
+                snapshot.copy(
+                    semanticIntent = intent,
+                    isAdvertisement = intent.isAdvertisement,
+                )
+            } ?: snapshot
+        val monitorDecision = matcher.evaluateMonitor(monitorSnapshot, compiled)
+        val monitor = monitorDecision.resolve(null)
+        val activeTrace =
+            existingDecisionTrace.filter { node ->
+                node.lane == DecisionTraceLane.ACTIVE
+            }
+        val monitorTrace =
+            matcher.decisionTrace(
+                snapshot = monitorSnapshot,
+                decision = monitorDecision,
+                lane = DecisionTraceLane.MONITOR,
+                maxNodes = (MAX_PERSISTED_TRACE_NODES - activeTrace.size).coerceAtLeast(0),
+            )
+        return PostCommitMonitorSemanticEvaluation(
+            monitoredAction = monitor.action,
+            monitoredRuleId = monitor.ruleId,
+            classification = classification,
+            needsDelayedObservation = classifySemantic && trustedIntent == null,
+            decisionTrace = activeTrace + monitorTrace,
+        )
+    }
+
+    private suspend fun classify(
+        snapshot: NotificationSnapshot,
+        urgency: SemanticInferenceUrgency,
+    ): SemanticClassificationResult? =
+        runCatchingPreservingCancellation {
+            withTimeoutOrNull(timeoutMillis) {
+                classifier.classify(snapshot, urgency)
+            }
+        }.getOrNull()
+
+    private companion object {
+        const val SEMANTIC_CLASSIFICATION_TIMEOUT_MILLIS = 350L
+    }
+}
+
+internal data class RealtimeSemanticRuleEvaluation(
+    val action: RuleAction,
+    val matchedRuleId: String?,
+    val monitoredAction: RuleAction?,
+    val monitoredRuleId: String?,
+    val classification: SemanticClassificationResult?,
+    val needsDelayedObservation: Boolean,
+    val decisionTrace: List<DecisionTraceNode>,
+    val monitorNeedsPostCommitSemantic: Boolean,
+)
+
+internal data class PostCommitMonitorSemanticEvaluation(
+    val monitoredAction: RuleAction?,
+    val monitoredRuleId: String?,
+    val classification: SemanticClassificationResult?,
+    val needsDelayedObservation: Boolean,
+    val decisionTrace: List<DecisionTraceNode>,
+)
+
+private fun MatchDecision.resolve(fallbackAction: RuleAction?): ResolvedDecision =
+    when (this) {
+        is MatchDecision.Matched -> ResolvedDecision(action, rule.id)
+        MatchDecision.NoMatch -> ResolvedDecision(fallbackAction, null)
+    }
+
+private data class ResolvedDecision(
+    val action: RuleAction?,
+    val ruleId: String?,
+)
+
+internal suspend fun analyzeDelayedSemanticObservation(
+    snapshot: NotificationSnapshot,
+    llmManager: OnDeviceLlmManager,
+    timeoutMillis: Long,
+): LlmAnalysisResult? {
+    if (
+        llmManager.backgroundAnalysisEligibility !=
+        LlmBackgroundAnalysisEligibility.VERIFIED_COMPATIBLE
+    ) {
+        return null
+    }
+    val text = listOfNotNull(snapshot.title, snapshot.text).joinToString(separator = " ").ifBlank { return null }
+    return withTimeoutOrNull(timeoutMillis) {
+        llmManager.analyze(text, snapshot.packageName)
+    }
+}
+
+private fun NotificationSnapshot.hasClassifiableText(): Boolean = !title.isNullOrBlank() || !text.isNullOrBlank()

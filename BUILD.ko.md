@@ -74,9 +74,10 @@ export ALARMCONTROL_KEY_PASSWORD="..."
 
 일부 변수만 제공하면 의도적으로 설정 단계에서 실패합니다. `releaseCandidate`는 기기 없이
 실행 가능한 품질·오프라인 검사 전체, 계측 테스트 APK와 Baseline Profile 변형 컴파일,
-Release AAB 60MiB 상한을 검사하고 번들의 모든 항목을 읽어 JAR 서명을 암호학적으로
-검증합니다. 검증된 번들은 `app/build/outputs/bundle/release/`에 생성되며 Play가 기기에
-맞는 ABI APK를 생성합니다.
+비의미 모델 payload 60MiB 상한, 의미 분류기 30MiB 목표와 45MiB 하드 상한, 전체 물리 AAB
+105MiB 상한을 검사하고 번들의 모든 항목을 읽어 JAR 서명을 암호학적으로 검증합니다.
+검증된 번들은 `app/build/outputs/bundle/release/`에 생성되며 Play가 기기에 맞는 ABI APK를
+생성합니다.
 
 ## 계측 테스트
 

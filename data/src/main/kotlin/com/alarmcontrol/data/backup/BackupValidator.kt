@@ -46,9 +46,6 @@ internal object BackupValidator {
             it.settings?.let { settings ->
                 require(settings.eventRetentionDays in RETENTION_RANGE) { "Event retention is invalid" }
                 require(settings.dailyInsightRetentionDays in RETENTION_RANGE) { "Insight retention is invalid" }
-                require(!settings.llmAutoActionsEnabled || settings.llmAnalysisEnabled) {
-                    "LLM auto actions require LLM analysis"
-                }
             }
             it.categoryFeedback.forEach { feedback ->
                 require(feedback.packageName.isNotBlank() && feedback.packageName.length <= MAX_PACKAGE_CHARS) {

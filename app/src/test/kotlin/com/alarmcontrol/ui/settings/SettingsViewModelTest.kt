@@ -16,6 +16,7 @@ import com.alarmcontrol.core.filtering.NotificationHistoryRepository
 import com.alarmcontrol.core.privacy.ClearedDataCounts
 import com.alarmcontrol.core.privacy.LocalDataRepository
 import com.alarmcontrol.core.result.DataResult
+import com.alarmcontrol.ml.llm.LlmBackgroundAnalysisEligibility
 import com.alarmcontrol.ml.llm.LlmInitState
 import com.alarmcontrol.ml.llm.LlmModelInfo
 import com.alarmcontrol.ml.llm.OnDeviceLlmManager
@@ -71,6 +72,9 @@ class SettingsViewModelTest {
     init {
         every { llmManager.initState } returns llmState
         every { llmManager.modelInfo } returns llmModelInfo
+        every {
+            llmManager.backgroundAnalysisEligibility
+        } returns LlmBackgroundAnalysisEligibility.VERIFIED_COMPATIBLE
         io.mockk.coEvery { llmManager.removeModel() } returns DataResult.Success(Unit)
         every { appHealthProvider.snapshot() } returns
             AppHealthSnapshot(notificationAccessGranted = true, batteryOptimizationExempt = false)
@@ -247,7 +251,7 @@ class SettingsViewModelTest {
         }
 
     @Test
-    fun `LLM analysis opt in initializes and opt out closes the local engine`() =
+    fun `LLM analysis opt in stays lazy and opt out closes the local engine`() =
         runTest {
             val vm = viewModel()
 
@@ -260,8 +264,25 @@ class SettingsViewModelTest {
                 cancelAndIgnoreRemainingEvents()
             }
 
-            coVerify { llmManager.initialize() }
-            coVerify { llmManager.close() }
+            coVerify(exactly = 0) { llmManager.initialize() }
+            coVerify(exactly = 1) { llmManager.close() }
+        }
+
+    @Test
+    fun `unverified model profile cannot enable background LLM analysis`() =
+        runTest {
+            every {
+                llmManager.backgroundAnalysisEligibility
+            } returns LlmBackgroundAnalysisEligibility.UNVERIFIED
+            val vm = viewModel()
+
+            vm.uiState.test {
+                val unavailable = awaitUntil { !it.llmBackgroundAnalysisAvailable }
+                assertFalse(unavailable.llmAnalysisEnabled)
+                vm.setLlmAnalysisEnabled(true)
+                assertFalse(repository.llmAnalysisEnabled.first())
+                cancelAndIgnoreRemainingEvents()
+            }
         }
 
     @Test

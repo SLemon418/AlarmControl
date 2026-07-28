@@ -3,11 +3,20 @@ package com.alarmcontrol.ml.classifier
 import com.alarmcontrol.core.filtering.NotificationSnapshot
 import com.alarmcontrol.ml.feature.BagOfWordsFeatureExtractor
 import com.alarmcontrol.ml.inference.InferenceBackend
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class LiteRTNotificationClassifierTest {
     private val labels = listOf("promotion", "social", "news")
 
@@ -111,6 +120,29 @@ class LiteRTNotificationClassifierTest {
             assertEquals(0, backend.calls)
         }
 
+    @Test
+    fun `caller deadline returns while a blocking native backend ignores interruption`() =
+        runTest {
+            val backend = BlockingInferenceBackend()
+            val result =
+                async {
+                    withTimeoutOrNull(500L) {
+                        classifier(backend).classify(snapshot())
+                    }
+                }
+            runCurrent()
+            assertTrue(backend.started.await(1, TimeUnit.SECONDS))
+
+            try {
+                advanceTimeBy(501L)
+                runCurrent()
+                assertNull(result.await())
+            } finally {
+                backend.release.countDown()
+            }
+            assertTrue(backend.finished.await(1, TimeUnit.SECONDS))
+        }
+
     // Small helpers to assert label+confidence without leaning on float formatting.
     private data class ClassificationResultOf(
         val category: String,
@@ -119,4 +151,26 @@ class LiteRTNotificationClassifierTest {
 
     private fun com.alarmcontrol.ml.ClassificationResult?.asPair() =
         this?.let { ClassificationResultOf(it.category, it.confidence) }
+
+    private class BlockingInferenceBackend : InferenceBackend {
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val finished = CountDownLatch(1)
+
+        override fun run(features: FloatArray): FloatArray {
+            started.countDown()
+            try {
+                while (release.count > 0) {
+                    try {
+                        release.await()
+                    } catch (_: InterruptedException) {
+                        // Model a native call that ignores coroutine/Future interruption.
+                    }
+                }
+                return floatArrayOf(0.8f, 0.15f, 0.05f)
+            } finally {
+                finished.countDown()
+            }
+        }
+    }
 }

@@ -420,7 +420,6 @@ private fun SettingsSnapshot.toJson(): JSONObject =
         .put("filteringEnabled", filteringEnabled)
         .put("externalAutomationEnabled", externalAutomationEnabled)
         .put("llmAnalysisEnabled", llmAnalysisEnabled)
-        .put("llmAutoActionsEnabled", llmAutoActionsEnabled)
         .put("semanticAnalysisScope", semanticAnalysisScope.name)
         .put("eventRetentionDays", eventRetentionDays)
         .put("dailyInsightRetentionDays", dailyInsightRetentionDays)
@@ -430,7 +429,7 @@ private fun JSONObject.toSettings(): SettingsSnapshot =
         filteringEnabled = optBoolean("filteringEnabled", true),
         externalAutomationEnabled = optBoolean("externalAutomationEnabled", false),
         llmAnalysisEnabled = optBoolean("llmAnalysisEnabled", false),
-        llmAutoActionsEnabled = optBoolean("llmAutoActionsEnabled", false),
+        llmAutoActionsEnabled = false,
         semanticAnalysisScope =
             optString("semanticAnalysisScope", SemanticAnalysisScope.RULES_ONLY.name)
                 .let(SemanticAnalysisScope::valueOf),

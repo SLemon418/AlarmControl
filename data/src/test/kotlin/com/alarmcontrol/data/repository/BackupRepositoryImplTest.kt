@@ -364,7 +364,6 @@ class BackupRepositoryImplTest {
                     filteringEnabled = true,
                     externalAutomationEnabled = true,
                     llmAnalysisEnabled = true,
-                    llmAutoActionsEnabled = true,
                 )
             val payload =
                 BackupCodec.encode(
@@ -400,7 +399,6 @@ class BackupRepositoryImplTest {
                     filteringEnabled = true,
                     externalAutomationEnabled = true,
                     llmAnalysisEnabled = true,
-                    llmAutoActionsEnabled = true,
                 )
             settings.restore(original)
             val runner =
@@ -433,7 +431,6 @@ class BackupRepositoryImplTest {
                     filteringEnabled = true,
                     externalAutomationEnabled = true,
                     llmAnalysisEnabled = true,
-                    llmAutoActionsEnabled = true,
                 )
             settings.failEnabledRestore = true
             val payload =
@@ -461,7 +458,7 @@ private class InMemoryBackupSettingsRepository : SettingsRepository {
 
     override val filteringEnabled: Flow<Boolean> = state.mapValue(SettingsSnapshot::filteringEnabled)
     override val llmAnalysisEnabled: Flow<Boolean> = state.mapValue(SettingsSnapshot::llmAnalysisEnabled)
-    override val llmAutoActionsEnabled: Flow<Boolean> = state.mapValue(SettingsSnapshot::llmAutoActionsEnabled)
+    override val llmAutoActionsEnabled: Flow<Boolean> = kotlinx.coroutines.flow.flowOf(false)
     override val externalAutomationEnabled: Flow<Boolean> = state.mapValue(SettingsSnapshot::externalAutomationEnabled)
     override val externalAutomationToken: Flow<String> = kotlinx.coroutines.flow.flowOf("local-only-token")
     override val eventRetentionDays: Flow<Int> = state.mapValue(SettingsSnapshot::eventRetentionDays)
@@ -474,7 +471,7 @@ private class InMemoryBackupSettingsRepository : SettingsRepository {
 
     override suspend fun setLlmAnalysisEnabled(enabled: Boolean) = update { copy(llmAnalysisEnabled = enabled) }
 
-    override suspend fun setLlmAutoActionsEnabled(enabled: Boolean) = update { copy(llmAutoActionsEnabled = enabled) }
+    override suspend fun setLlmAutoActionsEnabled(enabled: Boolean) = Unit
 
     override suspend fun setExternalAutomationEnabled(enabled: Boolean) =
         update { copy(externalAutomationEnabled = enabled) }
@@ -499,7 +496,7 @@ private class InMemoryBackupSettingsRepository : SettingsRepository {
         if (failEnabledRestore && snapshot.filteringEnabled) {
             error("settings unavailable")
         }
-        state.value = snapshot
+        state.value = snapshot.copy(llmAutoActionsEnabled = false)
     }
 
     override suspend fun reset() {

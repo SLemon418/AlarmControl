@@ -5,6 +5,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import com.alarmcontrol.data.db.entity.AdFeedbackPriorEntity
 import com.alarmcontrol.data.db.entity.LlmObservationEntity
 import com.alarmcontrol.data.db.entity.SemanticFeedbackPriorEntity
@@ -13,8 +14,43 @@ import kotlinx.coroutines.flow.Flow
 @Dao
 @Suppress("TooManyFunctions") // Observation, correction, and prior queries share one Room table boundary.
 interface LlmObservationDao {
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun upsert(observation: LlmObservationEntity): Long
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertIfAbsent(observation: LlmObservationEntity): Long
+
+    @Query(
+        "UPDATE llm_observations SET package_name = :packageName, " +
+            "predicted_is_ad = :predictedIsAdvertisement, predicted_intent = :predictedIntent, " +
+            "confidence_score = :confidenceScore, analyzed_at_millis = :analyzedAtMillis " +
+            "WHERE notification_event_id = :notificationEventId",
+    )
+    suspend fun updatePrediction(
+        notificationEventId: Long,
+        packageName: String,
+        predictedIsAdvertisement: Boolean,
+        predictedIntent: String,
+        confidenceScore: Float,
+        analyzedAtMillis: Long,
+    ): Int
+
+    /**
+     * Replaces a model prediction without erasing an explicit correction that may have arrived
+     * before a delayed local analysis completed.
+     */
+    @Transaction
+    suspend fun upsert(observation: LlmObservationEntity) {
+        if (insertIfAbsent(observation) == -1L) {
+            check(
+                updatePrediction(
+                    notificationEventId = observation.notificationEventId,
+                    packageName = observation.packageName,
+                    predictedIsAdvertisement = observation.predictedIsAdvertisement,
+                    predictedIntent = observation.predictedIntent,
+                    confidenceScore = observation.confidenceScore,
+                    analyzedAtMillis = observation.analyzedAtMillis,
+                ) == 1,
+            )
+        }
+    }
 
     @Query(
         "UPDATE llm_observations SET corrected_is_ad = :corrected " +

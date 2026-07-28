@@ -8,6 +8,7 @@ import com.alarmcontrol.core.filtering.DecisionTraceLane
 import com.alarmcontrol.core.filtering.DecisionTraceNode
 import com.alarmcontrol.core.filtering.NotificationContent
 import com.alarmcontrol.core.filtering.NotificationContentState
+import com.alarmcontrol.core.filtering.NotificationDecisionEnrichment
 import com.alarmcontrol.core.filtering.NotificationEvent
 import com.alarmcontrol.core.filtering.NotificationHistoryQuery
 import com.alarmcontrol.core.filtering.RuleAction
@@ -270,6 +271,43 @@ class NotificationEventRepositoryImplTest {
             assertEquals("9", stored.monitoredRuleId)
             assertEquals(RuleAction.Cancel, stored.monitoredAction)
             assertEquals(input.decisionTrace, stored.decisionTrace)
+        }
+
+    @Test
+    fun `post-commit enrichment cannot change the recorded active decision`() =
+        runTest {
+            val id = repository.record(event(action = RuleAction.Cancel, matchedRuleId = "42"))
+            val monitorTrace =
+                listOf(
+                    DecisionTraceNode(
+                        DecisionTraceLane.MONITOR,
+                        0,
+                        0,
+                        DecisionConditionKind.SEMANTIC_INTENT,
+                        ConditionResult.MATCH,
+                    ),
+                )
+
+            repository.enrichRecordedDecision(
+                eventId = id,
+                enrichment =
+                    NotificationDecisionEnrichment(
+                        mlCategory = "promotion",
+                        mlConfidence = 0.93f,
+                        monitoredRuleId = "9",
+                        monitoredAction = RuleAction.Snooze(60_000L),
+                        decisionTrace = monitorTrace,
+                    ),
+            )
+            val stored = repository.observeRecent(1).first().single()
+
+            assertEquals(RuleAction.Cancel, stored.action)
+            assertEquals("42", stored.matchedRuleId)
+            assertEquals("promotion", stored.mlCategory)
+            assertEquals(0.93f, stored.mlConfidence)
+            assertEquals("9", stored.monitoredRuleId)
+            assertEquals(RuleAction.Snooze(0L), stored.monitoredAction)
+            assertEquals(monitorTrace, stored.decisionTrace)
         }
 
     @Test

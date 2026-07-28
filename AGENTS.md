@@ -40,9 +40,13 @@ automation hooks (Tasker/Samsung Routines).
 These are the reason the project exists. A change that violates any of these is wrong, even if it
 "works."
 
-1. **No network. Ever.** No cloud calls, telemetry, crash-reporting upload, or remote model fetch.
-2. **All AI/ML runs on-device.** Inference and any learning happen locally. The compact classifier
-   is bundled; an optional large LLM may only be imported by the user from local storage.
+1. **No network in the installed app. Ever.** No cloud calls, telemetry, crash-reporting upload, or
+   remote model fetch from Android runtime code. Developer-only build/training tools and approved
+   synthetic or rights-cleared training jobs may use the network; they must never receive user
+   notification data, and none of that code or state ships in the APK.
+2. **All runtime AI/ML runs on-device.** Inference and user-feedback learning happen locally. The
+   compact classifier is bundled; an optional large LLM may only be imported by the user from local
+   storage. Developer-only synthetic SFT and conversion are outside the app runtime.
 3. **User data stays local.** Notification content never leaves the device, including in logs.
 
 If a task seems to require violating one of these, **stop and ask** — do not work around it.
@@ -76,8 +80,10 @@ propose it first, don't just add it.
 
 - **No `INTERNET` permission** in any manifest, including modules and `debug`/test manifests. Its
   absence is the guarantee — the app cannot open a socket. Treat re-adding it as a release blocker.
-- **No networking dependencies anywhere**: no Retrofit, OkHttp, Ktor client, Volley, Apollo,
-  Firebase, analytics, or crash-upload SDKs. If you think you need one, you've misread the task.
+- **No networking dependencies in Android runtime modules**: no Retrofit, OkHttp, Ktor client,
+  Volley, Apollo, Firebase, analytics, or crash-upload SDKs. Build-only tools under model-training
+  directories may use developer-installed download clients, but they are never Gradle/runtime
+  dependencies or APK content.
 - **Classifier models are bundled** in `:ml/src/main/assets/` and loaded from there. No
   download-at-runtime.
 - **The generative LLM model is not bundled** (too large for the APK): the user selects a compatible
@@ -111,7 +117,7 @@ propose it first, don't just add it.
 ## 4. Module architecture
 
 Boundaries exist to keep features small and to make the offline rule structurally enforceable
-(only `:ml` touches model assets; nothing touches the network).
+(only `:ml` touches runtime model assets; no Android runtime module touches the network).
 
 ```
 :app           Compose UI host, navigation, DI wiring, the NotificationListenerService entry point
@@ -137,17 +143,20 @@ Boundaries exist to keep features small and to make the offline rule structurall
 
 - **Don't reach for ML when SQL will do.** "Statistical insights" = Room aggregations. Only
   categorization and pattern-learning use a model. If a feature is expressible as a query, query it.
-- **Inference is local and deterministic in tests.** The compact classifier is bundled and tests pin
-  its model + fixtures to exact labels. The optional LLM is user-imported, device-gated, and tested
-  through deterministic engine doubles; neither path may fetch a model.
-- **Learning is on-device and incremental** (user feedback adjusts local weights/data). Never export
-  training data or gradients off the device.
+- **Runtime inference is local and deterministic in tests.** The compact classifier is bundled and
+  tests pin its model + fixtures to exact labels. The optional LLM is user-imported, device-gated,
+  and tested through deterministic engine doubles; neither runtime path may fetch a model.
+- **In-app learning is on-device and incremental** (user feedback adjusts local weights/data).
+  Never export app training data or gradients off the device.
 - **Semantic intent is a closed seven-value contract:** `MARKETING`, `TRANSACTIONAL`, `SECURITY`,
   `DELIVERY`, `SOCIAL`, `OTHER`, and `AMBIGUOUS`. Strictly reject malformed/contradictory output;
   legacy advertisement=true/false feedback maps to marketing/transactional. `IsAdvertisement`
   remains only a compatibility view of `MARKETING`.
-- Monitor rules may consume an enabled local LLM signal without side effects. An active rule may use
-  that signal for an automatic action only when the separate LLM-auto-actions setting is enabled.
+- Only a trusted result from the bundled lightweight semantic encoder may become an active-rule
+  signal; low-confidence or `AMBIGUOUS` output fails open. Generative LLM results are observation-only
+  inputs for future correction, statistics, and suggestions and never change an already handled
+  notification. Automatic background LLM work remains disabled until the exact imported model has a
+  verified compatibility profile.
 - **Categorization must degrade gracefully**: if the model is unavailable or low-confidence, fall
   back to rule-based filtering. The rules engine works without ML; ML only improves it.
 - Keep model I/O behind interfaces in `:ml` so LiteRT and the optional MediaPipe runtime can change

@@ -78,10 +78,9 @@
     <string name="automation_outcome_invalid">잘못된 요청</string>
     <string name="automation_outcome_not_found">대상 없음</string>
     <string name="settings_llm_section">기기 내 의미 분석</string>
-    <string name="settings_llm_enabled">로컬 LLM 광고 분석 사용</string>
+    <string name="settings_llm_enabled">로컬 LLM 지연 의미 분석 사용</string>
     <string name="settings_llm_summary">선택 기능이며 기본값은 꺼짐입니다. 이 기기에 저장된 호환 가능한 양자화 MediaPipe .task 모델을 선택하세요.</string>
-    <string name="settings_llm_auto_actions">LLM 판정으로 규칙 실행 허용</string>
-    <string name="settings_llm_auto_actions_summary">기본값은 꺼짐입니다. 끄면 로컬 광고 분석은 관찰만 하며 알림을 지우거나 다시 알림 처리하지 않습니다.</string>
+    <string name="settings_llm_summary_unverified">이 빌드에서 호환 모델 프로필을 검증하기 전까지 LLM 자동 백그라운드 분석은 사용할 수 없습니다. 호환성 확인을 위한 로컬 모델 가져오기는 가능합니다.</string>
     <string name="settings_llm_scope">의미 기록 분석 범위</string>
     <string name="settings_llm_scope_rules">규칙이 필요할 때만</string>
     <string name="settings_llm_scope_all">모든 알림</string>
@@ -103,6 +102,7 @@
     <string name="settings_model_fingerprint">SHA-256: %1$s</string>
     <string name="settings_model_fingerprint_note">이 값은 가져온 뒤 파일 변경 여부를 확인하며 모델 제작자를 인증하지는 않습니다.</string>
     <string name="settings_model_trust_warning">신뢰할 수 있는 출처의 모델만 가져오세요. 모델 파일은 기기의 네이티브 코드에서 처리되며, 해시는 이후 변경 여부만 확인할 뿐 제작자를 인증하지 않습니다.</string>
+    <string name="message_llm_background_unverified">이 빌드에서 LLM 자동 백그라운드 분석용 모델을 아직 검증하지 않았습니다.</string>
     <string name="settings_backup_section">백업 및 복원</string>
     <string name="settings_backup_summary">규칙과 통계 기록을 파일로 저장하거나 복원합니다. AlarmControl은 기기 전용 저장소를 요청하고 파일을 업로드하지 않습니다. 선택 화면에서 기기 저장소를 선택하세요.</string>
     <string name="settings_backup_password">백업 비밀번호(선택)</string>

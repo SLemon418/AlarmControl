@@ -19,6 +19,14 @@ interface OnDeviceLlmManager {
     val modelInfo: StateFlow<LlmModelInfo?>
 
     /**
+     * Whether this imported model has a verified profile suitable for automatic listener-process
+     * analysis. Plain `.task` imports remain [LlmBackgroundAnalysisEligibility.UNVERIFIED], so a
+     * large or unknown model is never routed from the notification listener.
+     */
+    val backgroundAnalysisEligibility: LlmBackgroundAnalysisEligibility
+        get() = LlmBackgroundAnalysisEligibility.UNVERIFIED
+
+    /**
      * Loads the model off the main thread, driving [initState] `Loading -> Ready` (or
      * `-> Unavailable` if the model is missing or fails to load). Idempotent: a no-op while already
      * loading or ready. Engine failures become `Unavailable`; coroutine cancellation propagates.
@@ -48,4 +56,10 @@ interface OnDeviceLlmManager {
 
     /** Releases the native engine and resets [initState] to [LlmInitState.Idle]. */
     suspend fun close()
+}
+
+/** Explicit compatibility gate for automatic background LLM work. */
+enum class LlmBackgroundAnalysisEligibility {
+    UNVERIFIED,
+    VERIFIED_COMPATIBLE,
 }

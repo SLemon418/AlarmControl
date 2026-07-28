@@ -20,8 +20,9 @@ interface SettingsRepository {
     /** Whether optional, resource-intensive local LLM analysis is enabled. Defaults to false. */
     val llmAnalysisEnabled: Flow<Boolean>
 
-    /** Whether a confident LLM verdict may satisfy an ad rule. Defaults to false (observation-only). */
+    /** Retired compatibility surface. LLM analysis is always observation-only. */
     val llmAutoActionsEnabled: Flow<Boolean>
+        get() = flowOf(false)
 
     /** Whether optional LLM history analysis is rule-triggered only or best-effort for every post. */
     val semanticAnalysisScope: Flow<SemanticAnalysisScope>
@@ -57,7 +58,8 @@ interface SettingsRepository {
     /** Persists the explicit opt-in for optional on-device LLM analysis. */
     suspend fun setLlmAnalysisEnabled(enabled: Boolean)
 
-    suspend fun setLlmAutoActionsEnabled(enabled: Boolean)
+    /** Retired compatibility surface; automatic LLM actions can no longer be enabled. */
+    suspend fun setLlmAutoActionsEnabled(enabled: Boolean) = Unit
 
     suspend fun setSemanticAnalysisScope(scope: SemanticAnalysisScope) = Unit
 
@@ -96,6 +98,7 @@ data class SettingsSnapshot(
     val filteringEnabled: Boolean = true,
     val externalAutomationEnabled: Boolean = false,
     val llmAnalysisEnabled: Boolean = false,
+    /** Legacy source compatibility only; persistence and backup boundaries always normalize false. */
     val llmAutoActionsEnabled: Boolean = false,
     val semanticAnalysisScope: SemanticAnalysisScope = SemanticAnalysisScope.RULES_ONLY,
     val eventRetentionDays: Int = RetentionDefaults.EVENT_DAYS,
