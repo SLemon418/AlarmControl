@@ -38,10 +38,11 @@ counter remained 3,332,000 µAh. These measurements describe that device and
 run only.
 
 The verified `bundleRelease` output is 98,983,815 bytes (94.40 MiB), below the
-105 MiB physical cap, but is not itself a signed distribution candidate.
-Play's ABI split delivers only matching native libraries, while the
-ABI-independent semantic model is a base asset and is delivered to every
-compatible installation.
+105 MiB physical cap, but it is only an App Bundle compatibility regression
+artifact and not a distribution candidate. GitHub Releases publishes the
+separately verified, signed universal APK. GitHub does not select an ABI
+automatically, so that APK includes all supported native libraries; the
+ABI-independent semantic model is bundled for every compatible installation.
 
 Runtime integration remains rule-first. Semantic inference runs before commit
 only when an Active rule needs it, using `REALTIME` urgency. Monitor-only

@@ -1,0 +1,169 @@
+name: Publish GitHub release APK
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Verify and publish signed APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: github-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          fetch-depth: 0
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
+
+      - name: Validate release tag
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tags must use the stable vMAJOR.MINOR.PATCH format." >&2
+            exit 1
+          fi
+          git fetch --no-tags origin "$DEFAULT_BRANCH"
+          release_commit="$(git rev-parse "${GITHUB_REF_NAME}^{commit}")"
+          if ! git merge-base --is-ancestor "$release_commit" "origin/$DEFAULT_BRANCH"; then
+            echo "Release tag must point to a commit on $DEFAULT_BRANCH." >&2
+            exit 1
+          fi
+
+      - name: Prepare release signing
+        env:
+          ALARMCONTROL_KEYSTORE_BASE64: ${{ secrets.ALARMCONTROL_KEYSTORE_BASE64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$ALARMCONTROL_KEYSTORE_BASE64" ]]; then
+            echo "Required GitHub secret is missing: ALARMCONTROL_KEYSTORE_BASE64" >&2
+            exit 1
+          fi
+          umask 077
+          keystore_path="$RUNNER_TEMP/alarmcontrol-release.jks"
+          printf '%s' "$ALARMCONTROL_KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
+          if [[ ! -s "$keystore_path" ]]; then
+            echo "Decoded release keystore is empty." >&2
+            exit 1
+          fi
+          echo "ALARMCONTROL_KEYSTORE_FILE=$keystore_path" >> "$GITHUB_ENV"
+
+      - name: Build verified signed release candidate
+        env:
+          ALARMCONTROL_KEYSTORE_PASSWORD: ${{ secrets.ALARMCONTROL_KEYSTORE_PASSWORD }}
+          ALARMCONTROL_KEY_ALIAS: ${{ secrets.ALARMCONTROL_KEY_ALIAS }}
+          ALARMCONTROL_KEY_PASSWORD: ${{ secrets.ALARMCONTROL_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in \
+            ALARMCONTROL_KEYSTORE_PASSWORD \
+            ALARMCONTROL_KEY_ALIAS \
+            ALARMCONTROL_KEY_PASSWORD
+          do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Required GitHub secret is missing: $name" >&2
+              exit 1
+            fi
+          done
+          ./gradlew \
+            '-Dorg.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8' \
+            --no-daemon \
+            --max-workers=1 \
+            --dependency-verification strict \
+            :app:releaseCandidate
+
+      - name: Confirm package identity and package APK
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          apks=(app/build/outputs/apk/release/*.apk)
+          if (( ${#apks[@]} != 1 )); then
+            echo "Expected one release APK, found ${#apks[@]}." >&2
+            exit 1
+          fi
+
+          mapfile -t aapts < <(
+            find "$ANDROID_HOME/build-tools" -mindepth 2 -maxdepth 2 \
+              -type f -name aapt | sort -V
+          )
+          if (( ${#aapts[@]} == 0 )); then
+            echo "Android aapt was not found." >&2
+            exit 1
+          fi
+          aapt="${aapts[${#aapts[@]} - 1]}"
+
+          apk="${apks[0]}"
+          package_line="$("$aapt" dump badging "$apk" | sed -n '1p')"
+          package_name="$(sed -n "s/^package: name='\([^']*\)'.*/\1/p" <<< "$package_line")"
+          version_name="$(sed -n "s/.* versionName='\([^']*\)'.*/\1/p" <<< "$package_line")"
+          expected_version="${GITHUB_REF_NAME#v}"
+          if [[ "$package_name" != "com.alarmcontrol" ]]; then
+            echo "Unexpected APK package: $package_name" >&2
+            exit 1
+          fi
+          if [[ "$version_name" != "$expected_version" ]]; then
+            echo "Tag version $expected_version does not match APK version $version_name." >&2
+            exit 1
+          fi
+
+          release_dir="$RUNNER_TEMP/github-release"
+          mkdir -p "$release_dir"
+          asset_name="AlarmControl-$version_name-universal.apk"
+          asset_path="$release_dir/$asset_name"
+          checksum_path="$asset_path.sha256"
+          cp -- "$apk" "$asset_path"
+          (
+            cd "$release_dir"
+            sha256sum "$asset_name" > "$(basename "$checksum_path")"
+          )
+          echo "asset_path=$asset_path" >> "$GITHUB_OUTPUT"
+          echo "checksum_path=$checksum_path" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET_PATH: ${{ steps.package.outputs.asset_path }}
+          CHECKSUM_PATH: ${{ steps.package.outputs.checksum_path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "A GitHub Release already exists for $GITHUB_REF_NAME; refusing to replace assets." >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            "$ASSET_PATH" \
+            "$CHECKSUM_PATH" \
+            --draft \
+            --generate-notes \
+            --title "AlarmControl $GITHUB_REF_NAME" \
+            --verify-tag
+          gh release edit "$GITHUB_REF_NAME" --draft=false
+
+      - name: Remove decoded signing keystore
+        if: always()
+        shell: bash
+        run: rm -f -- "$RUNNER_TEMP/alarmcontrol-release.jks"

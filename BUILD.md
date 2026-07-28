@@ -45,25 +45,25 @@ forbidden networking dependency appears on the debug/release runtime classpath. 
 `:baselineprofile:offlineManifestGuard` task applies the same rule to both test APK variants.
 WorkManager's read-only `ACCESS_NETWORK_STATE` permission is allowed.
 
-The current debug JVM/Robolectric aggregate is 564 tests with zero failures, errors, or skips. The
-instrumented aggregate is 19 tests (Room/data 7, real TFLite 4, app runtime 8), all passing on the
-connected Galaxy; CI runs the same suite on an API 34 Managed Device.
+The repository includes JVM/Robolectric suites plus connected Room, LiteRT, and app-runtime
+instrumented suites. CI also runs the connected set on an API 34 Managed Device where configured.
+Release notes must report results from the release commit's executed test reports rather than
+copying a historical test count from this guide.
 
 ## Build artifacts
 
 ```sh
 ./gradlew :app:assembleDebug
 ./gradlew :app:assembleRelease
-./gradlew :app:bundleRelease  # compile/store-shape check; may be unsigned
+./gradlew :app:bundleRelease  # App Bundle compatibility regression; may be unsigned
 ```
 
-Local APK tasks produce a universal artifact so both APK and App Bundle release paths stay
-buildable with AGP resource shrinking. `bundleRelease` deliberately remains usable without a
-keystore for local and CI compilation, so its success alone does **not** mean the AAB is
-publishable.
+APK and App Bundle paths both remain buildable with AGP resource shrinking. `bundleRelease`
+deliberately remains usable without a keystore for local and CI compatibility checks, but an AAB is
+not the current publication artifact and its successful compilation does **not** make a release.
 
-For store distribution, provide all four signing environment variables (never commit a keystore or
-its credentials) and run the explicit release-candidate gate:
+For GitHub Releases distribution, provide all four signing environment variables (never commit a
+keystore or its credentials) and run the explicit release-candidate gate:
 
 ```sh
 export ALARMCONTROL_KEYSTORE_FILE="/absolute/path/to/release.jks"
@@ -75,10 +75,67 @@ export ALARMCONTROL_KEY_PASSWORD="..."
 
 Providing only some of the variables fails configuration intentionally. `releaseCandidate` runs
 all device-independent quality/offline checks, compiles the instrumented-test and Baseline Profile
-variants, enforces a 60 MiB non-semantic payload cap, a 30 MiB semantic-classifier target with a
-45 MiB hard cap, and a 105 MiB complete physical-AAB cap, and reads every bundle entry to
-cryptographically verify the JAR signature. The verified bundle is written under
-`app/build/outputs/bundle/release/`; Play then generates optimized ABI-specific device APKs.
+variants, caps the raw semantic classifier at 45 MiB, the physical non-semantic payload at 140 MiB,
+and the complete physical APK at 185 MiB. It also verifies the four semantic assets and their
+manifest hashes, then runs `apksigner` verification for minSdk 26. The verified universal APK is the
+only APK under `app/build/outputs/apk/release/`. Only that APK is a GitHub distribution candidate;
+`bundleRelease` remains a CI/format-regression artifact with its existing AAB limits.
+
+The current release APK is universal: it contains native libraries for every supported ABI. GitHub
+Releases does not inspect a device and choose an ABI-specific asset as Play does, so users download
+the one universal APK. The ABI-independent lightweight semantic classifier is bundled in that APK
+for every installation.
+
+### GitHub Release publication
+
+The release workflow runs only when a `vMAJOR.MINOR.PATCH` tag is pushed. The tag's version must
+exactly match the APK `versionName`, and its commit must be an ancestor of the repository's default
+branch. Every published APK must also increase `versionCode` above the previous release; Android
+will not install an equal or lower code as an update. Configure the `github-release` Environment
+with:
+
+- `ALARMCONTROL_KEYSTORE_BASE64`
+- `ALARMCONTROL_KEYSTORE_PASSWORD`
+- `ALARMCONTROL_KEY_ALIAS`
+- `ALARMCONTROL_KEY_PASSWORD`
+
+To encode the keystore without a platform-specific clipboard command, pipe it directly from
+standard input into the GitHub CLI:
+
+```sh
+base64 < /absolute/path/to/release.jks |
+  gh secret set ALARMCONTROL_KEYSTORE_BASE64 --env github-release
+```
+
+After the quality, offline, test-APK compilation, and signature gates pass, the workflow creates a
+release with these assets:
+
+- `AlarmControl-<version>-universal.apk`
+- `AlarmControl-<version>-universal.apk.sha256`
+
+An existing tag, release, or same-named asset is never overwritten. Unlike a Play upload key, this
+keystore is the actual app-update signing identity trusted by installed APKs. Keep an independent,
+encrypted offline backup of the keystore and credentials; a GitHub secret alone is not a backup.
+Losing or changing the key makes an in-place update impossible, and uninstalling before reinstalling
+can erase AlarmControl's local data unless the user exported a backup first.
+
+Release assets inherit repository visibility. If the repository is private, ordinary users cannot
+download the APK without signing in to an authorized GitHub account. Public direct distribution
+therefore requires a public repository or a separate public location containing the exact verified
+APK and checksum. Users install updates themselves; AlarmControl has no GitHub client, update
+checker, or `INTERNET` permission.
+
+Google Play closed testing is not part of this distribution path. Android developer verification
+is a separate platform requirement being rolled out for apps installed outside Play. Before it is
+enforced in the target regions, follow the current
+[Android developer verification](https://developer.android.com/developer-verification) guidance
+and register `com.alarmcontrol` plus the long-term release signing key through Android Developer
+Console (or through Play Console if the developer maintains one).
+
+The optional generative LLM is never packaged with the app release or counted as app payload. If a
+compatible model is made available, distribute it separately with its license and hash; the user
+then imports it through the Storage Access Framework. The GitHub app-release workflow does not
+upload an LLM.
 
 ## Instrumented tests
 

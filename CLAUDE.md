@@ -29,6 +29,11 @@ automation hooks (Tasker/Samsung Routines).
   use `AlarmManager`/exact-alarm/full-screen-intent permissions. We cannot intercept another app's
   real system alarm unless it appears as a notification — do not design as if we can.
 - **Offline is enforced, not promised.** The app ships with **no `INTERNET` permission** (see §3).
+- **Distribution target: GitHub Releases.** The publishable app artifact is a cryptographically
+  verified, release-signed APK attached to a GitHub Release. The AAB path remains buildable only as
+  a CI/Play-format regression check; it is not the current publication target. The installed app
+  does not check GitHub, self-update, or download models. Optional LLM files are distributed
+  separately from the app APK and are imported explicitly by the user (§3).
 - **Compose stays in `:app`, never in `:core`.** The Material 3 design system / theme lives in the
   `:app` module so the `:data`/`:ml`/`:notifications` layers (which depend on `:core`) can never
   transitively pull UI code into a lower layer. `:core` is deliberately Compose-free; that absence is
@@ -278,11 +283,13 @@ Turn tasks into verifiable goals and loop until green (see §10).
   APK/AAB compilation, all instrumented-test APKs, and Baseline Profile variant compilation. Main
   changes, nightly runs, and manual dispatch additionally execute the `pixel2Api34` `aosp-atd`
   Gradle Managed Device tests for `:data`, `:ml`, and `:app`.
-- **A compiled release bundle is not automatically distributable.** CI may run the intentionally
-  unsigned `bundleRelease` path. A bundle intended for distribution must instead pass
-  `:app:releaseCandidate`, which requires all four release-signing environment variables, runs the
-  device-independent gates, enforces the AAB size limit, and cryptographically validates signed
-  payload entries. Never commit a keystore or signing credentials.
+- **A compiled release artifact is not automatically distributable.** CI keeps the potentially
+  unsigned `bundleRelease` path only for App Bundle compatibility regression. The GitHub
+  distribution APK must instead pass `:app:releaseCandidate`, which requires all four
+  release-signing environment variables, runs the device-independent gates, enforces the APK
+  payload limits defined by the build, and cryptographically validates the APK signature. This is
+  the installed app's update-signing key, not a Play upload key: never commit it or its credentials,
+  and retain an encrypted offline backup so future releases can update existing installations.
 - **Supply-chain verification is mandatory.** CI validates the Gradle wrapper and resolves artifacts
   with strict SHA-256 checks from `gradle/verification-metadata.xml`. `verifyCiActionPins` scans
   workflow, reusable-workflow, and composite-action YAML; remote actions require a full 40-character

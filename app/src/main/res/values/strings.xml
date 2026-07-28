@@ -168,7 +168,7 @@
     <string name="template_promotions">Mute ML promotions</string>
     <string name="template_promotions_summary">Cancel notifications categorized locally as promotions.</string>
     <string name="template_observe_ads">Observe likely advertisements</string>
-    <string name="template_observe_ads_summary">Log likely ads without dismissing them. Requires the optional local LLM.</string>
+    <string name="template_observe_ads_summary">Log likely marketing matches without dismissing them. Uses the bundled on-device semantic classifier.</string>
     <string name="template_keep_alarms">Always keep alarm notifications</string>
     <string name="template_keep_alarms_summary">A high-priority safeguard for Android alarm-category notifications.</string>
     <string name="rules_delete">Delete rule</string>

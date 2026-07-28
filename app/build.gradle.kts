@@ -1,5 +1,4 @@
 import groovy.json.JsonOutput
-import java.util.jar.JarFile
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
@@ -14,7 +13,7 @@ plugins {
 }
 
 data class ReleaseBundleSizeReport(
-    val nonSemanticAabPhysicalBytes: Long,
+    val nonSemanticPhysicalBytes: Long,
     val semanticClassifierRawBytes: Long,
     val semanticPayloadRawBytes: Long,
     val semanticPayloadCompressedBytes: Long,
@@ -30,6 +29,8 @@ val semanticBundleEntries =
         "base/assets/semantic_model_manifest.json",
     )
 val semanticClassifierBundleEntry = "base/assets/semantic_notification_classifier.tflite"
+val semanticApkEntries = semanticBundleEntries.mapTo(mutableSetOf()) { it.removePrefix("base/") }
+val semanticClassifierApkEntry = semanticClassifierBundleEntry.removePrefix("base/")
 val semanticAssetEntryPattern = Regex("""(?:^|.*/)assets/(?:.*/)?semantic_[^/]+$""")
 val semanticClassifierTargetBytes = 30L * 1_024 * 1_024
 val maxSemanticClassifierBytes = 45L * 1_024 * 1_024
@@ -37,6 +38,10 @@ val maxSemanticClassifierBytes = 45L * 1_024 * 1_024
 // not described as Play's device-specific compressed download size.
 val maxNonSemanticAabPhysicalBytes = 60L * 1_024 * 1_024
 val maxPhysicalBundleBytes = 105L * 1_024 * 1_024
+// Direct GitHub distribution uses one universal APK so users cannot accidentally install the
+// wrong ABI. Its four native ABI payloads need a larger non-semantic budget than the Play AAB.
+val maxNonSemanticApkPhysicalBytes = 140L * 1_024 * 1_024
+val maxPhysicalApkBytes = 185L * 1_024 * 1_024
 
 @Suppress("UNCHECKED_CAST")
 val semanticAssetPayloadVerifier =
@@ -53,7 +58,7 @@ val semanticAssetMaximumBytes =
 
 fun requireSemanticClassifierSize(sizeBytes: Long) {
     check(sizeBytes <= maxSemanticClassifierBytes) {
-        "Release AAB semantic classifier is $sizeBytes raw bytes; " +
+        "Release semantic classifier is $sizeBytes raw bytes; " +
             "hard limit is $maxSemanticClassifierBytes bytes"
     }
 }
@@ -61,61 +66,101 @@ fun requireSemanticClassifierSize(sizeBytes: Long) {
 fun requireReleaseBundleSizeLimits(
     nonSemanticAabPhysicalBytes: Long,
     totalPhysicalBytes: Long,
+) = requireReleaseArchiveSizeLimits(
+    artifactLabel = "Release AAB",
+    nonSemanticPhysicalBytes = nonSemanticAabPhysicalBytes,
+    totalPhysicalBytes = totalPhysicalBytes,
+    maxNonSemanticPhysicalBytes = maxNonSemanticAabPhysicalBytes,
+    maxTotalPhysicalBytes = maxPhysicalBundleBytes,
+)
+
+fun requireReleaseApkSizeLimits(
+    nonSemanticPhysicalBytes: Long,
+    totalPhysicalBytes: Long,
+) = requireReleaseArchiveSizeLimits(
+    artifactLabel = "Release APK",
+    nonSemanticPhysicalBytes = nonSemanticPhysicalBytes,
+    totalPhysicalBytes = totalPhysicalBytes,
+    maxNonSemanticPhysicalBytes = maxNonSemanticApkPhysicalBytes,
+    maxTotalPhysicalBytes = maxPhysicalApkBytes,
+)
+
+fun requireReleaseArchiveSizeLimits(
+    artifactLabel: String,
+    nonSemanticPhysicalBytes: Long,
+    totalPhysicalBytes: Long,
+    maxNonSemanticPhysicalBytes: Long,
+    maxTotalPhysicalBytes: Long,
 ) {
-    check(nonSemanticAabPhysicalBytes <= maxNonSemanticAabPhysicalBytes) {
-        "Release AAB non-semantic physical payload is $nonSemanticAabPhysicalBytes bytes " +
+    check(nonSemanticPhysicalBytes <= maxNonSemanticPhysicalBytes) {
+        "$artifactLabel non-semantic physical payload is $nonSemanticPhysicalBytes bytes " +
             "after subtracting semantic entry compressed sizes; internal limit is " +
-            "$maxNonSemanticAabPhysicalBytes bytes"
+            "$maxNonSemanticPhysicalBytes bytes"
     }
-    check(totalPhysicalBytes <= maxPhysicalBundleBytes) {
-        "Release AAB physical size is $totalPhysicalBytes bytes; " +
-            "limit is $maxPhysicalBundleBytes bytes"
+    check(totalPhysicalBytes <= maxTotalPhysicalBytes) {
+        "$artifactLabel physical size is $totalPhysicalBytes bytes; " +
+            "limit is $maxTotalPhysicalBytes bytes"
     }
 }
 
-fun requireSemanticAabEntrySize(
+fun requireSemanticArchiveEntrySize(
     entryName: String,
     sizeBytes: Long,
+    semanticEntryPrefix: String,
+    artifactLabel: String,
 ) {
-    val assetName = entryName.removePrefix("base/assets/")
+    val assetName = entryName.removePrefix(semanticEntryPrefix)
     check(sizeBytes in 1..semanticAssetMaximumBytes.getValue(assetName)) {
-        "Semantic model AAB entry exceeds its pre-read size limit: $entryName"
+        "$artifactLabel semantic model entry exceeds its pre-read size limit: $entryName"
     }
 }
 
-fun inspectReleaseBundleSize(bundle: File): ReleaseBundleSizeReport {
-    check(bundle.isFile) {
-        "Release AAB does not exist: ${bundle.absolutePath}"
+fun inspectReleaseArchiveSize(
+    archive: File,
+    artifactLabel: String,
+    expectedSemanticEntries: Set<String>,
+    classifierEntry: String,
+    semanticEntryPrefix: String,
+    maxNonSemanticPhysicalBytes: Long,
+    maxTotalPhysicalBytes: Long,
+): ReleaseBundleSizeReport {
+    check(archive.isFile) {
+        "$artifactLabel does not exist: ${archive.absolutePath}"
     }
-    val expectedEntryCounts = semanticBundleEntries.associateWith { 0 }.toMutableMap()
+    val expectedEntryCounts = expectedSemanticEntries.associateWith { 0 }.toMutableMap()
     val unexpectedSemanticEntries = mutableListOf<String>()
     var semanticClassifierRawBytes = 0L
     var semanticPayloadRawBytes = 0L
     var semanticPayloadCompressedBytes = 0L
     val semanticPayloadBytes = mutableMapOf<String, ByteArray>()
 
-    ZipFile(bundle).use { zip ->
+    ZipFile(archive).use { zip ->
         val entries = zip.entries()
         while (entries.hasMoreElements()) {
             val entry = entries.nextElement()
-            if (entry.name in semanticBundleEntries) {
+            if (entry.name in expectedSemanticEntries) {
                 check(!entry.isDirectory) {
-                    "Semantic model AAB entry must be a file: ${entry.name}"
+                    "$artifactLabel semantic model entry must be a file: ${entry.name}"
                 }
                 check(entry.size >= 0L && entry.compressedSize >= 0L) {
-                    "Semantic model AAB entry has unknown size: ${entry.name}"
+                    "$artifactLabel semantic model entry has unknown size: ${entry.name}"
                 }
-                val assetName = entry.name.removePrefix("base/assets/")
-                requireSemanticAabEntrySize(entry.name, entry.size)
+                val assetName = entry.name.removePrefix(semanticEntryPrefix)
+                requireSemanticArchiveEntrySize(
+                    entryName = entry.name,
+                    sizeBytes = entry.size,
+                    semanticEntryPrefix = semanticEntryPrefix,
+                    artifactLabel = artifactLabel,
+                )
                 expectedEntryCounts[entry.name] = expectedEntryCounts.getValue(entry.name) + 1
                 semanticPayloadRawBytes += entry.size
                 semanticPayloadCompressedBytes += entry.compressedSize
                 val bytes = zip.getInputStream(entry).use { input -> input.readBytes() }
                 check(bytes.size.toLong() == entry.size) {
-                    "Semantic model AAB entry size changed while reading: ${entry.name}"
+                    "$artifactLabel semantic model entry size changed while reading: ${entry.name}"
                 }
                 semanticPayloadBytes[assetName] = bytes
-                if (entry.name == semanticClassifierBundleEntry) {
+                if (entry.name == classifierEntry) {
                     semanticClassifierRawBytes += entry.size
                 }
             } else if (!entry.isDirectory && semanticAssetEntryPattern.matches(entry.name)) {
@@ -125,7 +170,7 @@ fun inspectReleaseBundleSize(bundle: File): ReleaseBundleSizeReport {
     }
 
     check(unexpectedSemanticEntries.isEmpty()) {
-        "Release AAB contains unexpected semantic model assets: " +
+        "$artifactLabel contains unexpected semantic model assets: " +
             unexpectedSemanticEntries.sorted().joinToString()
     }
     val duplicateEntries =
@@ -134,10 +179,10 @@ fun inspectReleaseBundleSize(bundle: File): ReleaseBundleSizeReport {
             .keys
             .sorted()
     check(duplicateEntries.isEmpty()) {
-        "Release AAB contains duplicate semantic model entries: ${duplicateEntries.joinToString()}"
+        "$artifactLabel contains duplicate semantic model entries: ${duplicateEntries.joinToString()}"
     }
 
-    val hasSemanticClassifier = expectedEntryCounts.getValue(semanticClassifierBundleEntry) == 1
+    val hasSemanticClassifier = expectedEntryCounts.getValue(classifierEntry) == 1
     if (hasSemanticClassifier) {
         val missingEntries =
             expectedEntryCounts
@@ -145,7 +190,7 @@ fun inspectReleaseBundleSize(bundle: File): ReleaseBundleSizeReport {
                 .keys
                 .sorted()
         check(missingEntries.isEmpty()) {
-            "Release AAB semantic model payload is incomplete; expected each entry exactly once. " +
+            "$artifactLabel semantic model payload is incomplete; expected each entry exactly once. " +
                 "Missing: ${missingEntries.joinToString()}"
         }
     }
@@ -155,19 +200,25 @@ fun inspectReleaseBundleSize(bundle: File): ReleaseBundleSizeReport {
             true,
         ) == hasSemanticClassifier,
     ) {
-        "Semantic AAB payload presence is inconsistent"
+        "$artifactLabel semantic payload presence is inconsistent"
     }
 
-    val totalPhysicalBytes = bundle.length()
-    val nonSemanticAabPhysicalBytes = totalPhysicalBytes - semanticPayloadCompressedBytes
-    check(nonSemanticAabPhysicalBytes >= 0L) {
-        "Release AAB semantic compressed size exceeds its physical file size"
+    val totalPhysicalBytes = archive.length()
+    val nonSemanticPhysicalBytes = totalPhysicalBytes - semanticPayloadCompressedBytes
+    check(nonSemanticPhysicalBytes >= 0L) {
+        "$artifactLabel semantic compressed size exceeds its physical file size"
     }
     requireSemanticClassifierSize(semanticClassifierRawBytes)
-    requireReleaseBundleSizeLimits(nonSemanticAabPhysicalBytes, totalPhysicalBytes)
+    requireReleaseArchiveSizeLimits(
+        artifactLabel = artifactLabel,
+        nonSemanticPhysicalBytes = nonSemanticPhysicalBytes,
+        totalPhysicalBytes = totalPhysicalBytes,
+        maxNonSemanticPhysicalBytes = maxNonSemanticPhysicalBytes,
+        maxTotalPhysicalBytes = maxTotalPhysicalBytes,
+    )
 
     return ReleaseBundleSizeReport(
-        nonSemanticAabPhysicalBytes = nonSemanticAabPhysicalBytes,
+        nonSemanticPhysicalBytes = nonSemanticPhysicalBytes,
         semanticClassifierRawBytes = semanticClassifierRawBytes,
         semanticPayloadRawBytes = semanticPayloadRawBytes,
         semanticPayloadCompressedBytes = semanticPayloadCompressedBytes,
@@ -176,9 +227,34 @@ fun inspectReleaseBundleSize(bundle: File): ReleaseBundleSizeReport {
     )
 }
 
-fun requireReleaseSemanticPayload(report: ReleaseBundleSizeReport) {
+fun inspectReleaseBundleSize(bundle: File): ReleaseBundleSizeReport =
+    inspectReleaseArchiveSize(
+        archive = bundle,
+        artifactLabel = "Release AAB",
+        expectedSemanticEntries = semanticBundleEntries,
+        classifierEntry = semanticClassifierBundleEntry,
+        semanticEntryPrefix = "base/assets/",
+        maxNonSemanticPhysicalBytes = maxNonSemanticAabPhysicalBytes,
+        maxTotalPhysicalBytes = maxPhysicalBundleBytes,
+    )
+
+fun inspectReleaseApkSize(apk: File): ReleaseBundleSizeReport =
+    inspectReleaseArchiveSize(
+        archive = apk,
+        artifactLabel = "Release APK",
+        expectedSemanticEntries = semanticApkEntries,
+        classifierEntry = semanticClassifierApkEntry,
+        semanticEntryPrefix = "assets/",
+        maxNonSemanticPhysicalBytes = maxNonSemanticApkPhysicalBytes,
+        maxTotalPhysicalBytes = maxPhysicalApkBytes,
+    )
+
+fun requireReleaseSemanticPayload(
+    report: ReleaseBundleSizeReport,
+    classifierEntry: String = semanticClassifierBundleEntry,
+) {
     check(report.hasSemanticClassifier) {
-        "Release candidate must contain $semanticClassifierBundleEntry and all semantic sidecars"
+        "Release candidate must contain $classifierEntry and all semantic sidecars"
     }
 }
 
@@ -430,7 +506,7 @@ tasks
             }
             logger.lifecycle(
                 "Release AAB size accounting: nonSemanticPhysical=" +
-                    "${report.nonSemanticAabPhysicalBytes} bytes, " +
+                    "${report.nonSemanticPhysicalBytes} bytes, " +
                     "classifier=${report.semanticClassifierRawBytes} raw bytes, " +
                     "semanticPayload=${report.semanticPayloadRawBytes} raw bytes " +
                     "(${report.semanticPayloadCompressedBytes} compressed bytes), " +
@@ -597,10 +673,23 @@ val verifyReleaseBundleSizeAccountingFixture by tasks.registering {
                 semanticFixtureEntries.getValue(semanticClassifierBundleEntry).size.toLong(),
         )
         check(
-            completeReport.nonSemanticAabPhysicalBytes ==
+            completeReport.nonSemanticPhysicalBytes ==
                 completeBundle.length() - completeReport.semanticPayloadCompressedBytes,
         )
         requireReleaseSemanticPayload(completeReport)
+
+        val completeApk = temporaryDir.resolve("complete.apk")
+        val apkSemanticFixtureEntries =
+            semanticFixtureEntries.mapKeys { (name, _) -> name.removePrefix("base/") }
+        writeFixture(
+            target = completeApk,
+            semanticEntries = apkSemanticFixtureEntries,
+        )
+        val completeApkReport = inspectReleaseApkSize(completeApk)
+        check(completeApkReport.hasSemanticClassifier)
+        check(completeApkReport.semanticPayloadRawBytes == expectedRawBytes)
+        requireReleaseSemanticPayload(completeApkReport, semanticClassifierApkEntry)
+
         requireSemanticClassifierSize(maxSemanticClassifierBytes)
         val classifierLimitFailure =
             runCatching {
@@ -611,9 +700,11 @@ val verifyReleaseBundleSizeAccountingFixture by tasks.registering {
         }
         val preReadLimitFailure =
             runCatching {
-                requireSemanticAabEntrySize(
-                    semanticClassifierBundleEntry,
-                    maxSemanticClassifierBytes + 1L,
+                requireSemanticArchiveEntrySize(
+                    entryName = semanticClassifierBundleEntry,
+                    sizeBytes = maxSemanticClassifierBytes + 1L,
+                    semanticEntryPrefix = "base/assets/",
+                    artifactLabel = "Release AAB",
                 )
             }.exceptionOrNull()
         check(preReadLimitFailure?.message?.contains("pre-read size limit") == true) {
@@ -642,6 +733,30 @@ val verifyReleaseBundleSizeAccountingFixture by tasks.registering {
             }.exceptionOrNull()
         check(physicalBundleLimitFailure?.message?.contains("physical size") == true) {
             "Physical AAB boundary did not reject 105 MiB + 1 byte"
+        }
+        requireReleaseApkSizeLimits(
+            nonSemanticPhysicalBytes = maxNonSemanticApkPhysicalBytes,
+            totalPhysicalBytes = maxPhysicalApkBytes,
+        )
+        val nonSemanticApkLimitFailure =
+            runCatching {
+                requireReleaseApkSizeLimits(
+                    nonSemanticPhysicalBytes = maxNonSemanticApkPhysicalBytes + 1L,
+                    totalPhysicalBytes = maxPhysicalApkBytes,
+                )
+            }.exceptionOrNull()
+        check(nonSemanticApkLimitFailure?.message?.contains("non-semantic physical payload") == true) {
+            "Non-semantic APK boundary did not reject 140 MiB + 1 byte"
+        }
+        val physicalApkLimitFailure =
+            runCatching {
+                requireReleaseApkSizeLimits(
+                    nonSemanticPhysicalBytes = maxNonSemanticApkPhysicalBytes,
+                    totalPhysicalBytes = maxPhysicalApkBytes + 1L,
+                )
+            }.exceptionOrNull()
+        check(physicalApkLimitFailure?.message?.contains("physical size") == true) {
+            "Physical APK boundary did not reject 185 MiB + 1 byte"
         }
 
         fun assertAabManifestRejected(
@@ -801,9 +916,9 @@ tasks.named("check").configure {
     dependsOn(verifyReleaseBundleSizeAccountingFixture)
 }
 
-// Normal local/CI compilation may intentionally produce an unsigned release artifact. Distribution
-// uses the explicit releaseCandidate gate below so an unsigned AAB can never be mistaken for a
-// publishable bundle.
+// Normal local/CI compilation may intentionally produce unsigned release artifacts. Direct GitHub
+// distribution uses the explicit releaseCandidate gate below so an unsigned APK can never be
+// mistaken for a publishable artifact.
 val verifyReleaseSigningConfiguration by tasks.registering {
     group = "verification"
     description = "Fails unless every release-signing environment variable is configured."
@@ -817,75 +932,69 @@ val verifyReleaseSigningConfiguration by tasks.registering {
 }
 
 tasks
-    .matching { it.name == "bundleRelease" }
+    .matching { it.name == "assembleRelease" }
     .configureEach {
         mustRunAfter(verifyReleaseSigningConfiguration)
     }
 
-val verifyReleaseBundleSigning by tasks.registering {
+val verifyReleaseApkSigning by tasks.registering {
     group = "verification"
-    description = "Builds the release AAB and cryptographically verifies its JAR signature."
-    dependsOn(verifyReleaseSigningConfiguration, "bundleRelease")
+    description = "Builds the universal release APK and verifies its APK signature and payload."
+    dependsOn(verifyReleaseSigningConfiguration, "assembleRelease")
 
     doLast {
-        val bundles =
+        val apks =
             layout.buildDirectory
-                .dir("outputs/bundle/release")
+                .dir("outputs/apk/release")
                 .get()
                 .asFile
-                .listFiles { file -> file.extension == "aab" }
-                .orEmpty()
-        check(bundles.size == 1) {
-            "Expected one release AAB, found ${bundles.size}"
+                .listFiles { file ->
+                    file.extension == "apk" && !file.name.endsWith("-unsigned.apk")
+                }.orEmpty()
+        check(apks.size == 1) {
+            "Expected one universal release APK, found ${apks.size}"
         }
-        val bundle = bundles.single()
-        requireReleaseSemanticPayload(inspectReleaseBundleSize(bundle))
-        val entryNames = mutableSetOf<String>()
-        var signedPayloadEntries = 0
-        val unsignedPayloadEntries = mutableListOf<String>()
-        val readBuffer = ByteArray(DEFAULT_BUFFER_SIZE)
-        JarFile(bundle, true).use { jar ->
-            val entries = jar.entries()
-            while (entries.hasMoreElements()) {
-                val entry = entries.nextElement()
-                entryNames += entry.name.uppercase()
-                if (!entry.isDirectory && !entry.name.startsWith("META-INF/")) {
-                    jar.getInputStream(entry).use { input ->
-                        while (input.read(readBuffer) >= 0) {
-                            // Reading every byte makes JarFile validate the entry digest/signature.
-                        }
-                    }
-                    if (!entry.codeSigners.isNullOrEmpty()) {
-                        signedPayloadEntries += 1
-                    } else {
-                        unsignedPayloadEntries += entry.name
-                    }
-                }
-            }
+        val apk = apks.single()
+        val report = inspectReleaseApkSize(apk)
+        requireReleaseSemanticPayload(report, semanticClassifierApkEntry)
+
+        val apksigner =
+            android.sdkDirectory
+                .resolve("build-tools")
+                .resolve(android.buildToolsVersion)
+                .resolve("apksigner")
+        check(apksigner.isFile && apksigner.canExecute()) {
+            "Android SDK apksigner for AGP-selected Build Tools ${android.buildToolsVersion} " +
+                "was not found at ${apksigner.absolutePath}"
         }
-        check(signedPayloadEntries > 0) {
-            "Release AAB contains no cryptographically verified signed payload entries"
+        val verification =
+            providers
+                .exec {
+                    commandLine(
+                        apksigner.absolutePath,
+                        "verify",
+                        "--verbose",
+                        "--print-certs",
+                        "--min-sdk-version",
+                        "26",
+                        apk.absolutePath,
+                    )
+                    isIgnoreExitValue = true
+                }.result
+                .get()
+        check(verification.exitValue == 0) {
+            "Release APK signature verification failed for ${apk.absolutePath}"
         }
-        check(unsignedPayloadEntries.isEmpty()) {
-            "Release AAB contains unsigned payload entries: " +
-                unsignedPayloadEntries.take(5).joinToString()
-        }
-        check("META-INF/MANIFEST.MF" in entryNames) {
-            "Release AAB has no JAR signature manifest"
-        }
-        check(entryNames.any { it.matches(Regex("""META-INF/[^/]+\.SF""")) }) {
-            "Release AAB has no signature descriptor"
-        }
-        check(entryNames.any { it.matches(Regex("""META-INF/[^/]+\.(RSA|DSA|EC)""")) }) {
-            "Release AAB has no signing certificate block"
-        }
-        logger.lifecycle("Verified signed release bundle: ${bundle.absolutePath}")
+        logger.lifecycle(
+            "Verified signed universal release APK: ${apk.absolutePath} " +
+                "(${report.totalPhysicalBytes} bytes)",
+        )
     }
 }
 
 tasks.register("releaseCandidate") {
     group = "build"
-    description = "Runs all device-independent gates and produces a verified signed release AAB."
+    description = "Runs all device-independent gates and produces a verified signed universal APK."
     dependsOn(
         ":core:check",
         ":data:check",
@@ -901,6 +1010,6 @@ tasks.register("releaseCandidate") {
         ":ml:assembleDebugAndroidTest",
         ":baselineprofile:assembleNonMinifiedRelease",
         ":baselineprofile:assembleBenchmarkRelease",
-        verifyReleaseBundleSigning,
+        verifyReleaseApkSigning,
     )
 }

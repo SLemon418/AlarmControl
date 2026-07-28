@@ -78,7 +78,7 @@ screen is the supported route for preventing future channel heads-up alerts.
 
 ## Semantic intent
 
-The optional local LLM produces one of seven values:
+The bundled local semantic encoder classifies notifications into seven values:
 
 | Intent | Meaning |
 |---|---|
@@ -90,10 +90,18 @@ The optional local LLM produces one of seven values:
 | `OTHER` | Clear intent outside the classes above |
 | `AMBIGUOUS` | Missing, contradictory, malformed, timed-out, or low-confidence result |
 
+Only a trusted encoder result may satisfy an Active semantic condition. When semantic intent could
+change the Active winner, the bounded real-time inference runs before that action. Monitor-only
+semantic work runs after the Active decision and cannot change it. `AMBIGUOUS`, low-confidence,
+timed-out, missing, or invalid output is unavailable and fails open.
+
 `IsAdvertisement(true)` remains compatible and means `MARKETING`; it is not a separate eighth
-class. Monitor rules can consume an enabled LLM analysis signal without side effects. Active rules
-also require the separate **LLM automatic actions** opt-in. User corrections update a local
-seven-class shrinkage prior; no gradients or notification text are exported.
+class. User corrections update a local seven-class shrinkage prior; no gradients or notification
+text are exported.
+
+The separately imported generative LLM is optional and observation-only. Its late output may enrich
+future local corrections, statistics, or suggestions, but it can never trigger or retroactively
+change a notification action.
 
 ## Analysis, explanations, and suggestions
 

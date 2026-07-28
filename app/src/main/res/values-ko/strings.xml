@@ -167,7 +167,7 @@
     <string name="template_promotions">ML 프로모션 숨기기</string>
     <string name="template_promotions_summary">기기 내 ML이 프로모션으로 분류한 알림을 지웁니다.</string>
     <string name="template_observe_ads">광고 의심 알림 관찰</string>
-    <string name="template_observe_ads_summary">알림을 지우지 않고 광고 의심 결과만 기록합니다. 선택형 로컬 LLM이 필요합니다.</string>
+    <string name="template_observe_ads_summary">알림을 지우지 않고 마케팅 의심 결과만 기록합니다. 앱에 포함된 기기 내 의미 분류기를 사용합니다.</string>
     <string name="template_keep_alarms">알람 알림 항상 유지</string>
     <string name="template_keep_alarms_summary">Android 알람 카테고리 알림을 보호하는 높은 우선순위 규칙입니다.</string>
     <string name="rules_delete">규칙 삭제</string>
