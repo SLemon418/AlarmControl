@@ -91,7 +91,12 @@ APK에 포함됩니다.
 Release 워크플로는 `vMAJOR.MINOR.PATCH` 태그를 push할 때만 실행합니다. 태그 버전은 APK의
 `versionName`과 정확히 같아야 하며 태그 커밋은 저장소 기본 브랜치의 조상이어야 합니다.
 새로 게시하는 APK의 `versionCode`도 이전 Release보다 반드시 커야 합니다. 같거나 낮은
-값은 Android가 업데이트로 설치하지 않습니다. `github-release` Environment에 다음
+값은 Android가 업데이트로 설치하지 않습니다. 두 값은 `app/version.json`에서 변경합니다.
+워크플로는 새 태그의 과거 이력만 보지 않고 checkout된 기본 브랜치 ref에서 도달 가능한
+모든 strict SemVer Release 태그의 커밋된 메타데이터를 확인합니다. 현재 코드가 그
+모두보다 크지 않으면 거부하므로 과거 커밋에 Release 태그를 뒤늦게 붙여도 우회할 수
+없습니다. 해당 태그가 없는 첫 Release는 허용하며, 비교에는 checkout이 받은 Git 이력만
+사용하고 추가 네트워크 요청을 하지 않습니다. `github-release` Environment에 다음
 secret을 설정합니다.
 
 - `ALARMCONTROL_KEYSTORE_BASE64`

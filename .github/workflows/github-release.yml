@@ -42,12 +42,18 @@ jobs:
             echo "Release tags must use the stable vMAJOR.MINOR.PATCH format." >&2
             exit 1
           fi
-          git fetch --no-tags origin "$DEFAULT_BRANCH"
+          if ! git rev-parse --verify --quiet "refs/remotes/origin/$DEFAULT_BRANCH" >/dev/null; then
+            echo "Checked-out history is missing origin/$DEFAULT_BRANCH." >&2
+            exit 1
+          fi
           release_commit="$(git rev-parse "${GITHUB_REF_NAME}^{commit}")"
           if ! git merge-base --is-ancestor "$release_commit" "origin/$DEFAULT_BRANCH"; then
             echo "Release tag must point to a commit on $DEFAULT_BRANCH." >&2
             exit 1
           fi
+          python3 scripts/verify_release_version.py \
+            --tag "$GITHUB_REF_NAME" \
+            --history-ref "origin/$DEFAULT_BRANCH"
 
       - name: Prepare release signing
         env:

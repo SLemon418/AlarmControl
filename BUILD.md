@@ -91,8 +91,12 @@ for every installation.
 The release workflow runs only when a `vMAJOR.MINOR.PATCH` tag is pushed. The tag's version must
 exactly match the APK `versionName`, and its commit must be an ancestor of the repository's default
 branch. Every published APK must also increase `versionCode` above the previous release; Android
-will not install an equal or lower code as an update. Configure the `github-release` Environment
-with:
+will not install an equal or lower code as an update. Update both values in `app/version.json`.
+The workflow checks the committed metadata from every strict SemVer release tag reachable from the
+checked-out default-branch ref, not just tags behind the new tag. It rejects a code that is not
+greater than all of them, so adding a release tag later to an older commit cannot bypass the check;
+the first such release is allowed. This comparison uses only the history fetched by checkout and
+performs no additional network request. Configure the `github-release` Environment with:
 
 - `ALARMCONTROL_KEYSTORE_BASE64`
 - `ALARMCONTROL_KEYSTORE_PASSWORD`

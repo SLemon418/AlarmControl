@@ -1,4 +1,5 @@
 import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
@@ -11,6 +12,28 @@ plugins {
     alias(libs.plugins.hilt)
     alias(libs.plugins.androidx.baselineprofile)
 }
+
+val appVersionFile = file("version.json")
+val appVersion =
+    (JsonSlurper().parse(appVersionFile) as? Map<*, *>).also { value ->
+        check(value?.keys == setOf("versionCode", "versionName")) {
+            "$appVersionFile must contain only versionCode and versionName"
+        }
+    } ?: error("$appVersionFile must contain a JSON object")
+val appVersionCode =
+    appVersion["versionCode"].let { value ->
+        check(value is Int && value > 0) {
+            "$appVersionFile versionCode must be a positive integer"
+        }
+        value
+    }
+val appVersionName =
+    appVersion["versionName"].let { value ->
+        check(value is String && Regex("""[0-9]+\.[0-9]+\.[0-9]+""").matches(value)) {
+            "$appVersionFile versionName must be MAJOR.MINOR.PATCH"
+        }
+        value
+    }
 
 data class ReleaseBundleSizeReport(
     val nonSemanticPhysicalBytes: Long,
@@ -279,8 +302,8 @@ android {
         applicationId = "com.alarmcontrol"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = appVersionCode
+        versionName = appVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
