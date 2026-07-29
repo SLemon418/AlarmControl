@@ -18,12 +18,14 @@ import kotlinx.coroutines.sync.withLock
 import java.security.MessageDigest
 import java.time.Clock
 import javax.inject.Inject
+import javax.inject.Singleton
 
 /**
  * Applies an automation enable/disable to the global filtering gate or a targeted named profile
  * (CLAUDE.md §7). It lives in `:automation` but speaks only `:core` contracts; their `:data`
  * implementations persist each change. Pure orchestration, so it is unit-tested without Android.
  */
+@Singleton
 class ProfileController
     @Inject
     constructor(

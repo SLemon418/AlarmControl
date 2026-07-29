@@ -28,7 +28,7 @@ import org.junit.Test
 class RealtimeCategoryRuleResolverTest {
     private val matcher = Matcher()
     private val classifier = mockk<NotificationClassifier>()
-    private val resolver = RealtimeCategoryRuleResolver(classifier)
+    private val resolver = RealtimeCategoryRuleResolver(matcher, classifier)
     private val snapshot =
         NotificationSnapshot(
             packageName = "com.example.local",
@@ -71,6 +71,7 @@ class RealtimeCategoryRuleResolverTest {
             val beforeCommit = resolver.resolveBeforeActiveCommit(snapshot, compiled)
 
             assertNull(beforeCommit.classification)
+            assertFalse(beforeCommit.activeResolutionFailed)
             assertTrue(beforeCommit.monitorNeedsPostCommitClassification)
             coVerify(exactly = 0) { classifier.classify(any()) }
 
@@ -97,6 +98,7 @@ class RealtimeCategoryRuleResolverTest {
         runTest {
             val timedResolver =
                 RealtimeCategoryRuleResolver(
+                    matcher = matcher,
                     classifier = classifier,
                     timeoutMillis = 500L,
                 )
@@ -119,7 +121,38 @@ class RealtimeCategoryRuleResolverTest {
                 )
 
             assertNull(result.classification)
+            assertTrue(result.activeResolutionFailed)
             assertFalse(result.monitorNeedsPostCommitClassification)
+        }
+
+    @Test
+    fun `stable higher priority match avoids lower category inference`() =
+        runTest {
+            val active =
+                rule(
+                    id = "active",
+                    condition = Condition.CategoryEquals("alarm"),
+                    action = RuleAction.Cancel,
+                    priority = 100,
+                )
+            val lowerCategory =
+                rule(
+                    id = "lower-category",
+                    condition = Condition.MlCategoryEquals("promotion"),
+                    action = RuleAction.Keep,
+                    priority = 10,
+                )
+
+            val result =
+                resolver.resolveBeforeActiveCommit(
+                    snapshot,
+                    matcher.compile(listOf(lowerCategory, active)),
+                )
+
+            assertNull(result.classification)
+            assertFalse(result.activeResolutionFailed)
+            assertFalse(result.monitorNeedsPostCommitClassification)
+            coVerify(exactly = 0) { classifier.classify(any()) }
         }
 
     private fun rule(

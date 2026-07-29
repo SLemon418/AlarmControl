@@ -1,5 +1,6 @@
 package com.alarmcontrol.service
 
+import com.alarmcontrol.automation.ProfileController
 import com.alarmcontrol.core.automation.AutomationAuditRepository
 import com.alarmcontrol.core.filtering.NotificationEventRepository
 import com.alarmcontrol.core.filtering.RuleRepository
@@ -35,6 +36,8 @@ internal interface DeviceValidationEntryPoint {
     fun profileRepository(): ProfileRepository
 
     fun automationAuditRepository(): AutomationAuditRepository
+
+    fun profileController(): ProfileController
 
     fun deviceValidationDataAccess(): DeviceValidationDataAccess
 

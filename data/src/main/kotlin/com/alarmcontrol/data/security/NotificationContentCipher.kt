@@ -3,7 +3,6 @@ package com.alarmcontrol.data.security
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import java.security.KeyStore
-import java.security.SecureRandom
 import java.util.UUID
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -34,17 +33,22 @@ internal class AndroidKeystoreNotificationContentCipher
     constructor() : NotificationContentCipher {
         override fun encrypt(plaintext: ByteArray): EncryptedContent {
             val aadId = UUID.randomUUID().toString()
-            val nonce = ByteArray(NONCE_BYTES).also(SecureRandom()::nextBytes)
             val cipher =
                 Cipher.getInstance(TRANSFORMATION).apply {
-                    init(Cipher.ENCRYPT_MODE, getOrCreateKey(), GCMParameterSpec(TAG_BITS, nonce))
+                    // Android Keystore keys with randomized encryption enabled reject a
+                    // caller-supplied GCM IV. Let the provider generate it, then persist that IV
+                    // alongside the ciphertext for decryption.
+                    init(Cipher.ENCRYPT_MODE, getOrCreateKey())
                     updateAAD(aadId.toByteArray(Charsets.UTF_8))
                 }
+            val ciphertext = cipher.doFinal(plaintext)
+            val nonce = requireNotNull(cipher.iv).copyOf()
+            require(nonce.size == NONCE_BYTES) { "Unexpected AES-GCM nonce length" }
             return EncryptedContent(
                 formatVersion = FORMAT_VERSION,
                 aadId = aadId,
                 nonce = nonce,
-                ciphertext = cipher.doFinal(plaintext),
+                ciphertext = ciphertext,
             )
         }
 

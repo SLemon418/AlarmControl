@@ -315,6 +315,74 @@ class MatcherTest {
     }
 
     @Test
+    fun `category resolution protects higher active rule without delaying a stable match`() {
+        val higherCategory =
+            rule(
+                "higher-category",
+                Condition.MlCategoryEquals("promotion"),
+                action = RuleAction.Keep,
+                priority = 100,
+            )
+        val fallback =
+            rule(
+                "fallback",
+                Condition.CategoryEquals("alarm"),
+                action = RuleAction.Cancel,
+                priority = 10,
+            )
+
+        val unresolved =
+            matcher.categoryResolutionRequirements(
+                alarmNotification,
+                matcher.compile(listOf(fallback, higherCategory)),
+            )
+
+        assertTrue(unresolved.activeNeedsCategory)
+        assertTrue(unresolved.any)
+
+        val stable =
+            matcher.categoryResolutionRequirements(
+                alarmNotification,
+                matcher.compile(listOf(higherCategory, fallback.copy(priority = 200))),
+            )
+
+        assertFalse(stable.activeNeedsCategory)
+        assertFalse(stable.any)
+    }
+
+    @Test
+    fun `category resolution ignores a rule disproved by another condition`() {
+        val impossible =
+            rule(
+                "impossible",
+                Condition.AllOf(
+                    listOf(
+                        Condition.PackageEquals("com.example.other"),
+                        Condition.MlCategoryEquals("promotion"),
+                    ),
+                ),
+                action = RuleAction.Keep,
+                priority = 100,
+            )
+        val fallback =
+            rule(
+                "fallback",
+                Condition.CategoryEquals("alarm"),
+                action = RuleAction.Cancel,
+                priority = 10,
+            )
+
+        val requirements =
+            matcher.categoryResolutionRequirements(
+                alarmNotification,
+                matcher.compile(listOf(fallback, impossible)),
+            )
+
+        assertFalse(requirements.activeNeedsCategory)
+        assertFalse(requirements.any)
+    }
+
+    @Test
     fun `stable higher priority non semantic match avoids semantic resolution`() {
         val stable = rule("stable", Condition.CategoryEquals("alarm"), priority = 100)
         val lowerSemantic =

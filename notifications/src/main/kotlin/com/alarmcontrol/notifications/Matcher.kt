@@ -81,6 +81,20 @@ class Matcher {
         )
 
     /**
+     * Reports whether an unresolved legacy ML category appears before the lane's first definite
+     * match. If real-time classification then fails, the active lane must fail open instead of
+     * allowing a lower-priority destructive rule to bypass a possible higher-priority Keep rule.
+     */
+    fun categoryResolutionRequirements(
+        snapshot: NotificationSnapshot,
+        compiled: CompiledRuleSet,
+    ): CategoryResolutionRequirements =
+        CategoryResolutionRequirements(
+            activeNeedsCategory = laneNeedsCategory(snapshot, compiled.activeRules),
+            monitorNeedsCategory = laneNeedsCategory(snapshot, compiled.monitorRules),
+        )
+
+    /**
      * Evaluates both lanes while building the selected rules' traces from the same short-circuiting
      * condition traversal. Use this on the notification hot path when a persisted explanation is
      * required; it avoids evaluating the matched conditions a second time.
@@ -214,6 +228,23 @@ class Matcher {
         for (rule in rules) {
             if (rule.condition.evaluate(snapshot) == ConditionResult.MATCH) return false
             if (rule.condition.canMatchWithTrustedSemantic(snapshot)) return true
+        }
+        return false
+    }
+
+    private fun laneNeedsCategory(
+        snapshot: NotificationSnapshot,
+        rules: List<Rule>,
+    ): Boolean {
+        for (rule in rules) {
+            when (rule.condition.evaluate(snapshot)) {
+                ConditionResult.MATCH -> return false
+                ConditionResult.UNKNOWN ->
+                    if (rule.condition.requiredSignals().mlCategory) {
+                        return true
+                    }
+                ConditionResult.NO_MATCH -> Unit
+            }
         }
         return false
     }

@@ -38,6 +38,14 @@ data class RuleSignalRequirements(
     val rateSignals: Set<com.alarmcontrol.core.filtering.RateSignal> = emptySet(),
 )
 
+/** Whether resolving the legacy ML category can change either lane's selected rule. */
+data class CategoryResolutionRequirements(
+    val activeNeedsCategory: Boolean,
+    val monitorNeedsCategory: Boolean,
+) {
+    val any: Boolean = activeNeedsCategory || monitorNeedsCategory
+}
+
 /** Whether resolving the trusted semantic intent can change either lane's selected rule. */
 data class SemanticResolutionRequirements(
     val activeNeedsSemantic: Boolean,

@@ -105,7 +105,7 @@ class NotificationFilterService : NotificationListenerService() {
     }
     private val llmLifecycle by lazy { SemanticLlmLifecycle(llmManager) }
     private val categoryRuleResolver by lazy {
-        RealtimeCategoryRuleResolver(classifier)
+        RealtimeCategoryRuleResolver(matcher, classifier)
     }
     private val rateTracker = NotificationRateTracker()
     private val semanticObservationQueue by lazy {
@@ -498,6 +498,33 @@ class NotificationFilterService : NotificationListenerService() {
                 mlCategory = categoryEvaluation.classification?.category,
                 rateCounts = rateCounts,
             )
+        if (categoryEvaluation.activeResolutionFailed) {
+            val monitorDecision = matcher.evaluateMonitor(common, compiled)
+            val monitor = monitorDecision.resolve(null)
+            return EvaluatedNotification(
+                common = common,
+                action = RuleAction.Keep,
+                matchedRuleId = null,
+                monitoredAction = monitor.action,
+                monitoredRuleId = monitor.ruleId,
+                mlConfidence = null,
+                semanticClassification = null,
+                needsDelayedSemanticObservation = false,
+                decisionTrace =
+                    matcher.decisionTrace(
+                        common,
+                        monitorDecision,
+                        DecisionTraceLane.MONITOR,
+                    ),
+                monitorNeedsPostCommitMlCategory =
+                    categoryEvaluation.monitorNeedsPostCommitClassification,
+                monitorNeedsPostCommitSemantic =
+                    matcher
+                        .semanticResolutionRequirements(common, compiled)
+                        .monitorNeedsSemantic,
+                semanticGeneration = semanticGeneration,
+            )
+        }
         val semanticEvaluation = semanticRuleResolver.resolve(common, compiled)
         if (!token.isCurrent()) return null
         return EvaluatedNotification(
@@ -814,6 +841,7 @@ class NotificationFilterService : NotificationListenerService() {
 }
 
 internal class RealtimeCategoryRuleResolver(
+    private val matcher: Matcher,
     private val classifier: NotificationClassifier,
     private val timeoutMillis: Long = CATEGORY_CLASSIFICATION_TIMEOUT_MILLIS,
 ) {
@@ -821,17 +849,20 @@ internal class RealtimeCategoryRuleResolver(
         snapshot: NotificationSnapshot,
         compiled: CompiledRuleSet,
     ): RealtimeCategoryRuleEvaluation {
-        val activeNeedsClassification = compiled.activeRequiredSignals.mlCategory
+        val requirements = matcher.categoryResolutionRequirements(snapshot, compiled)
+        val activeNeedsClassification = requirements.activeNeedsCategory
+        val classification =
+            if (activeNeedsClassification) {
+                classify(snapshot)
+            } else {
+                null
+            }
         return RealtimeCategoryRuleEvaluation(
-            classification =
-                if (activeNeedsClassification) {
-                    classify(snapshot)
-                } else {
-                    null
-                },
+            classification = classification,
+            activeResolutionFailed = activeNeedsClassification && classification == null,
             monitorNeedsPostCommitClassification =
-                !activeNeedsClassification &&
-                    compiled.monitorRequiredSignals.mlCategory,
+                requirements.monitorNeedsCategory &&
+                    classification == null,
         )
     }
 
@@ -851,6 +882,7 @@ internal class RealtimeCategoryRuleResolver(
 
 internal data class RealtimeCategoryRuleEvaluation(
     val classification: ClassificationResult?,
+    val activeResolutionFailed: Boolean,
     val monitorNeedsPostCommitClassification: Boolean,
 )
 
