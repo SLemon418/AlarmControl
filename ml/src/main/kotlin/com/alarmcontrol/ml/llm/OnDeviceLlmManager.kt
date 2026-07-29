@@ -34,8 +34,8 @@ interface OnDeviceLlmManager {
     suspend fun initialize()
 
     /**
-     * Analyzes [text] for hidden promotional intent. Returns `null` on an unavailable engine or
-     * inference failure so callers fall back to rules/classifier (§5); cancellation propagates.
+     * Analyzes [text] for one of the seven semantic intents. Returns `null` on an unavailable engine
+     * or inference failure so callers fall back to rules/classifier (§5); cancellation propagates.
      */
     suspend fun analyze(
         text: String,

@@ -322,6 +322,7 @@ android {
         applicationId = "com.alarmcontrol"
         minSdk = 26
         targetSdk = 36
+        resourceConfigurations += listOf("en", "ko")
         versionCode = appVersionCode
         versionName = appVersionName
 
@@ -407,6 +408,7 @@ dependencies {
     implementation(project(":automation"))
 
     implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.appcompat)
     implementation(libs.kotlinx.coroutines.android)
 
     implementation(platform(libs.androidx.compose.bom))

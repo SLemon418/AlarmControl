@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -37,14 +38,18 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -531,9 +536,10 @@ private fun TrendBars(
     bucketLabel: String,
 ) {
     val maximum = points.maxOfOrNull(TrendPointUi::totalCount)?.coerceAtLeast(1) ?: 1
-    val totalColor = MaterialTheme.colorScheme.secondaryContainer
+    val totalColor = MaterialTheme.colorScheme.outline
     val silencedColor = MaterialTheme.colorScheme.primary
     val description = stringResource(R.string.insights_analysis_trend_description, points.size, bucketLabel)
+    ComparisonLegend(totalColor = totalColor, silencedColor = silencedColor)
     Canvas(
         Modifier
             .fillMaxWidth()
@@ -541,11 +547,13 @@ private fun TrendBars(
             .semantics { contentDescription = description },
     ) {
         val slot = size.width / points.size
-        val width = slot * TREND_BAR_WIDTH_FRACTION
+        val groupWidth = slot * COMPARISON_GROUP_WIDTH_FRACTION
+        val gap = slot * COMPARISON_BAR_GAP_FRACTION
+        val width = (groupWidth - gap) / 2f
         points.forEachIndexed { index, point ->
             val totalHeight = size.height * point.totalCount / maximum.toFloat()
             val silencedHeight = size.height * point.silencedCount / maximum.toFloat()
-            val left = index * slot + (slot - width) / 2
+            val left = index * slot + (slot - groupWidth) / 2f
             val radius = CornerRadius(width / TREND_BAR_CORNER_DIVISOR)
             drawRoundRect(
                 color = totalColor,
@@ -555,11 +563,18 @@ private fun TrendBars(
             )
             drawRoundRect(
                 color = silencedColor,
-                topLeft = Offset(left, size.height - silencedHeight),
+                topLeft = Offset(left + width + gap, size.height - silencedHeight),
                 size = Size(width, silencedHeight),
                 cornerRadius = radius,
             )
         }
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(formatAnalysisDay(points.first().startEpochDay), style = MaterialTheme.typography.labelSmall)
+        Text(formatAnalysisDay(points.last().endEpochDay), style = MaterialTheme.typography.labelSmall)
     }
     Text(
         stringResource(R.string.insights_analysis_trend_legend, bucketLabel),
@@ -622,12 +637,22 @@ internal fun NamedBars(rows: List<Pair<String, Int>>) {
     val trackColor = MaterialTheme.colorScheme.surfaceVariant
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         visible.forEach { (label, count) ->
+            val description = stringResource(R.string.insights_category_count, label, count)
             Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text(label, style = MaterialTheme.typography.bodySmall)
                     Text(count.toString(), style = MaterialTheme.typography.labelMedium)
                 }
-                Canvas(Modifier.fillMaxWidth().height(8.dp)) {
+                Canvas(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(8.dp)
+                        .semantics {
+                            contentDescription = description
+                            progressBarRangeInfo =
+                                ProgressBarRangeInfo(count.toFloat(), 0f..maximum.toFloat())
+                        },
+                ) {
                     val radius = CornerRadius(size.height / 2)
                     drawRoundRect(trackColor, cornerRadius = radius)
                     drawRoundRect(
@@ -644,25 +669,29 @@ internal fun NamedBars(rows: List<Pair<String, Int>>) {
 @Composable
 internal fun HourDistribution(hours: List<HourAnalysisUi>) {
     val maximum = hours.maxOfOrNull(HourAnalysisUi::totalCount)?.coerceAtLeast(1) ?: 1
-    val totalColor = MaterialTheme.colorScheme.secondaryContainer
-    val silencedColor = MaterialTheme.colorScheme.tertiary
+    val totalColor = MaterialTheme.colorScheme.outline
+    val silencedColor = MaterialTheme.colorScheme.primary
     val peak = hours.maxByOrNull(HourAnalysisUi::totalCount)
+    val description =
+        peak
+            ?.let {
+                stringResource(R.string.insights_hour_chart_description, it.hour, it.totalCount)
+            }.orEmpty()
+    ComparisonLegend(totalColor = totalColor, silencedColor = silencedColor)
     Canvas(
         Modifier
             .fillMaxWidth()
             .height(100.dp)
             .semantics {
-                contentDescription =
-                    peak
-                        ?.let {
-                            "${it.hour}:00, ${it.totalCount}"
-                        }.orEmpty()
+                contentDescription = description
             },
     ) {
         val slot = size.width / HOURS_PER_DAY
         hours.forEach { hour ->
-            val width = slot * HOUR_BAR_WIDTH_FRACTION
-            val left = hour.hour * slot + (slot - width) / 2
+            val groupWidth = slot * COMPARISON_GROUP_WIDTH_FRACTION
+            val gap = slot * COMPARISON_BAR_GAP_FRACTION
+            val width = (groupWidth - gap) / 2f
+            val left = hour.hour * slot + (slot - groupWidth) / 2f
             val totalHeight = size.height * hour.totalCount / maximum.toFloat()
             val mutedHeight = size.height * hour.silencedCount / maximum.toFloat()
             drawRoundRect(
@@ -673,9 +702,20 @@ internal fun HourDistribution(hours: List<HourAnalysisUi>) {
             )
             drawRoundRect(
                 silencedColor,
-                Offset(left, size.height - mutedHeight),
+                Offset(left + width + gap, size.height - mutedHeight),
                 Size(width, mutedHeight),
                 CornerRadius(width / HOUR_BAR_CORNER_DIVISOR),
+            )
+        }
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        HOUR_AXIS_LABELS.forEach { hour ->
+            Text(
+                text = hour.toString().padStart(2, '0'),
+                style = MaterialTheme.typography.labelSmall,
             )
         }
     }
@@ -684,6 +724,39 @@ internal fun HourDistribution(hours: List<HourAnalysisUi>) {
             stringResource(R.string.insights_peak_hour, it.hour, it.totalCount),
             style = MaterialTheme.typography.labelSmall,
         )
+    }
+}
+
+@Composable
+private fun ComparisonLegend(
+    totalColor: Color,
+    silencedColor: Color,
+) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        LegendItem(color = totalColor, label = stringResource(R.string.insights_chart_total))
+        LegendItem(color = silencedColor, label = stringResource(R.string.insights_chart_silenced))
+    }
+}
+
+@Composable
+private fun LegendItem(
+    color: Color,
+    label: String,
+) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Canvas(Modifier.size(12.dp)) {
+            drawRoundRect(
+                color = color,
+                cornerRadius = CornerRadius(size.minDimension / LEGEND_CORNER_DIVISOR),
+            )
+        }
+        Text(label, style = MaterialTheme.typography.labelMedium)
     }
 }
 
@@ -873,7 +946,9 @@ internal const val INSIGHTS_ANALYSIS_TEST_TAG = "insights_analysis"
 internal const val INSIGHTS_RECORDS_TEST_TAG = "insights_records"
 private const val DISPLAY_LIMIT = 10
 private const val HOURS_PER_DAY = 24
-private const val TREND_BAR_WIDTH_FRACTION = 0.62f
+private const val COMPARISON_GROUP_WIDTH_FRACTION = 0.72f
+private const val COMPARISON_BAR_GAP_FRACTION = 0.08f
 private const val TREND_BAR_CORNER_DIVISOR = 4f
-private const val HOUR_BAR_WIDTH_FRACTION = 0.7f
 private const val HOUR_BAR_CORNER_DIVISOR = 3f
+private const val LEGEND_CORNER_DIVISOR = 4f
+private val HOUR_AXIS_LABELS = listOf(0, 6, 12, 18, 23)

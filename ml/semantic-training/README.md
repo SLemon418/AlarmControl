@@ -269,10 +269,10 @@ Android.
 Run conversion after the trained bundle passes its development-quality check.
 Release threshold selection and the final sealed holdout gate are then rerun
 from this exact TensorFlow Lite artifact.
-The currently installed `litert-torch 0.9.1` environment is local:
+Run from an isolated environment containing the pinned `litert-torch 0.9.1` toolchain:
 
 ```bash
-ml/llm-training/.venv-convert/bin/python \
+/absolute/path/to/litert-venv/bin/python \
   ml/semantic-training/convert_koelectra_litert.py \
   --model-dir /absolute/path/to/training-output/best \
   --output-dir /absolute/path/to/litert-output \

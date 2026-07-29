@@ -17,10 +17,11 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 /**
- * [LlmEngine] backed by MediaPipe Tasks GenAI (Milestone 4). Loads a LOCAL quantized model (e.g.
- * Gemma) from [modelFile] and runs on-device inference — no network, ever (§1/§3). The model is not
- * bundled in the APK (far too large); the user imports it from local storage and it is copied under
- * app-private storage. [isModelAvailable] reports its absence so the manager degrades gracefully (§5).
+ * [LlmEngine] backed by MediaPipe Tasks GenAI (Milestone 4). Loads a compatible LOCAL quantized
+ * text model from [modelFile] and runs on-device inference — no network, ever (§1/§3). The model is
+ * not bundled in the APK; the user prepares and imports it from local storage, and it is copied
+ * under app-private storage. [isModelAvailable] reports its absence so the manager degrades
+ * gracefully (§5).
  *
  * Device-only (native runtime), so — like the classifier's TFLite backend — it isn't part of the JVM
  * unit suite; the manager's state/threading logic, bounded prompt, and strict response parser are

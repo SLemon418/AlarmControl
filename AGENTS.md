@@ -15,10 +15,11 @@ automation hooks (Tasker/Samsung Routines).
   lightweight bundled TFLite classifier. A generative on-device LLM is an *optional,
   device-gated* enhancement layered on top — never a hard dependency of the core filtering path.
 - **On-device LLM engine: MediaPipe Tasks GenAI** (`com.google.mediapipe:tasks-genai`), running a
-  **local quantized model** (e.g. Gemma) via `LlmInference` (Milestone 4). This supersedes the earlier
-  ML Kit GenAI / AICore plan. The model is **not bundled in the APK** (far too large); it lives in the
-  app's private `filesDir` after the user imports it through the Storage Access Framework; the app
-  never downloads it (§3). When it is absent or fails to load, `OnDeviceLlmManager` reports
+  **user-prepared compatible self-contained quantized text model** via `LlmInference` (Milestone 4).
+  This supersedes the earlier ML Kit GenAI / AICore plan. The model is **not bundled in the APK**;
+  it lives in the app's private `filesDir` after the user imports it through the Storage Access
+  Framework, and the app never downloads it (§3). AlarmControl does not publish an LLM or a
+  model-training pipeline. When the import is absent or fails to load, `OnDeviceLlmManager` reports
   `Unavailable` and the app falls back to rules + the TFLite classifier (§5). Verified offline-clean:
   `tasks-genai` adds no `INTERNET` permission and no blocklisted networking client to the classpath
   (the §3 offline guard passes with it present).
@@ -30,8 +31,8 @@ automation hooks (Tasker/Samsung Routines).
 - **Distribution target: GitHub Releases.** The publishable app artifact is a cryptographically
   verified, release-signed APK attached to a GitHub Release. The AAB path remains buildable only as
   a CI/Play-format regression check; it is not the current publication target. The installed app
-  does not check GitHub, self-update, or download models. Optional LLM files are distributed
-  separately from the app APK and are imported explicitly by the user (§3).
+  does not check GitHub, self-update, or download models. AlarmControl does not distribute an
+  optional LLM; a user-prepared compatible `.task` is imported explicitly from local storage (§3).
 - **Compose stays in `:app`, never in `:core`.** The Material 3 design system / theme lives in the
   `:app` module so the `:data`/`:ml`/`:notifications` layers (which depend on `:core`) can never
   transitively pull UI code into a lower layer. `:core` is deliberately Compose-free; that absence is
@@ -91,9 +92,9 @@ propose it first, don't just add it.
   dependencies or APK content.
 - **Classifier models are bundled** in `:ml/src/main/assets/` and loaded from there. No
   download-at-runtime.
-- **The generative LLM model is not bundled** (too large for the APK): the user selects a compatible
-  local file through the Storage Access Framework, and the app atomically copies it to private
-  `filesDir` storage (`MlConfig.LLM_MODEL_FILE`). The app **never downloads** it and declares no
+- **The generative LLM model is not bundled or provided by AlarmControl**: the user selects a
+  compatible local file through the Storage Access Framework, and the app atomically copies it to
+  private `filesDir` storage (`MlConfig.LLM_MODEL_FILE`). The app **never downloads** it and declares no
   `INTERNET`; a missing or invalid file degrades gracefully (§0/§5).
 - **User-directed backup/model file pickers request local providers only** with
   `Intent.EXTRA_LOCAL_ONLY`; AlarmControl never offers or implements a cloud upload path.
@@ -162,6 +163,8 @@ Boundaries exist to keep features small and to make the offline rule structurall
   inputs for future correction, statistics, and suggestions and never change an already handled
   notification. Automatic background LLM work remains disabled until the exact imported model has a
   verified compatibility profile.
+- The bundled seven-intent encoder is enabled by default but user-disableable. When disabled, it is
+  never invoked; semantic-dependent actions fail open while unrelated rule signals keep working.
 - **Categorization must degrade gracefully**: if the model is unavailable or low-confidence, fall
   back to rule-based filtering. The rules engine works without ML; ML only improves it.
 - Keep model I/O behind interfaces in `:ml` so LiteRT and the optional MediaPipe runtime can change

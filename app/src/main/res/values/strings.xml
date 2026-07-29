@@ -38,6 +38,11 @@
     <string name="back">Back</string>
     <string name="settings_dynamic_color">Use dynamic color</string>
     <string name="settings_dynamic_color_summary">Use colors derived from this device’s wallpaper instead of the AlarmControl palette.</string>
+    <string name="settings_app_language">App language</string>
+    <string name="settings_app_language_summary">Choose System default, English, or Korean. The screen restarts when the language changes.</string>
+    <string name="settings_language_system">System default</string>
+    <string name="settings_language_english">English</string>
+    <string name="settings_language_korean">한국어</string>
     <string name="settings_automation_section">Automation</string>
     <string name="settings_data_privacy">Data &amp; privacy</string>
     <string name="settings_data_privacy_summary">Choose retention periods, review local-only storage, or delete selected data.</string>
@@ -79,6 +84,9 @@
     <string name="automation_outcome_invalid">Invalid request</string>
     <string name="automation_outcome_not_found">Target not found</string>
     <string name="settings_llm_section">On-device semantic analysis</string>
+    <string name="settings_local_ai_overview_summary">Bundled classifier: %1$s · Custom LLM — %2$s</string>
+    <string name="settings_semantic_classifier_enabled">Use bundled 7-intent classifier</string>
+    <string name="settings_semantic_classifier_summary">Turning this off skips seven-intent inference. Notifications whose action depends on semantic or advertisement conditions fail open and remain unchanged; other notifications use the remaining rule signals.</string>
     <string name="settings_llm_enabled">Use deferred local LLM analysis</string>
     <string name="settings_llm_summary">Optional and off by default. Select a compatible quantized MediaPipe .task model already stored on this device.</string>
     <string name="settings_llm_summary_unverified">Automatic background LLM analysis is unavailable until this build verifies a compatible model profile. You may still import a local model for compatibility checks.</string>
@@ -337,7 +345,10 @@
     <string name="insights_analysis_empty_body">Choose another range, or wait for the next daily background aggregation. Live activity remains available in Records.</string>
     <string name="insights_analysis_trend">Notification trend</string>
     <string name="insights_analysis_trend_description">%1$d %2$s trend buckets showing all and silenced notifications</string>
-    <string name="insights_analysis_trend_legend">Each %1$s: background shows all notifications; foreground shows silenced notifications.</string>
+    <string name="insights_analysis_trend_legend">Each %1$s shows two bars: all notifications first, silenced notifications second.</string>
+    <string name="insights_chart_total">All notifications</string>
+    <string name="insights_chart_silenced">Silenced</string>
+    <string name="insights_hour_chart_description">24-hour chart showing all and silenced notifications. Peak at %1$02d:00 with %2$d notifications.</string>
     <string name="insights_analysis_apps">Most active apps</string>
     <string name="insights_analysis_rules">Top rule decisions</string>
     <string name="insights_analysis_semantics">Semantic intent</string>

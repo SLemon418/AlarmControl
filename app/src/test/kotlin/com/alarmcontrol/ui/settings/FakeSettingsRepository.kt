@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 class FakeSettingsRepository(
     enabled: Boolean = false,
     filtering: Boolean = true,
+    semanticClassifier: Boolean = true,
     llmEnabled: Boolean = false,
     eventDays: Int = RetentionDefaults.EVENT_DAYS,
     insightDays: Int = RetentionDefaults.DAILY_INSIGHT_DAYS,
@@ -21,6 +22,7 @@ class FakeSettingsRepository(
     var beforeSetNotificationContentStorageEnabled: suspend (Boolean) -> Unit = {}
     private val state = MutableStateFlow(enabled)
     private val filteringState = MutableStateFlow(filtering)
+    private val semanticClassifierState = MutableStateFlow(semanticClassifier)
     private val llmState = MutableStateFlow(llmEnabled)
     private val eventRetentionState = MutableStateFlow(eventDays)
     private val insightRetentionState = MutableStateFlow(insightDays)
@@ -30,6 +32,7 @@ class FakeSettingsRepository(
     private val excludedPackagesState = MutableStateFlow(emptySet<String>())
 
     override val filteringEnabled: Flow<Boolean> = filteringState
+    override val semanticClassifierEnabled: Flow<Boolean> = semanticClassifierState
 
     override val externalAutomationEnabled: Flow<Boolean> = state
     override val externalAutomationToken: Flow<String> = tokenState
@@ -47,6 +50,10 @@ class FakeSettingsRepository(
     override suspend fun setFilteringEnabled(enabled: Boolean) {
         operationLog += "filtering:$enabled"
         filteringState.value = enabled
+    }
+
+    override suspend fun setSemanticClassifierEnabled(enabled: Boolean) {
+        semanticClassifierState.value = enabled
     }
 
     override suspend fun setExternalAutomationEnabled(enabled: Boolean) {
@@ -105,6 +112,7 @@ class FakeSettingsRepository(
     override suspend fun snapshot(): SettingsSnapshot =
         SettingsSnapshot(
             filteringEnabled = filteringState.value,
+            semanticClassifierEnabled = semanticClassifierState.value,
             externalAutomationEnabled = state.value,
             llmAnalysisEnabled = llmState.value,
             eventRetentionDays = eventRetentionState.value,
@@ -121,6 +129,7 @@ class FakeSettingsRepository(
 
     override suspend fun restore(snapshot: SettingsSnapshot) {
         filteringState.value = snapshot.filteringEnabled
+        semanticClassifierState.value = snapshot.semanticClassifierEnabled
         state.value = snapshot.externalAutomationEnabled
         llmState.value = snapshot.llmAnalysisEnabled
         eventRetentionState.value = snapshot.eventRetentionDays
@@ -131,6 +140,7 @@ class FakeSettingsRepository(
         operationLog += "reset"
         state.value = false
         filteringState.value = false
+        semanticClassifierState.value = true
         llmState.value = false
         eventRetentionState.value = RetentionDefaults.EVENT_DAYS
         insightRetentionState.value = RetentionDefaults.DAILY_INSIGHT_DAYS

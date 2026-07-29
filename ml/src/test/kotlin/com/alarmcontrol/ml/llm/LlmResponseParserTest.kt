@@ -2,7 +2,6 @@ package com.alarmcontrol.ml.llm
 
 import com.alarmcontrol.core.filtering.SemanticIntent
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -20,13 +19,28 @@ class LlmResponseParserTest {
     }
 
     @Test
-    fun `extracts JSON even when the model wraps it in prose`() {
-        val raw =
-            "Sure! Here is the result:\n" +
-                "{\"intent\":\"TRANSACTIONAL\",\"confidence\":0.9,\"reason\":\"Bank debit\"}\nThanks"
-        val result = LlmResponseParser.parse(raw)
-        assertFalse(result.isAdvertisement)
-        assertEquals(0.9f, result.confidenceScore, 1e-4f)
+    fun `rejects prose or Markdown around a verdict`() {
+        val json = """{"intent":"TRANSACTIONAL","confidence":0.9,"reason":"Bank debit"}"""
+
+        assertEquals(
+            LlmAnalysisResult.UNAVAILABLE,
+            LlmResponseParser.parse("Result:\n$json"),
+        )
+        assertEquals(
+            LlmAnalysisResult.UNAVAILABLE,
+            LlmResponseParser.parse("```json\n$json\n```"),
+        )
+    }
+
+    @Test
+    fun `rejects content after the only verdict`() {
+        val first = """{"intent":"TRANSACTIONAL","confidence":0.9,"reason":"Bank debit"}"""
+        val second = """{"intent":"MARKETING","confidence":0.9,"reason":"Offer"}"""
+
+        assertEquals(
+            LlmAnalysisResult.UNAVAILABLE,
+            LlmResponseParser.parse("$first\n$second"),
+        )
     }
 
     @Test

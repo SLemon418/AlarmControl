@@ -69,6 +69,32 @@ class RealtimeSemanticRuleResolverTest {
         }
 
     @Test
+    fun `disabled semantic encoder is not called and active semantic rule fails open`() =
+        runTest {
+            val semantic =
+                rule(
+                    "semantic",
+                    Condition.SemanticIntentEquals(SemanticIntent.MARKETING),
+                    RuleAction.Cancel,
+                    priority = 100,
+                )
+            val fallback = rule("fallback", Condition.CategoryEquals("alarm"), RuleAction.Cancel, priority = 10)
+
+            val result =
+                resolver.resolve(
+                    snapshot = snapshot,
+                    compiled = matcher.compile(listOf(fallback, semantic)),
+                    classifierEnabled = false,
+                )
+
+            assertEquals(RuleAction.Keep, result.action)
+            assertNull(result.matchedRuleId)
+            assertNull(result.classification)
+            assertTrue(result.needsDelayedObservation)
+            coVerify(exactly = 0) { classifier.classify(any(), any()) }
+        }
+
+    @Test
     fun `monitor-only semantic inference starts after the active action is ready to commit`() =
         runTest {
             val classification = semanticResult(isConfident = true)
@@ -166,6 +192,35 @@ class RealtimeSemanticRuleResolverTest {
             coVerify(exactly = 1) {
                 classifier.classify(any(), SemanticInferenceUrgency.BACKGROUND)
             }
+        }
+
+    @Test
+    fun `disabled semantic encoder is not called for post-commit monitor enrichment`() =
+        runTest {
+            val active =
+                rule("active", Condition.CategoryEquals("alarm"), RuleAction.Cancel, priority = 100)
+            val monitorSemantic =
+                rule(
+                    "monitor-semantic",
+                    Condition.SemanticIntentEquals(SemanticIntent.MARKETING),
+                    RuleAction.Cancel,
+                    priority = 100,
+                    mode = RuleExecutionMode.MONITOR,
+                )
+            val compiled = matcher.compile(listOf(active, monitorSemantic))
+
+            val afterCommit =
+                resolver.resolveMonitorAfterCommit(
+                    snapshot = snapshot,
+                    compiled = compiled,
+                    classifySemantic = true,
+                    classifierEnabled = false,
+                )
+
+            assertNull(afterCommit.classification)
+            assertNull(afterCommit.monitoredAction)
+            assertTrue(afterCommit.needsDelayedObservation)
+            coVerify(exactly = 0) { classifier.classify(any(), any()) }
         }
 
     @Test

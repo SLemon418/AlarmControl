@@ -10,6 +10,7 @@ data class SettingsUiState(
     val externalAutomationEnabled: Boolean = false,
     val externalAutomationToken: String = "",
     val automationAudit: List<AutomationAuditUi> = emptyList(),
+    val semanticClassifierEnabled: Boolean = true,
     val llmAnalysisEnabled: Boolean = false,
     val llmBackgroundAnalysisAvailable: Boolean = false,
     val semanticAnalysisScope: SemanticAnalysisScope = SemanticAnalysisScope.RULES_ONLY,

@@ -275,6 +275,21 @@ class SettingsViewModelTest {
         }
 
     @Test
+    fun `bundled semantic classifier can be disabled independently`() =
+        runTest {
+            val vm = viewModel()
+
+            vm.uiState.test {
+                assertTrue(awaitUntil { it.semanticClassifierEnabled }.semanticClassifierEnabled)
+                vm.setSemanticClassifierEnabled(false)
+                assertFalse(awaitUntil { !it.semanticClassifierEnabled }.semanticClassifierEnabled)
+                cancelAndIgnoreRemainingEvents()
+            }
+
+            assertFalse(repository.semanticClassifierEnabled.first())
+        }
+
+    @Test
     fun `LLM analysis opt in stays lazy and opt out closes the local engine`() =
         runTest {
             val vm = viewModel()

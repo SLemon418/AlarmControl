@@ -48,6 +48,19 @@
         </service>
 
         <!--
+          AndroidX stores only the selected app locale on API 26–32. Android 13+ synchronizes the
+          same selection with system App Languages; neither path uses the network.
+        -->
+        <service
+            android:name="androidx.appcompat.app.AppLocalesMetadataHolderService"
+            android:enabled="false"
+            android:exported="false">
+            <meta-data
+                android:name="autoStoreLocales"
+                android:value="true" />
+        </service>
+
+        <!--
           WorkManager uses on-demand init via Hilt (AlarmControlApplication is a Configuration.Provider
           supplying the HiltWorkerFactory), so the default startup initializer is removed. Periodic
           insights run entirely on-device — no INTERNET (CLAUDE.md §1/§3).

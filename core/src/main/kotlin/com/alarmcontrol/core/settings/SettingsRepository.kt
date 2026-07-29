@@ -17,6 +17,9 @@ interface SettingsRepository {
     /** Global filtering gate. Defaults to true and never rewrites individual rule enabled states. */
     val filteringEnabled: Flow<Boolean>
 
+    /** Whether the bundled seven-intent classifier may run for semantic rule conditions. */
+    val semanticClassifierEnabled: Flow<Boolean>
+
     /** Whether optional, resource-intensive local LLM analysis is enabled. Defaults to false. */
     val llmAnalysisEnabled: Flow<Boolean>
 
@@ -54,6 +57,9 @@ interface SettingsRepository {
 
     /** Persists the global filtering gate without changing any rule. */
     suspend fun setFilteringEnabled(enabled: Boolean)
+
+    /** Enables or disables bundled seven-intent inference without changing any rule. */
+    suspend fun setSemanticClassifierEnabled(enabled: Boolean)
 
     /** Persists the explicit opt-in for optional on-device LLM analysis. */
     suspend fun setLlmAnalysisEnabled(enabled: Boolean)
@@ -118,6 +124,7 @@ interface SettingsRepository {
 /** Privacy-safe preferences included in the user-controlled local backup. */
 data class SettingsSnapshot(
     val filteringEnabled: Boolean = true,
+    val semanticClassifierEnabled: Boolean = true,
     val externalAutomationEnabled: Boolean = false,
     val llmAnalysisEnabled: Boolean = false,
     /** Legacy source compatibility only; persistence and backup boundaries always normalize false. */

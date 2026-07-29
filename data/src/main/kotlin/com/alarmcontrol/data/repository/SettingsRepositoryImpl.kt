@@ -36,6 +36,7 @@ import javax.inject.Inject
  * backup and maintenance snapshots propagate failures so callers cannot persist or delete from
  * substituted values.
  */
+@Suppress("TooManyFunctions") // One cohesive DataStore settings contract owns snapshot and restore.
 class SettingsRepositoryImpl
     @Inject
     internal constructor(
@@ -51,6 +52,11 @@ class SettingsRepositoryImpl
         override val filteringEnabled: Flow<Boolean> =
             dataStore.data
                 .map { prefs -> prefs[FILTERING_ENABLED] ?: true }
+                .catch { error -> if (error is IOException) emit(false) else throw error }
+
+        override val semanticClassifierEnabled: Flow<Boolean> =
+            dataStore.data
+                .map { prefs -> prefs[SEMANTIC_CLASSIFIER_ENABLED] ?: true }
                 .catch { error -> if (error is IOException) emit(false) else throw error }
 
         override val externalAutomationEnabled: Flow<Boolean> =
@@ -150,6 +156,10 @@ class SettingsRepositoryImpl
             }
         }
 
+        override suspend fun setSemanticClassifierEnabled(enabled: Boolean) {
+            dataStore.edit { prefs -> prefs[SEMANTIC_CLASSIFIER_ENABLED] = enabled }
+        }
+
         override suspend fun setLlmAnalysisEnabled(enabled: Boolean) {
             dataStore.edit { prefs ->
                 prefs[LLM_ANALYSIS_ENABLED] = enabled
@@ -229,6 +239,7 @@ class SettingsRepositoryImpl
             val prefs = dataStore.data.first()
             return SettingsSnapshot(
                 filteringEnabled = prefs[FILTERING_ENABLED] ?: true,
+                semanticClassifierEnabled = prefs[SEMANTIC_CLASSIFIER_ENABLED] ?: true,
                 externalAutomationEnabled = prefs[EXTERNAL_AUTOMATION_ENABLED] ?: false,
                 llmAnalysisEnabled = prefs[LLM_ANALYSIS_ENABLED] ?: false,
                 llmAutoActionsEnabled = false,
@@ -281,6 +292,7 @@ class SettingsRepositoryImpl
                 maintenancePolicyAccessGuard.withLock {
                     dataStore.edit { prefs ->
                         prefs[FILTERING_ENABLED] = snapshot.filteringEnabled
+                        prefs[SEMANTIC_CLASSIFIER_ENABLED] = snapshot.semanticClassifierEnabled
                         prefs[EXTERNAL_AUTOMATION_ENABLED] = snapshot.externalAutomationEnabled
                         if (
                             snapshot.externalAutomationEnabled &&
@@ -347,6 +359,7 @@ class SettingsRepositoryImpl
             val EXTERNAL_AUTOMATION_ENABLED = booleanPreferencesKey("external_automation_enabled")
             val EXTERNAL_AUTOMATION_TOKEN = stringPreferencesKey("external_automation_token")
             val FILTERING_ENABLED = booleanPreferencesKey("filtering_enabled")
+            val SEMANTIC_CLASSIFIER_ENABLED = booleanPreferencesKey("semantic_classifier_enabled")
             val LLM_ANALYSIS_ENABLED = booleanPreferencesKey("llm_analysis_enabled")
             val LLM_AUTO_ACTIONS_ENABLED = booleanPreferencesKey("llm_auto_actions_enabled")
             val SEMANTIC_ANALYSIS_SCOPE = stringPreferencesKey("semantic_analysis_scope")
