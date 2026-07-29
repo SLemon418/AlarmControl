@@ -69,7 +69,7 @@ class RealtimeSemanticRuleResolverTest {
         }
 
     @Test
-    fun `disabled semantic encoder is not called and active semantic rule fails open`() =
+    fun `disabled semantic encoder preserves a lower independent rule with the same action`() =
         runTest {
             val semantic =
                 rule(
@@ -87,8 +87,8 @@ class RealtimeSemanticRuleResolverTest {
                     classifierEnabled = false,
                 )
 
-            assertEquals(RuleAction.Keep, result.action)
-            assertNull(result.matchedRuleId)
+            assertEquals(RuleAction.Cancel, result.action)
+            assertEquals("fallback", result.matchedRuleId)
             assertNull(result.classification)
             assertTrue(result.needsDelayedObservation)
             coVerify(exactly = 0) { classifier.classify(any(), any()) }
@@ -361,7 +361,7 @@ class RealtimeSemanticRuleResolverTest {
         }
 
     @Test
-    fun `low confidence active resolution fails open while monitor stays record only`() =
+    fun `low confidence semantic result preserves a lower independent rule with the same action`() =
         runTest {
             val classification = semanticResult(isConfident = false)
             coEvery {
@@ -391,17 +391,53 @@ class RealtimeSemanticRuleResolverTest {
                     matcher.compile(listOf(activeFallback, monitor, activeSemantic)),
                 )
 
-            assertEquals(RuleAction.Keep, result.action)
-            assertNull(result.matchedRuleId)
+            assertEquals(RuleAction.Cancel, result.action)
+            assertEquals("active-fallback", result.matchedRuleId)
             assertEquals(RuleAction.Cancel, result.monitoredAction)
             assertEquals("monitor", result.monitoredRuleId)
             assertSame(classification, result.classification)
             assertTrue(result.needsDelayedObservation)
-            assertTrue(result.decisionTrace.all { it.lane == DecisionTraceLane.MONITOR })
+            assertTrue(result.decisionTrace.any { it.lane == DecisionTraceLane.ACTIVE })
+            assertTrue(result.decisionTrace.any { it.lane == DecisionTraceLane.MONITOR })
         }
 
     @Test
-    fun `missing semantic encoder result fails open without an active trace`() =
+    fun `unresolved higher semantic action conflict still fails open`() =
+        runTest {
+            val classification = semanticResult(isConfident = false)
+            coEvery {
+                classifier.classify(any(), SemanticInferenceUrgency.REALTIME)
+            } returns classification
+            val semanticKeep =
+                rule(
+                    "semantic-keep",
+                    Condition.SemanticIntentEquals(SemanticIntent.MARKETING),
+                    RuleAction.Keep,
+                    priority = 100,
+                )
+            val fallbackCancel =
+                rule(
+                    "fallback-cancel",
+                    Condition.CategoryEquals("alarm"),
+                    RuleAction.Cancel,
+                    priority = 10,
+                )
+
+            val result =
+                resolver.resolve(
+                    snapshot,
+                    matcher.compile(listOf(fallbackCancel, semanticKeep)),
+                )
+
+            assertEquals(RuleAction.Keep, result.action)
+            assertNull(result.matchedRuleId)
+            assertSame(classification, result.classification)
+            assertTrue(result.needsDelayedObservation)
+            assertTrue(result.decisionTrace.isEmpty())
+        }
+
+    @Test
+    fun `missing semantic encoder result preserves the same action fallback trace`() =
         runTest {
             coEvery {
                 classifier.classify(any(), SemanticInferenceUrgency.REALTIME)
@@ -417,15 +453,15 @@ class RealtimeSemanticRuleResolverTest {
 
             val result = resolver.resolve(snapshot, matcher.compile(listOf(fallback, semantic)))
 
-            assertEquals(RuleAction.Keep, result.action)
-            assertNull(result.matchedRuleId)
+            assertEquals(RuleAction.Cancel, result.action)
+            assertEquals("fallback", result.matchedRuleId)
             assertNull(result.classification)
-            assertTrue(result.decisionTrace.isEmpty())
+            assertTrue(result.decisionTrace.any { it.lane == DecisionTraceLane.ACTIVE })
             assertTrue(result.needsDelayedObservation)
         }
 
     @Test
-    fun `semantic encoder timeout fails open`() =
+    fun `semantic encoder timeout preserves a lower independent rule with the same action`() =
         runTest {
             val timedResolver = RealtimeSemanticRuleResolver(matcher, classifier, timeoutMillis = 350L)
             coEvery {
@@ -445,8 +481,8 @@ class RealtimeSemanticRuleResolverTest {
 
             val result = timedResolver.resolve(snapshot, matcher.compile(listOf(fallback, semantic)))
 
-            assertEquals(RuleAction.Keep, result.action)
-            assertNull(result.matchedRuleId)
+            assertEquals(RuleAction.Cancel, result.action)
+            assertEquals("fallback", result.matchedRuleId)
             assertNull(result.classification)
             assertTrue(result.needsDelayedObservation)
         }

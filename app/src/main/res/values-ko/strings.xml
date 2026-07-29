@@ -444,6 +444,10 @@
     <string name="condition_importance">최소 알림 우선순위</string>
     <string name="condition_time_window">시간대</string>
     <string name="condition_rate">최근 알림 빈도</string>
+    <string name="condition_trace_ongoing">계속 표시 여부 조건</string>
+    <string name="condition_trace_advertisement">광고 여부 조건</string>
+    <string name="condition_trace_conversation">대화 알림 여부 조건</string>
+    <string name="condition_trace_foreground_service">포그라운드 서비스 여부 조건</string>
     <string name="condition_trace_truncated">추가 확인 항목은 표시하지 않음</string>
     <string name="add_rate">+ 빈도</string>
     <string name="rate_scope_package">앱</string>

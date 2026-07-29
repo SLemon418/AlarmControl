@@ -34,7 +34,7 @@ download, or `INTERNET` permission. Notification data stays on the device.
 
 The bundled classifiers work without any additional model file. The optional generative LLM is not
 required for normal filtering. The seven-intent classifier is enabled by default and can be turned
-off under **Settings → On-device semantic analysis**.
+off under **Settings → Smart notification sorting → Sort notifications by content**.
 
 See the [user guide](docs/USER_GUIDE.md) for checksum commands, updates, backup, safe rule setup,
 automation, and troubleshooting.

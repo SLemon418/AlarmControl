@@ -8,6 +8,7 @@ import com.alarmcontrol.core.filtering.DecisionTraceNode
 import com.alarmcontrol.core.filtering.MAX_PERSISTED_TRACE_NODES
 import com.alarmcontrol.core.filtering.NotificationSnapshot
 import com.alarmcontrol.core.filtering.Rule
+import com.alarmcontrol.core.filtering.RuleAction
 import com.alarmcontrol.core.filtering.RuleExecutionMode
 import com.alarmcontrol.core.filtering.SemanticIntent
 
@@ -60,6 +61,33 @@ class Matcher {
         snapshot: NotificationSnapshot,
         compiled: CompiledRuleSet,
     ): MatchDecision = evaluateRules(snapshot, compiled.activeRules)
+
+    /**
+     * Builds each unresolved lane's decision tree once after semantic inference failed. A definite
+     * active fallback is kept only when every possible trusted semantic result selects the same
+     * effective action; otherwise its decision and trace are removed while the independent monitor
+     * result is preserved.
+     */
+    fun evaluateAfterSemanticFailureWithTraces(
+        snapshot: NotificationSnapshot,
+        compiled: CompiledRuleSet,
+    ): MatchEvaluation {
+        val activeCandidate = evaluateRulesWithTree(snapshot, compiled.activeRules)
+        val monitor = evaluateRulesWithTree(snapshot, compiled.monitorRules)
+        val active =
+            if (
+                hasHigherSemanticActionConflict(
+                    snapshot = snapshot,
+                    rules = compiled.activeRules,
+                    decision = activeCandidate.decision,
+                )
+            ) {
+                EvaluatedRuleDecision(MatchDecision.NoMatch, null)
+            } else {
+                activeCandidate
+            }
+        return matchEvaluation(active, monitor)
+    }
 
     /** Evaluates monitor rules independently; this decision must never trigger a platform action. */
     fun evaluateMonitor(
@@ -122,6 +150,13 @@ class Matcher {
     ): MatchEvaluation {
         val active = evaluateRulesWithTree(activeSnapshot, compiled.activeRules)
         val monitor = evaluateRulesWithTree(monitorSnapshot, compiled.monitorRules)
+        return matchEvaluation(active, monitor)
+    }
+
+    private fun matchEvaluation(
+        active: EvaluatedRuleDecision,
+        monitor: EvaluatedRuleDecision,
+    ): MatchEvaluation {
         val bothMatched = active.tree != null && monitor.tree != null
         val activeBudget =
             when {
@@ -267,6 +302,25 @@ class Matcher {
         return false
     }
 
+    private fun hasHigherSemanticActionConflict(
+        snapshot: NotificationSnapshot,
+        rules: List<Rule>,
+        decision: MatchDecision,
+    ): Boolean {
+        val fallbackAction = decision.effectiveAction()
+        return SemanticIntent.entries
+            .asSequence()
+            .filterNot { it == SemanticIntent.AMBIGUOUS }
+            .any { intent ->
+                val resolvedSnapshot =
+                    snapshot.copy(
+                        semanticIntent = intent,
+                        isAdvertisement = intent.isAdvertisement,
+                    )
+                evaluateRules(resolvedSnapshot, rules).effectiveAction() != fallbackAction
+            }
+    }
+
     private fun laneNeedsCategory(
         snapshot: NotificationSnapshot,
         rules: List<Rule>,
@@ -301,6 +355,12 @@ class Matcher {
         return false
     }
 }
+
+private fun MatchDecision.effectiveAction(): RuleAction =
+    when (this) {
+        is MatchDecision.Matched -> action
+        MatchDecision.NoMatch -> RuleAction.Keep
+    }
 
 private fun Condition.hasMissingRateSignal(snapshot: NotificationSnapshot): Boolean =
     requiredSignals().rateSignals.any { signal -> signal !in snapshot.rateCounts }

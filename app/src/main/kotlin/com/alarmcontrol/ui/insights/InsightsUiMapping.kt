@@ -276,14 +276,14 @@ private fun DecisionConditionKind.toLabelUiText(): UiText =
             DecisionConditionKind.TEXT -> R.string.condition_text
             DecisionConditionKind.CATEGORY -> R.string.condition_category
             DecisionConditionKind.CHANNEL -> R.string.condition_channel
-            DecisionConditionKind.ONGOING -> R.string.condition_ongoing
+            DecisionConditionKind.ONGOING -> R.string.condition_trace_ongoing
             DecisionConditionKind.ML_CATEGORY -> R.string.condition_ml_category
-            DecisionConditionKind.ADVERTISEMENT -> R.string.condition_advertisement
+            DecisionConditionKind.ADVERTISEMENT -> R.string.condition_trace_advertisement
             DecisionConditionKind.SEMANTIC_INTENT -> R.string.condition_semantic_intent
             DecisionConditionKind.TIME_WINDOW -> R.string.condition_time_window
             DecisionConditionKind.RATE -> R.string.condition_rate
-            DecisionConditionKind.CONVERSATION -> R.string.condition_conversation
-            DecisionConditionKind.FOREGROUND_SERVICE -> R.string.condition_foreground_service
+            DecisionConditionKind.CONVERSATION -> R.string.condition_trace_conversation
+            DecisionConditionKind.FOREGROUND_SERVICE -> R.string.condition_trace_foreground_service
             DecisionConditionKind.IMPORTANCE -> R.string.condition_importance
             DecisionConditionKind.ALL_OF -> R.string.match_all
             DecisionConditionKind.ANY_OF -> R.string.match_any

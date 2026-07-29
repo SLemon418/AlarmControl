@@ -448,6 +448,10 @@
     <string name="condition_importance">Minimum notification priority</string>
     <string name="condition_time_window">Time window</string>
     <string name="condition_rate">Recent notification frequency</string>
+    <string name="condition_trace_ongoing">Ongoing status condition</string>
+    <string name="condition_trace_advertisement">Advertisement status condition</string>
+    <string name="condition_trace_conversation">Conversation status condition</string>
+    <string name="condition_trace_foreground_service">Foreground service status condition</string>
     <string name="condition_trace_truncated">More checks not shown</string>
     <string name="add_rate">+ Frequency</string>
     <string name="rate_scope_package">App</string>

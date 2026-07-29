@@ -101,10 +101,10 @@ change the Active winner, the bounded real-time inference runs before that actio
 semantic work runs after the Active decision and cannot change it. `AMBIGUOUS`, low-confidence,
 timed-out, missing, or invalid output is unavailable and fails open.
 
-The bundled seven-intent classifier is enabled by default. Turning it off in **Settings → On-device
-semantic analysis** prevents both real-time and Monitor inference calls. Notifications whose action
-depends on semantic or advertisement conditions remain unchanged; other notifications continue
-with the remaining rule signals.
+The bundled seven-intent classifier is enabled by default. Turning off
+**Settings → Smart notification sorting → Sort notifications by content** prevents both real-time
+and Monitor inference calls. Notifications whose action depends on semantic or advertisement
+conditions remain unchanged; other notifications continue with the remaining rule signals.
 
 `IsAdvertisement(true)` remains compatible and means `MARKETING`; it is not a separate eighth
 class. User corrections update a local seven-class shrinkage prior; no gradients or notification
