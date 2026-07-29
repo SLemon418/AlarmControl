@@ -61,6 +61,28 @@ class GitHubReleaseWorkflowTest(unittest.TestCase):
         publication_index = self.workflow.index("- name: Publish GitHub Release")
         self.assertLess(regression_index, publication_index)
 
+    def test_packages_and_publishes_all_five_apk_variants(self) -> None:
+        self.assertIn("scripts/package_release_apks.py", self.workflow)
+        self.assertIn(
+            "if (( ${#apks[@]} != 5 || ${#checksums[@]} != 5 )); then",
+            self.workflow,
+        )
+        self.assertIn("sha256sum --check ./*.apk.sha256", self.workflow)
+        self.assertIn('assets=("$release_dir"/*.apk "$release_dir"/*.apk.sha256)', self.workflow)
+        self.assertIn("if (( ${#assets[@]} != 10 )); then", self.workflow)
+        self.assertIn('"${assets[@]}"', self.workflow)
+        self.assertNotIn("Expected one release APK", self.workflow)
+
+    def test_release_explains_abi_choice(self) -> None:
+        for label in (
+            "arm64-v8a",
+            "armeabi-v7a",
+            "x86_64 / x86",
+            "universal",
+        ):
+            self.assertIn(label, self.workflow)
+        self.assertIn("GitHub does not select an ABI automatically", self.workflow)
+
     def test_remote_actions_are_immutably_pinned(self) -> None:
         uses_pattern = re.compile(r"^\s*(?:-\s*)?uses:\s+([^\s#]+)", re.MULTILINE)
         immutable_action = re.compile(r"[^@\s]+@[0-9a-fA-F]{40}")

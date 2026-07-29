@@ -3,9 +3,11 @@ package com.alarmcontrol.ui.rules
 import com.alarmcontrol.R
 import com.alarmcontrol.core.filtering.Condition
 import com.alarmcontrol.core.filtering.MAX_RULE_NAME_CHARS
+import com.alarmcontrol.core.filtering.NotificationImportance
 import com.alarmcontrol.core.filtering.Rule
 import com.alarmcontrol.core.filtering.RuleAction
 import com.alarmcontrol.core.filtering.RuleExecutionMode
+import com.alarmcontrol.core.filtering.SemanticIntent
 import com.alarmcontrol.ui.uiText
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -49,6 +51,18 @@ class RuleUiMappingTest {
         assertEquals(
             uiText(R.string.rule_summary_time, "22:00", "07:00"),
             rule(Condition.TimeWindow(22 * 60, 7 * 60)).toListItem().summary,
+        )
+    }
+
+    @Test
+    fun `summary uses localized labels instead of semantic and importance enum names`() {
+        assertEquals(
+            uiText(R.string.rule_summary_semantic_intent, uiText(R.string.semantic_security)),
+            rule(Condition.SemanticIntentEquals(SemanticIntent.SECURITY)).toListItem().summary,
+        )
+        assertEquals(
+            uiText(R.string.rule_summary_importance, uiText(R.string.importance_high)),
+            rule(Condition.ImportanceAtLeast(NotificationImportance.HIGH)).toListItem().summary,
         )
     }
 

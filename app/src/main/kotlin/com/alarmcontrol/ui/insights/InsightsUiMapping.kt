@@ -2,6 +2,7 @@ package com.alarmcontrol.ui.insights
 
 import com.alarmcontrol.R
 import com.alarmcontrol.core.filtering.ConditionResult
+import com.alarmcontrol.core.filtering.DecisionConditionKind
 import com.alarmcontrol.core.filtering.DecisionTraceNode
 import com.alarmcontrol.core.filtering.NotificationContentState
 import com.alarmcontrol.core.filtering.NotificationEvent
@@ -256,13 +257,7 @@ private fun DecisionTraceNode.toUiModel(): DecisionTraceUi =
     DecisionTraceUi(
         lane = lane,
         depth = depth,
-        conditionLabel =
-            UiText.Dynamic(
-                kind.name
-                    .lowercase()
-                    .replace('_', ' ')
-                    .replaceFirstChar { it.uppercase() },
-            ),
+        conditionLabel = kind.toLabelUiText(),
         resultLabel =
             uiText(
                 when (result) {
@@ -271,6 +266,30 @@ private fun DecisionTraceNode.toUiModel(): DecisionTraceUi =
                     ConditionResult.UNKNOWN -> R.string.simulator_trace_unknown
                 },
             ),
+    )
+
+private fun DecisionConditionKind.toLabelUiText(): UiText =
+    uiText(
+        when (this) {
+            DecisionConditionKind.PACKAGE -> R.string.condition_package
+            DecisionConditionKind.TITLE -> R.string.condition_title
+            DecisionConditionKind.TEXT -> R.string.condition_text
+            DecisionConditionKind.CATEGORY -> R.string.condition_category
+            DecisionConditionKind.CHANNEL -> R.string.condition_channel
+            DecisionConditionKind.ONGOING -> R.string.condition_ongoing
+            DecisionConditionKind.ML_CATEGORY -> R.string.condition_ml_category
+            DecisionConditionKind.ADVERTISEMENT -> R.string.condition_advertisement
+            DecisionConditionKind.SEMANTIC_INTENT -> R.string.condition_semantic_intent
+            DecisionConditionKind.TIME_WINDOW -> R.string.condition_time_window
+            DecisionConditionKind.RATE -> R.string.condition_rate
+            DecisionConditionKind.CONVERSATION -> R.string.condition_conversation
+            DecisionConditionKind.FOREGROUND_SERVICE -> R.string.condition_foreground_service
+            DecisionConditionKind.IMPORTANCE -> R.string.condition_importance
+            DecisionConditionKind.ALL_OF -> R.string.match_all
+            DecisionConditionKind.ANY_OF -> R.string.match_any
+            DecisionConditionKind.NOT -> R.string.not_operator
+            DecisionConditionKind.TRUNCATED -> R.string.condition_trace_truncated
+        },
     )
 
 private fun String?.categoryLabel(): UiText =

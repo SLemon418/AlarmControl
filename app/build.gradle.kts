@@ -1,3 +1,4 @@
+import com.android.build.api.variant.FilterConfiguration
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import java.util.zip.ZipEntry
@@ -44,6 +45,19 @@ data class ReleaseBundleSizeReport(
     val hasSemanticClassifier: Boolean,
 )
 
+data class ReleaseApkOutput(
+    val label: String,
+    val file: File,
+)
+
+val supportedReleaseApkAbis =
+    setOf(
+        "arm64-v8a",
+        "armeabi-v7a",
+        "x86",
+        "x86_64",
+    )
+val expectedReleaseApkLabels = supportedReleaseApkAbis + "universal"
 val semanticBundleEntries =
     setOf(
         "base/assets/semantic_notification_classifier.tflite",
@@ -61,10 +75,12 @@ val maxSemanticClassifierBytes = 45L * 1_024 * 1_024
 // not described as Play's device-specific compressed download size.
 val maxNonSemanticAabPhysicalBytes = 60L * 1_024 * 1_024
 val maxPhysicalBundleBytes = 105L * 1_024 * 1_024
-// Direct GitHub distribution uses one universal APK so users cannot accidentally install the
-// wrong ABI. Its four native ABI payloads need a larger non-semantic budget than the Play AAB.
+// The GitHub universal APK contains all four native ABI payloads and therefore needs a larger
+// non-semantic budget than the AAB or a single-ABI APK.
 val maxNonSemanticApkPhysicalBytes = 140L * 1_024 * 1_024
 val maxPhysicalApkBytes = 185L * 1_024 * 1_024
+val maxNonSemanticSplitApkPhysicalBytes = 60L * 1_024 * 1_024
+val maxPhysicalSplitApkBytes = 105L * 1_024 * 1_024
 val releaseSigningCertificatePinFile =
     rootProject.layout.projectDirectory
         .file("config/release-signing-certificate.sha256")
@@ -126,6 +142,17 @@ fun requireReleaseApkSizeLimits(
     totalPhysicalBytes = totalPhysicalBytes,
     maxNonSemanticPhysicalBytes = maxNonSemanticApkPhysicalBytes,
     maxTotalPhysicalBytes = maxPhysicalApkBytes,
+)
+
+fun requireReleaseSplitApkSizeLimits(
+    nonSemanticPhysicalBytes: Long,
+    totalPhysicalBytes: Long,
+) = requireReleaseArchiveSizeLimits(
+    artifactLabel = "Release single-ABI APK",
+    nonSemanticPhysicalBytes = nonSemanticPhysicalBytes,
+    totalPhysicalBytes = totalPhysicalBytes,
+    maxNonSemanticPhysicalBytes = maxNonSemanticSplitApkPhysicalBytes,
+    maxTotalPhysicalBytes = maxPhysicalSplitApkBytes,
 )
 
 fun requireReleaseArchiveSizeLimits(
@@ -281,16 +308,147 @@ fun inspectReleaseBundleSize(bundle: File): ReleaseBundleSizeReport =
         maxTotalPhysicalBytes = maxPhysicalBundleBytes,
     )
 
-fun inspectReleaseApkSize(apk: File): ReleaseBundleSizeReport =
+fun inspectReleaseApkSize(
+    apk: File,
+    outputLabel: String = "universal",
+): ReleaseBundleSizeReport =
     inspectReleaseArchiveSize(
         archive = apk,
-        artifactLabel = "Release APK",
+        artifactLabel = "Release APK ($outputLabel)",
         expectedSemanticEntries = semanticApkEntries,
         classifierEntry = semanticClassifierApkEntry,
         semanticEntryPrefix = "assets/",
-        maxNonSemanticPhysicalBytes = maxNonSemanticApkPhysicalBytes,
-        maxTotalPhysicalBytes = maxPhysicalApkBytes,
+        maxNonSemanticPhysicalBytes =
+            if (outputLabel == "universal") {
+                maxNonSemanticApkPhysicalBytes
+            } else {
+                maxNonSemanticSplitApkPhysicalBytes
+            },
+        maxTotalPhysicalBytes =
+            if (outputLabel == "universal") {
+                maxPhysicalApkBytes
+            } else {
+                maxPhysicalSplitApkBytes
+            },
     )
+
+fun releaseApkOutputs(outputDirectory: File): List<ReleaseApkOutput> {
+    val metadataFile = outputDirectory.resolve("output-metadata.json")
+    check(metadataFile.isFile) {
+        "Release APK output metadata does not exist: ${metadataFile.absolutePath}"
+    }
+    val metadata =
+        JsonSlurper().parse(metadataFile) as? Map<*, *>
+            ?: error("Release APK output metadata must contain a JSON object")
+    check(metadata["applicationId"] == "com.alarmcontrol") {
+        "Unexpected release APK applicationId: ${metadata["applicationId"]}"
+    }
+    check(metadata["variantName"] == "release") {
+        "Unexpected release APK variant: ${metadata["variantName"]}"
+    }
+    val elements =
+        metadata["elements"] as? List<*>
+            ?: error("Release APK output metadata is missing elements")
+    val canonicalOutputDirectory = outputDirectory.canonicalFile
+    val outputs =
+        elements.mapIndexed { index, rawElement ->
+            val element =
+                rawElement as? Map<*, *>
+                    ?: error("Release APK metadata element $index must be an object")
+            check((element["versionCode"] as? Number)?.toInt() == appVersionCode) {
+                "Release APK metadata element $index has the wrong versionCode"
+            }
+            check(element["versionName"] == appVersionName) {
+                "Release APK metadata element $index has the wrong versionName"
+            }
+            val filters =
+                element["filters"] as? List<*>
+                    ?: error("Release APK metadata element $index is missing filters")
+            val label =
+                if (filters.isEmpty()) {
+                    "universal"
+                } else {
+                    check(filters.size == 1) {
+                        "Release APK metadata element $index must have exactly one ABI filter"
+                    }
+                    val filter =
+                        filters.single() as? Map<*, *>
+                            ?: error("Release APK metadata filter $index must be an object")
+                    check(filter["filterType"] == "ABI") {
+                        "Release APK metadata element $index has a non-ABI filter"
+                    }
+                    filter["value"] as? String
+                        ?: error("Release APK metadata element $index has no ABI value")
+                }
+            check(label in expectedReleaseApkLabels) {
+                "Unexpected release APK output label: $label"
+            }
+            val outputFile =
+                element["outputFile"] as? String
+                    ?: error("Release APK metadata element $index has no outputFile")
+            check(outputFile == File(outputFile).name && outputFile.endsWith(".apk")) {
+                "Release APK outputFile must be a plain APK filename: $outputFile"
+            }
+            val apk = canonicalOutputDirectory.resolve(outputFile).canonicalFile
+            check(apk.parentFile == canonicalOutputDirectory && apk.isFile) {
+                "Release APK output is missing or outside its output directory: $outputFile"
+            }
+            ReleaseApkOutput(label = label, file = apk)
+        }
+    val duplicateLabels =
+        outputs
+            .groupingBy(ReleaseApkOutput::label)
+            .eachCount()
+            .filterValues { count -> count != 1 }
+            .keys
+    check(duplicateLabels.isEmpty()) {
+        "Release APK metadata contains duplicate outputs: ${duplicateLabels.sorted().joinToString()}"
+    }
+    check(outputs.mapTo(mutableSetOf(), ReleaseApkOutput::label) == expectedReleaseApkLabels) {
+        "Release APK metadata must contain exactly: ${expectedReleaseApkLabels.sorted().joinToString()}"
+    }
+    val referencedFiles = outputs.mapTo(mutableSetOf()) { output -> output.file }
+    val physicalApks =
+        canonicalOutputDirectory
+            .listFiles { file -> file.extension == "apk" }
+            .orEmpty()
+            .mapTo(mutableSetOf()) { file -> file.canonicalFile }
+    check(physicalApks == referencedFiles) {
+        "Release APK directory contains files not represented exactly by output metadata"
+    }
+    return outputs.sortedBy(ReleaseApkOutput::label)
+}
+
+private val nativeLibraryEntryPattern = Regex("""^lib/([^/]+)/[^/]+\.so$""")
+
+fun inspectApkNativeAbis(apk: File): Set<String> =
+    ZipFile(apk).use { zip ->
+        zip
+            .entries()
+            .asSequence()
+            .mapNotNull { entry ->
+                nativeLibraryEntryPattern.matchEntire(entry.name)?.groupValues?.get(1)
+            }.toSet()
+    }
+
+fun requireReleaseApkNativeAbis(
+    outputLabel: String,
+    actualAbis: Set<String>,
+) {
+    val expectedAbis =
+        if (outputLabel == "universal") {
+            supportedReleaseApkAbis
+        } else {
+            check(outputLabel in supportedReleaseApkAbis) {
+                "Unsupported release APK output label: $outputLabel"
+            }
+            setOf(outputLabel)
+        }
+    check(actualAbis == expectedAbis) {
+        "Release APK $outputLabel native ABIs were ${actualAbis.sorted().joinToString()}; " +
+            "expected ${expectedAbis.sorted().joinToString()}"
+    }
+}
 
 fun requireReleaseSemanticPayload(
     report: ReleaseBundleSizeReport,
@@ -365,6 +523,19 @@ android {
         }
     }
 
+    // GitHub does not select a device ABI. Publish one smaller APK for every ABI actually supplied
+    // by current runtime dependencies while retaining a universal fallback. AGP's default list
+    // also contains legacy ABIs with no native libraries, so keep this set aligned with verified
+    // dependency payloads rather than emitting empty, misleading APKs.
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include(*supportedReleaseApkAbis.toTypedArray())
+            isUniversalApk = true
+        }
+    }
+
     // Robolectric needs merged Android resources to run Compose UI tests on the local JVM.
     testOptions {
         unitTests {
@@ -391,6 +562,23 @@ android {
         // Product sources remain fully linted; test sources are independently compiled and gated
         // by detekt, ktlint, and the managed-device job.
         checkTestSources = false
+    }
+}
+
+// The ABI split DSL is module-wide. Keep development and test builds as one universal APK while
+// the release variant retains the five GitHub distribution outputs configured above.
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        if (variant.buildType != "release") {
+            variant.outputs
+                .filter { output ->
+                    output.filters.any { filter ->
+                        filter.filterType == FilterConfiguration.FilterType.ABI
+                    }
+                }.forEach { output ->
+                    output.enabled.set(false)
+                }
+        }
     }
 }
 
@@ -803,6 +991,41 @@ val verifyReleaseBundleSizeAccountingFixture by tasks.registering {
         check(physicalApkLimitFailure?.message?.contains("physical size") == true) {
             "Physical APK boundary did not reject 185 MiB + 1 byte"
         }
+        requireReleaseSplitApkSizeLimits(
+            nonSemanticPhysicalBytes = maxNonSemanticSplitApkPhysicalBytes,
+            totalPhysicalBytes = maxPhysicalSplitApkBytes,
+        )
+        val nonSemanticSplitApkLimitFailure =
+            runCatching {
+                requireReleaseSplitApkSizeLimits(
+                    nonSemanticPhysicalBytes = maxNonSemanticSplitApkPhysicalBytes + 1L,
+                    totalPhysicalBytes = maxPhysicalSplitApkBytes,
+                )
+            }.exceptionOrNull()
+        check(nonSemanticSplitApkLimitFailure?.message?.contains("non-semantic physical payload") == true) {
+            "Non-semantic single-ABI APK boundary did not reject 60 MiB + 1 byte"
+        }
+        val physicalSplitApkLimitFailure =
+            runCatching {
+                requireReleaseSplitApkSizeLimits(
+                    nonSemanticPhysicalBytes = maxNonSemanticSplitApkPhysicalBytes,
+                    totalPhysicalBytes = maxPhysicalSplitApkBytes + 1L,
+                )
+            }.exceptionOrNull()
+        check(physicalSplitApkLimitFailure?.message?.contains("physical size") == true) {
+            "Physical single-ABI APK boundary did not reject 105 MiB + 1 byte"
+        }
+        requireReleaseApkNativeAbis("universal", supportedReleaseApkAbis)
+        supportedReleaseApkAbis.forEach { abi ->
+            requireReleaseApkNativeAbis(abi, setOf(abi))
+        }
+        val nativeAbiFailure =
+            runCatching {
+                requireReleaseApkNativeAbis("arm64-v8a", setOf("arm64-v8a", "x86_64"))
+            }.exceptionOrNull()
+        check(nativeAbiFailure?.message?.contains("native ABIs") == true) {
+            "Single-ABI APK topology fixture accepted an extra ABI"
+        }
 
         fun assertAabManifestRejected(
             name: String,
@@ -985,24 +1208,16 @@ tasks
 
 val verifyReleaseApkSigning by tasks.registering {
     group = "verification"
-    description = "Builds the universal release APK and verifies its APK signature and payload."
+    description = "Builds universal and ABI-specific release APKs and verifies every signature and payload."
     dependsOn(verifyReleaseSigningConfiguration, "assembleRelease")
 
     doLast {
-        val apks =
+        val outputDirectory =
             layout.buildDirectory
                 .dir("outputs/apk/release")
                 .get()
                 .asFile
-                .listFiles { file ->
-                    file.extension == "apk" && !file.name.endsWith("-unsigned.apk")
-                }.orEmpty()
-        check(apks.size == 1) {
-            "Expected one universal release APK, found ${apks.size}"
-        }
-        val apk = apks.single()
-        val report = inspectReleaseApkSize(apk)
-        requireReleaseSemanticPayload(report, semanticClassifierApkEntry)
+        val outputs = releaseApkOutputs(outputDirectory)
 
         val apksigner =
             android.sdkDirectory
@@ -1013,45 +1228,53 @@ val verifyReleaseApkSigning by tasks.registering {
             "Android SDK apksigner for AGP-selected Build Tools ${android.buildToolsVersion} " +
                 "was not found at ${apksigner.absolutePath}"
         }
-        val verification =
-            providers
-                .exec {
-                    commandLine(
-                        apksigner.absolutePath,
-                        "verify",
-                        "--verbose",
-                        "--print-certs",
-                        "--min-sdk-version",
-                        "26",
-                        apk.absolutePath,
-                    )
-                    isIgnoreExitValue = true
-                }
-        check(verification.result.get().exitValue == 0) {
-            "Release APK signature verification failed for ${apk.absolutePath}"
-        }
-        val signerDigests =
-            apksignerCertificateDigestPattern
-                .findAll(verification.standardOutput.asText.get())
-                .map { match -> match.groupValues[1].lowercase() }
-                .toList()
-        check(signerDigests.size == 1) {
-            "Expected exactly one APK signer certificate digest, found ${signerDigests.size}"
-        }
         val expectedSignerDigest = requireReleaseSigningCertificatePin()
-        check(signerDigests.single() == expectedSignerDigest) {
-            "Release APK signer certificate does not match the pinned Android update certificate."
+        outputs.forEach { output ->
+            val report = inspectReleaseApkSize(output.file, output.label)
+            requireReleaseSemanticPayload(report, semanticClassifierApkEntry)
+            requireReleaseApkNativeAbis(output.label, inspectApkNativeAbis(output.file))
+
+            val verification =
+                providers
+                    .exec {
+                        commandLine(
+                            apksigner.absolutePath,
+                            "verify",
+                            "--verbose",
+                            "--print-certs",
+                            "--min-sdk-version",
+                            "26",
+                            output.file.absolutePath,
+                        )
+                        isIgnoreExitValue = true
+                    }
+            check(verification.result.get().exitValue == 0) {
+                "Release APK signature verification failed for ${output.file.absolutePath}"
+            }
+            val signerDigests =
+                apksignerCertificateDigestPattern
+                    .findAll(verification.standardOutput.asText.get())
+                    .map { match -> match.groupValues[1].lowercase() }
+                    .toList()
+            check(signerDigests.size == 1) {
+                "Expected exactly one APK signer certificate digest for ${output.label}, " +
+                    "found ${signerDigests.size}"
+            }
+            check(signerDigests.single() == expectedSignerDigest) {
+                "Release APK signer certificate for ${output.label} does not match the pinned " +
+                    "Android update certificate."
+            }
+            logger.lifecycle(
+                "Verified signed ${output.label} release APK: ${output.file.absolutePath} " +
+                    "(${report.totalPhysicalBytes} bytes)",
+            )
         }
-        logger.lifecycle(
-            "Verified signed universal release APK: ${apk.absolutePath} " +
-                "(${report.totalPhysicalBytes} bytes)",
-        )
     }
 }
 
 tasks.register("releaseCandidate") {
     group = "build"
-    description = "Runs all device-independent gates and produces a verified signed universal APK."
+    description = "Runs all device-independent gates and produces verified signed GitHub APKs."
     dependsOn(
         ":core:check",
         ":data:check",

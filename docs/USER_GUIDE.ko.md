@@ -12,52 +12,72 @@ AlarmControl은 오프라인 알림 필터입니다. 계정, 클라우드 서비
 
 - Android 8.0(API 26) 이상
 - 알림 리스너 접근 권한을 허용할 수 있는 Android 기기
-- 범용 APK와 설치된 앱을 위한 충분한 저장 공간
+- 선택한 APK 하나와 설치된 앱을 위한 충분한 저장 공간
 - 이 저장소의 GitHub Releases에서 APK를 안전하게 받을 수 있는 방법
 
-GitHub APK에는 지원하는 모든 native ABI가 포함됩니다. 일반 필터링에는 별도로 내려받는
-모델이 필요하지 않습니다. 선택형 생성 LLM 파일은 초기 설정과 관계없습니다.
+모든 APK 변형에는 같은 번들 경량 의미 분류기가 들어 있습니다. 일반 필터링에는 별도로
+내려받는 모델이 필요하지 않습니다. 선택형 생성 LLM은 사용자가 별도로 준비하는 파일이며
+초기 설정과 관계없습니다.
 
 ## GitHub Releases에서 설치
 
 ### 1. 올바른 파일 받기
 
-저장소의 [Releases 페이지](../../../releases)에서 같은 Release에 있는 두 파일을 모두
-받습니다.
+저장소의 [Releases 페이지](../../../releases)를 엽니다. 현재 워크플로로 만드는 Release에는
+같은 업데이트 키로 서명한 APK 5개와 각각에 맞는 체크섬이 있습니다. 이전에 검증한
+Release에는 범용 APK와 체크섬 한 쌍만 있을 수 있습니다.
 
 ```text
-AlarmControl-<version>-universal.apk
-AlarmControl-<version>-universal.apk.sha256
+AlarmControl-<version>-<variant>.apk
+AlarmControl-<version>-<variant>.apk.sha256
+```
+
+다음 중 하나를 선택합니다.
+
+| 변형 | 사용 대상 |
+|---|---|
+| `arm64-v8a` | 대부분의 최신 Android 휴대전화와 태블릿 |
+| `armeabi-v7a` | 오래된 32비트 ARM 기기 |
+| `x86_64` | 주로 64비트 에뮬레이터와 일부 Intel 기반 특수 기기 |
+| `x86` | 주로 오래된 32비트 에뮬레이터와 일부 Intel 기반 특수 기기 |
+| `universal` | 지원하는 모든 ABI. 잘 모르겠다면 이 파일을 선택 |
+
+GitHub는 Google Play처럼 기기를 판별해 APK를 자동으로 골라 주지 않습니다. APK는 하나만
+받고, 변형 이름이 같은 `.sha256` 파일을 함께 받으세요. 고급 사용자는 ADB로 기기가
+우선 사용하는 ABI를 확인할 수 있습니다.
+
+```sh
+adb shell getprop ro.product.cpu.abi
 ```
 
 GitHub가 자동 생성하는 **Source code (zip)** 또는 **Source code (tar.gz)**는 설치 파일이
-아닙니다. Release에 APK와 체크섬 파일이 모두 없다면 설치 가능한 AlarmControl 릴리스가
-아닙니다.
+아닙니다. 선택한 APK나 이름이 같은 체크섬이 없다면 그 Release를 설치하지 마세요.
 
 ### 2. 다운로드 확인
 
 macOS:
 
 ```sh
-shasum -a 256 -c AlarmControl-<version>-universal.apk.sha256
+shasum -a 256 -c AlarmControl-<version>-<variant>.apk.sha256
 ```
 
 Linux:
 
 ```sh
-sha256sum -c AlarmControl-<version>-universal.apk.sha256
+sha256sum -c AlarmControl-<version>-<variant>.apk.sha256
 ```
 
 Windows PowerShell에서는 두 값을 출력해 비교합니다.
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\AlarmControl-<version>-universal.apk
-Get-Content .\AlarmControl-<version>-universal.apk.sha256
+Get-FileHash -Algorithm SHA256 .\AlarmControl-<version>-<variant>.apk
+Get-Content .\AlarmControl-<version>-<variant>.apk.sha256
 ```
 
-해시가 일치해야 합니다. 체크섬은 다운로드가 바뀌거나 불완전하지 않은지 확인하고 APK가 같은
-Release의 체크섬 파일과 일치하는지 보여줍니다. 두 파일을 누가 게시했는지 독립적으로
-증명하지는 않으므로 신뢰하는 저장소에서만 받으세요.
+`<version>`과 `<variant>`는 받은 파일 이름에 맞게 바꾸세요. 해시가 일치해야 합니다.
+체크섬은 다운로드가 바뀌거나 불완전하지 않은지 확인하고 APK가 같은 Release의 체크섬
+파일과 일치하는지 보여줍니다. 두 파일을 누가 게시했는지 독립적으로 증명하지는 않으므로
+신뢰하는 저장소에서만 받으세요.
 
 ### 3. APK 설치
 
@@ -72,7 +92,8 @@ Release의 체크섬 파일과 일치하는지 보여줍니다. 두 파일을 �
 
 ## 데이터 손실 없이 업데이트
 
-새 Release의 파일을 받고 확인한 다음 기존 AlarmControl 위에 APK를 설치합니다.
+새 Release에서 호환 APK 하나와 이름이 같은 체크섬을 받고 확인한 다음 기존 AlarmControl
+위에 APK를 설치합니다.
 
 먼저 앱을 **제거하지 마세요**. 제거하면 로컬 규칙, 프로필, 기록, 설정, 암호화 상세,
 가져온 모델 파일이 삭제됩니다. Android는 다음 두 조건을 모두 만족할 때만 제자리 업데이트를

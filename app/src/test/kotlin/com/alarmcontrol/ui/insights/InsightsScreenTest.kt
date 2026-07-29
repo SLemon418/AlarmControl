@@ -171,7 +171,9 @@ class InsightsScreenTest {
             )
         }
 
-        composeRule.onNodeWithText("Analyzing your local activity", substring = true).assertIsDisplayed()
+        composeRule
+            .onNodeWithText("Preparing a private summary from activity on this device.")
+            .assertIsDisplayed()
     }
 
     @Test
@@ -310,8 +312,14 @@ class InsightsScreenTest {
 
         composeRule
             .onNodeWithTag(INSIGHTS_LIST_TEST_TAG)
-            .performScrollToNode(hasText("Daily summaries appear here", substring = true))
-        composeRule.onNodeWithText("Daily summaries appear here", substring = true).assertIsDisplayed()
+            .performScrollToNode(
+                hasText(
+                    "Daily summaries will appear after AlarmControl has activity to summarize.",
+                ),
+            )
+        composeRule
+            .onNodeWithText("Daily summaries will appear after AlarmControl has activity to summarize.")
+            .assertIsDisplayed()
     }
 
     @Test
@@ -331,10 +339,17 @@ class InsightsScreenTest {
 
         composeRule
             .onNodeWithTag(INSIGHTS_LIST_TEST_TAG)
-            .performScrollToNode(hasText("The storage limit removed some activity", substring = true))
+            .performScrollToNode(
+                hasText(
+                    "Some older activity in this period was already removed to save space",
+                    substring = true,
+                ),
+            )
         composeRule
-            .onNodeWithText("The storage limit removed some activity", substring = true)
-            .assertIsDisplayed()
+            .onNodeWithText(
+                "Some older activity in this period was already removed to save space",
+                substring = true,
+            ).assertIsDisplayed()
     }
 
     @Test
@@ -461,15 +476,15 @@ class InsightsScreenTest {
 
         composeRule
             .onNodeWithTag(INSIGHTS_LIST_TEST_TAG)
-            .performScrollToNode(hasText("Marketing", substring = true))
-        composeRule.onNodeWithText("Marketing", substring = true).assertIsDisplayed()
+            .performScrollToNode(hasText("Ads & promotions", substring = true))
+        composeRule.onNodeWithText("Ads & promotions", substring = true).assertIsDisplayed()
         composeRule.onNodeWithContentDescription("More actions").performClick()
         composeRule.onNodeWithText("Mark as Security").assertIsDisplayed()
         composeRule.onNodeWithText("Mark as Delivery").assertIsDisplayed()
         composeRule.onNodeWithText("Mark as Social").assertIsDisplayed()
         composeRule.onNodeWithText("Mark as Other").assertIsDisplayed()
-        composeRule.onNodeWithText("Mark as Ambiguous").assertIsDisplayed()
-        composeRule.onNodeWithText("Mark as transactional").performClick()
+        composeRule.onNodeWithText("Mark as Not sure").assertIsDisplayed()
+        composeRule.onNodeWithText("Mark as purchase or account activity").performClick()
 
         assertEquals(SemanticIntent.TRANSACTIONAL, correction)
     }
@@ -543,7 +558,7 @@ class InsightsScreenTest {
         composeRule.onNodeWithText("Why?").performClick()
         composeRule.onNodeWithText("Actual: Cancelled · Mute offers").assertExists()
         composeRule.onNodeWithText("Monitor prediction: Cancelled · Observe ads").assertExists()
-        composeRule.onNodeWithText("ML confidence: 87%").assertExists()
+        composeRule.onNodeWithText("Smart category confidence: 87%").assertExists()
         composeRule.onNodeWithText("Active · Package · Match").assertExists()
         composeRule.onNodeWithText("Monitor · Semantic intent · Unknown").assertExists()
     }
@@ -643,7 +658,7 @@ class InsightsScreenTest {
         }
 
         val list = composeRule.onNodeWithTag(INSIGHTS_ANALYSIS_TEST_TAG)
-        composeRule.onNodeWithText("Local analysis").assertIsDisplayed()
+        composeRule.onNodeWithText("Summary for this device").assertIsDisplayed()
         composeRule.onNodeWithText("10 of 20 silenced (50%)").assertIsDisplayed()
         list.performScrollToNode(hasText("All notifications"))
         composeRule.onNodeWithText("All notifications").assertIsDisplayed()
@@ -657,8 +672,8 @@ class InsightsScreenTest {
         composeRule.onNodeWithText("Shop").assertIsDisplayed()
         list.performScrollToNode(hasText("Quiet offers"))
         composeRule.onNodeWithText("Quiet offers").assertIsDisplayed()
-        list.performScrollToNode(hasText("ML classified 18", substring = true))
-        composeRule.onNodeWithText("ML classified 18", substring = true).assertIsDisplayed()
+        list.performScrollToNode(hasText("Smart sorting 18", substring = true))
+        composeRule.onNodeWithText("Smart sorting 18", substring = true).assertIsDisplayed()
     }
 
     @Test
@@ -682,7 +697,11 @@ class InsightsScreenTest {
             )
         }
 
-        composeRule.onNodeWithText("The storage limit removed some activity", substring = true).assertIsDisplayed()
+        composeRule
+            .onNodeWithText(
+                "Some older activity in this period was already removed to save space",
+                substring = true,
+            ).assertIsDisplayed()
         composeRule.onNodeWithText("No completed data in this range").assertIsDisplayed()
     }
 
@@ -746,6 +765,8 @@ class InsightsScreenTest {
 
         composeRule.onNodeWithText("Payment received").assertIsDisplayed()
         composeRule.onNodeWithText("₩10,000").assertIsDisplayed()
-        composeRule.onNodeWithText("Decrypted on this device", substring = true).assertIsDisplayed()
+        composeRule
+            .onNodeWithText("AlarmControl opened this saved detail on this device only.")
+            .assertIsDisplayed()
     }
 }

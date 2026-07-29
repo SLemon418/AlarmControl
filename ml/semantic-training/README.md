@@ -39,10 +39,12 @@ run only.
 
 The verified `bundleRelease` output is 98,983,815 bytes (94.40 MiB), below the
 105 MiB physical cap, but it is only an App Bundle compatibility regression
-artifact and not a distribution candidate. GitHub Releases publishes the
-separately verified, signed universal APK. GitHub does not select an ABI
-automatically, so that APK includes all supported native libraries; the
-ABI-independent semantic model is bundled for every compatible installation.
+artifact and not a distribution candidate. GitHub Releases publishes exactly
+five separately verified APKs signed with the same update key: `universal`,
+`arm64-v8a`, `armeabi-v7a`, `x86`, and `x86_64`, each with its matching
+checksum. GitHub does not select one automatically. The same ABI-independent
+semantic model is bundled in every APK variant; an optional custom LLM remains
+a separate user-provided file.
 
 Runtime integration remains rule-first. Semantic inference runs before commit
 only when an Active rule needs it, using `REALTIME` urgency. Monitor-only

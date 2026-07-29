@@ -81,17 +81,21 @@ export ALARMCONTROL_KEY_PASSWORD="..."
 
 일부 변수만 제공하면 의도적으로 설정 단계에서 실패합니다. `releaseCandidate`는 기기 없이
 실행 가능한 품질·오프라인 검사 전체, 계측 테스트 APK와 Baseline Profile 변형 컴파일,
-의미 분류기 raw 45MiB, 비의미 물리 payload 140MiB, 전체 물리 APK 185MiB 상한을
-검사합니다. 또한 의미 asset 네 개와 manifest 해시를 확인한 뒤 minSdk 26 기준으로
-`apksigner` 검증을 수행하고 유일한 서명자가 커밋된 업데이트 인증서 지문과 일치하는지
-확인합니다. 검증된 범용 APK는
-`app/build/outputs/apk/release/` 아래 유일한 APK입니다. 이 APK만 GitHub 배포 후보이며
-`bundleRelease`는 기존 AAB 상한을 유지한 CI와 형식 회귀 확인용 산출물로 남습니다.
+모든 산출물의 의미 분류기 raw 45MiB 상한을 검사합니다. 범용 APK에는 비의미 물리 payload
+140MiB와 전체 물리 APK 185MiB 상한을, 각 ABI 전용 APK에는 각각 60MiB와 105MiB 상한을
+적용합니다. 5개 APK 모두에서 의미 asset 네 개와 manifest 해시를 확인하고, 범용 APK에는
+지원 ABI 전체가 있으며 각 분할 APK에는 이름과 같은 ABI만 있는지 검사합니다. 이어서
+minSdk 26 기준 `apksigner` 검증을 실행하며 각 APK의 유일한 서명자가 커밋된 업데이트
+인증서 지문과 일치해야 합니다.
 
-현재 Release APK는 지원하는 모든 native ABI 라이브러리를 포함하는 범용 APK입니다.
-GitHub Releases는 Play처럼 설치 기기를 판별해 ABI별 자산을 자동 선택하지 않으므로
-사용자는 하나의 범용 APK를 내려받습니다. ABI와 무관한 경량 의미 분류기는 모든 설치용
-APK에 포함됩니다.
+`app/build/outputs/apk/release/` 아래 검증 산출물은 정확히 5개이며 모두 GitHub 배포
+후보입니다: `universal`, `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`. GitHub Releases는
+Play처럼 설치 기기를 판별해 하나를 자동 선택하지 않습니다. 사용자는 호환 APK 하나와
+이름이 같은 체크섬만 받습니다. 대부분의 최신 휴대전화와 태블릿은 `arm64-v8a`, 오래된
+32비트 ARM 기기는 `armeabi-v7a`를 사용합니다. `x86`과 `x86_64`는 주로 에뮬레이터와
+일부 Intel 기반 특수 기기용이며 ABI를 모르면 범용 APK를 선택합니다. ABI와 무관한 같은
+경량 의미 분류기는 5개 APK에 모두 포함됩니다. `bundleRelease`는 기존 AAB 상한을 유지한
+CI와 형식 회귀 확인용 산출물로 남습니다.
 
 ### GitHub Release 게시
 
@@ -126,6 +130,14 @@ Managed Device, 품질, 오프라인, 테스트 APK 컴파일과 서명 게이�
 
 - `AlarmControl-<version>-universal.apk`
 - `AlarmControl-<version>-universal.apk.sha256`
+- `AlarmControl-<version>-arm64-v8a.apk`
+- `AlarmControl-<version>-arm64-v8a.apk.sha256`
+- `AlarmControl-<version>-armeabi-v7a.apk`
+- `AlarmControl-<version>-armeabi-v7a.apk.sha256`
+- `AlarmControl-<version>-x86.apk`
+- `AlarmControl-<version>-x86.apk.sha256`
+- `AlarmControl-<version>-x86_64.apk`
+- `AlarmControl-<version>-x86_64.apk.sha256`
 
 기존 태그, Release 또는 같은 이름의 자산은 덮어쓰지 않고 실패합니다. 이 키는 Play
 upload key와 달리 설치된 APK가 실제 앱 업데이트 서명 신원으로 신뢰하는 키입니다.
@@ -147,10 +159,11 @@ Release 자산은 저장소 공개 범위를 그대로 따릅니다. 비공개 �
 Android Developer Console(또는 계속 보유할 Play Console)에서 `com.alarmcontrol`과 장기
 Release 서명키를 등록해야 합니다.
 
-선택형 생성 LLM은 앱 Release에 포함하거나 앱 payload로 계산하지 않습니다. AlarmControl은
-LLM을 배포하지 않습니다. 사용자가 모델 제공자의 조건에 따라 호환되는 self-contained
-`.task`를 준비하고 Storage Access Framework로 직접 가져올 수 있습니다. GitHub 앱 Release
-워크플로는 LLM을 업로드하지 않습니다.
+5개 APK 변형에는 모두 같은 번들 경량 의미 분류기가 포함됩니다. 선택형 생성 LLM은 앱
+Release에 포함하거나 앱 payload로 계산하지 않습니다. AlarmControl은 LLM을 배포하지
+않습니다. 사용자가 모델 제공자의 조건에 따라 호환되는 self-contained `.task`를 준비하고
+Storage Access Framework로 직접 가져올 수 있습니다. GitHub 앱 Release 워크플로는 LLM을
+업로드하지 않습니다.
 
 ## 계측 테스트
 

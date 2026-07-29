@@ -1495,26 +1495,6 @@ private fun Condition?.requiresSignal(signal: SimulationSignal): Boolean =
         is Condition.Not -> condition.requiresSignal(signal)
     }
 
-private fun SemanticIntent.labelRes(): Int =
-    when (this) {
-        SemanticIntent.MARKETING -> R.string.semantic_marketing
-        SemanticIntent.TRANSACTIONAL -> R.string.semantic_transactional
-        SemanticIntent.SECURITY -> R.string.semantic_security
-        SemanticIntent.DELIVERY -> R.string.semantic_delivery
-        SemanticIntent.SOCIAL -> R.string.semantic_social
-        SemanticIntent.OTHER -> R.string.semantic_other
-        SemanticIntent.AMBIGUOUS -> R.string.semantic_ambiguous
-    }
-
-private fun NotificationImportance.labelRes(): Int =
-    when (this) {
-        NotificationImportance.MIN -> R.string.importance_min
-        NotificationImportance.LOW -> R.string.importance_low
-        NotificationImportance.DEFAULT -> R.string.importance_default
-        NotificationImportance.HIGH -> R.string.importance_high
-        NotificationImportance.MAX -> R.string.importance_max
-    }
-
 /** Recursively edits one [ConditionNode]; child changes flow up via [onChange] (CLAUDE.md §8). */
 @Composable
 private fun ConditionNodeEditor(
@@ -1760,7 +1740,7 @@ private fun LeafValueEditor(
                     FilterChip(
                         selected = node.value == value.toString(),
                         onClick = { onChange(node.copy(value = value.toString())) },
-                        label = { Text(value.toString()) },
+                        label = { Text(stringResource(if (value) R.string.yes else R.string.no)) },
                     )
                 }
             }
@@ -1770,13 +1750,13 @@ private fun LeafValueEditor(
                 values =
                     SemanticIntent.entries
                         .filterNot { it == SemanticIntent.AMBIGUOUS }
-                        .map { it.name },
+                        .map { EnumValueOption(it.name, it.labelRes()) },
                 onChange = { onChange(node.copy(value = it)) },
             )
         LeafKind.IMPORTANCE_AT_LEAST ->
             EnumValueDropdown(
                 value = node.value,
-                values = NotificationImportance.entries.map { it.name },
+                values = NotificationImportance.entries.map { EnumValueOption(it.name, it.labelRes()) },
                 onChange = { onChange(node.copy(value = it)) },
             )
         else ->
@@ -1792,22 +1772,30 @@ private fun LeafValueEditor(
     }
 }
 
+private data class EnumValueOption(
+    val value: String,
+    @androidx.annotation.StringRes val labelRes: Int,
+)
+
 @Composable
 private fun EnumValueDropdown(
     value: String,
-    values: List<String>,
+    values: List<EnumValueOption>,
     onChange: (String) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
+    val selectedLabel = values.firstOrNull { it.value == value }?.labelRes
     Box {
-        TextButton(onClick = { expanded = true }) { Text(value.ifBlank { stringResource(R.string.select) }) }
+        TextButton(onClick = { expanded = true }) {
+            Text(selectedLabel?.let { stringResource(it) } ?: stringResource(R.string.select))
+        }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             values.forEach { candidate ->
                 DropdownMenuItem(
-                    text = { Text(candidate) },
+                    text = { Text(stringResource(candidate.labelRes)) },
                     onClick = {
                         expanded = false
-                        onChange(candidate)
+                        onChange(candidate.value)
                     },
                 )
             }

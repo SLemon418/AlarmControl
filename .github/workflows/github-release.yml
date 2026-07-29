@@ -1,4 +1,4 @@
-name: Publish GitHub release APK
+name: Publish GitHub release APKs
 
 on:
   push:
@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   release:
-    name: Verify and publish signed APK
+    name: Verify and publish signed APKs
     runs-on: ubuntu-latest
     timeout-minutes: 120
     environment: github-release
@@ -139,17 +139,16 @@ jobs:
             --dependency-verification strict \
             :app:releaseCandidate
 
-      - name: Confirm package identity and package APK
-        id: package
+      - name: Confirm package identity and package APKs
         shell: bash
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          apks=(app/build/outputs/apk/release/*.apk)
-          if (( ${#apks[@]} != 1 )); then
-            echo "Expected one release APK, found ${#apks[@]}." >&2
-            exit 1
-          fi
+          version_name="${GITHUB_REF_NAME#v}"
+          release_dir="$RUNNER_TEMP/github-release"
+          python3 scripts/package_release_apks.py \
+            --metadata app/build/outputs/apk/release/output-metadata.json \
+            --version "$version_name" \
+            --output-dir "$release_dir"
 
           mapfile -t aapts < <(
             find "$ANDROID_HOME/build-tools" -mindepth 2 -maxdepth 2 \
@@ -161,38 +160,34 @@ jobs:
           fi
           aapt="${aapts[${#aapts[@]} - 1]}"
 
-          apk="${apks[0]}"
-          package_line="$("$aapt" dump badging "$apk" | sed -n '1p')"
-          package_name="$(sed -n "s/^package: name='\([^']*\)'.*/\1/p" <<< "$package_line")"
-          version_name="$(sed -n "s/.* versionName='\([^']*\)'.*/\1/p" <<< "$package_line")"
-          expected_version="${GITHUB_REF_NAME#v}"
-          if [[ "$package_name" != "com.alarmcontrol" ]]; then
-            echo "Unexpected APK package: $package_name" >&2
+          shopt -s nullglob
+          apks=("$release_dir"/*.apk)
+          checksums=("$release_dir"/*.apk.sha256)
+          if (( ${#apks[@]} != 5 || ${#checksums[@]} != 5 )); then
+            echo "Expected five APKs and five checksums; found ${#apks[@]} and ${#checksums[@]}." >&2
             exit 1
           fi
-          if [[ "$version_name" != "$expected_version" ]]; then
-            echo "Tag version $expected_version does not match APK version $version_name." >&2
-            exit 1
-          fi
-
-          release_dir="$RUNNER_TEMP/github-release"
-          mkdir -p "$release_dir"
-          asset_name="AlarmControl-$version_name-universal.apk"
-          asset_path="$release_dir/$asset_name"
-          checksum_path="$asset_path.sha256"
-          cp -- "$apk" "$asset_path"
           (
             cd "$release_dir"
-            sha256sum "$asset_name" > "$(basename "$checksum_path")"
+            sha256sum --check ./*.apk.sha256
           )
-          echo "asset_path=$asset_path" >> "$GITHUB_OUTPUT"
-          echo "checksum_path=$checksum_path" >> "$GITHUB_OUTPUT"
+          for apk in "${apks[@]}"; do
+            package_line="$("$aapt" dump badging "$apk" | sed -n '1p')"
+            package_name="$(sed -n "s/^package: name='\([^']*\)'.*/\1/p" <<< "$package_line")"
+            packaged_version="$(sed -n "s/.* versionName='\([^']*\)'.*/\1/p" <<< "$package_line")"
+            if [[ "$package_name" != "com.alarmcontrol" ]]; then
+              echo "Unexpected APK package in $(basename "$apk"): $package_name" >&2
+              exit 1
+            fi
+            if [[ "$packaged_version" != "$version_name" ]]; then
+              echo "Tag version $version_name does not match $(basename "$apk") version $packaged_version." >&2
+              exit 1
+            fi
+          done
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          ASSET_PATH: ${{ steps.package.outputs.asset_path }}
-          CHECKSUM_PATH: ${{ steps.package.outputs.checksum_path }}
         shell: bash
         run: |
           set -euo pipefail
@@ -200,11 +195,18 @@ jobs:
             echo "A GitHub Release already exists for $GITHUB_REF_NAME; refusing to replace assets." >&2
             exit 1
           fi
+          release_dir="$RUNNER_TEMP/github-release"
+          shopt -s nullglob
+          assets=("$release_dir"/*.apk "$release_dir"/*.apk.sha256)
+          if (( ${#assets[@]} != 10 )); then
+            echo "Expected exactly ten verified release assets, found ${#assets[@]}." >&2
+            exit 1
+          fi
           gh release create "$GITHUB_REF_NAME" \
-            "$ASSET_PATH" \
-            "$CHECKSUM_PATH" \
+            "${assets[@]}" \
             --draft \
             --generate-notes \
+            --notes $'### Which APK should I download?\n\n- **arm64-v8a:** most current Android phones and tablets\n- **armeabi-v7a:** older 32-bit ARM devices\n- **x86_64 / x86:** mainly emulators or Intel-based devices\n- **universal:** use this if you are unsure\n\nDownload the `.sha256` file with the same name as your APK. GitHub does not select an ABI automatically.' \
             --title "AlarmControl $GITHUB_REF_NAME" \
             --verify-tag
           gh release edit "$GITHUB_REF_NAME" --draft=false

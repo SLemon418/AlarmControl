@@ -49,9 +49,10 @@ thermal status는 `0`, 측정 charge counter는 3,332,000µAh로 유지됐다.
 
 검증한 `bundleRelease` 산출물은 98,983,815바이트(94.40MiB)로 전체
 물리 상한 105MiB 미만이지만 App Bundle 호환성 회귀 확인용일 뿐 배포 후보가
-아니다. GitHub Releases에는 별도로 검증한 서명 범용 APK를 게시한다.
-GitHub는 ABI를 자동 선택하지 않으므로 이 APK에는 지원하는 native library를
-모두 포함하며 ABI와 무관한 의미 모델도 모든 호환 설치에 함께 전달된다.
+아니다. GitHub Releases에는 같은 업데이트 키로 서명하고 별도로 검증한 APK
+5개(`universal`, `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`)와 각각에
+맞는 체크섬을 게시한다. GitHub는 하나를 자동 선택하지 않는다. ABI와 무관한
+같은 의미 모델은 모든 APK 변형에 포함하며 선택형 사용자 LLM은 별도 파일이다.
 
 런타임 통합은 규칙 우선이다. **활성** 규칙이 의미 판정을 필요로 할 때만
 커밋 전에 `REALTIME` urgency로 추론한다. 관찰 전용 의미 작업은 활성

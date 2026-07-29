@@ -12,51 +12,72 @@ automatic update, or runtime network access. It evaluates notifications after An
 
 - Android 8.0 (API 26) or later
 - An Android device that can grant notification-listener access
-- Enough free storage for the universal APK and installed app
+- Enough free storage for one chosen APK and the installed app
 - A trusted way to obtain the APK from this repository's GitHub Releases page
 
-The GitHub APK contains all supported native ABIs. Normal filtering needs no separately downloaded
-model. An optional generative LLM file is unrelated to initial setup.
+Every APK variant contains the same bundled lightweight semantic classifier. Normal filtering needs
+no separately downloaded model. An optional generative LLM is a separate user-provided file and is
+unrelated to initial setup.
 
 ## Install from GitHub Releases
 
 ### 1. Download the correct files
 
-Open the repository's [Releases page](../../../releases) and download both files from the same release:
+Open the repository's [Releases page](../../../releases). Releases produced by the current workflow
+contain five APKs signed with the same update key, each with a matching checksum. An earlier
+verified release may provide only the universal APK and its checksum:
 
 ```text
-AlarmControl-<version>-universal.apk
-AlarmControl-<version>-universal.apk.sha256
+AlarmControl-<version>-<variant>.apk
+AlarmControl-<version>-<variant>.apk.sha256
+```
+
+Choose one variant:
+
+| Variant | Use it for |
+|---|---|
+| `arm64-v8a` | Most modern Android phones and tablets |
+| `armeabi-v7a` | Older 32-bit ARM devices |
+| `x86_64` | Mainly 64-bit emulators and special Intel-based devices |
+| `x86` | Mainly older 32-bit emulators and special Intel-based devices |
+| `universal` | Any supported ABI; choose this if unsure |
+
+GitHub does not detect the device or select an APK as Google Play does. Download only one APK and
+the `.sha256` file with the same variant name. Advanced users can check the device's preferred ABI
+over ADB:
+
+```sh
+adb shell getprop ro.product.cpu.abi
 ```
 
 Do not download GitHub's automatically generated **Source code (zip)** or **Source code (tar.gz)**
-as an installer. If a release does not contain both APK and checksum assets, it is not an
-installable AlarmControl release.
+as an installer. If the chosen APK or its matching checksum is missing, do not install that release.
 
 ### 2. Check the download
 
 On macOS:
 
 ```sh
-shasum -a 256 -c AlarmControl-<version>-universal.apk.sha256
+shasum -a 256 -c AlarmControl-<version>-<variant>.apk.sha256
 ```
 
 On Linux:
 
 ```sh
-sha256sum -c AlarmControl-<version>-universal.apk.sha256
+sha256sum -c AlarmControl-<version>-<variant>.apk.sha256
 ```
 
 On Windows PowerShell, display both values and compare them:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\AlarmControl-<version>-universal.apk
-Get-Content .\AlarmControl-<version>-universal.apk.sha256
+Get-FileHash -Algorithm SHA256 .\AlarmControl-<version>-<variant>.apk
+Get-Content .\AlarmControl-<version>-<variant>.apk.sha256
 ```
 
-The hashes must match. A checksum detects a changed or incomplete download and confirms that the
-APK matches the checksum file in that release. It does not independently prove who published both
-files, so obtain them only from the repository you trust.
+Replace `<version>` and `<variant>` with the downloaded file's values. The hashes must match. A
+checksum detects a changed or incomplete download and confirms that the APK matches the checksum
+file in that release. It does not independently prove who published both files, so obtain them only
+from the repository you trust.
 
 ### 3. Install the APK
 
@@ -70,8 +91,8 @@ exception only to the app you are currently using to open the verified APK.
 
 ## Update without losing data
 
-Download and check the new release, then install its APK over the existing AlarmControl
-installation.
+Download one compatible APK and its matching checksum from the new release, check it, then install
+the APK over the existing AlarmControl installation.
 
 Do **not** uninstall first. Uninstalling removes local rules, profiles, records, settings, encrypted
 details, and imported model files. Android accepts an in-place update only when:
