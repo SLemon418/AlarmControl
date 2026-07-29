@@ -30,11 +30,14 @@ automation hooks (Tasker/Samsung Routines).
   use `AlarmManager`/exact-alarm/full-screen-intent permissions. We cannot intercept another app's
   real system alarm unless it appears as a notification — do not design as if we can.
 - **Offline is enforced, not promised.** The app ships with **no `INTERNET` permission** (see §3).
-- **Distribution target: GitHub Releases.** The publishable app artifact is a cryptographically
-  verified, release-signed APK attached to a GitHub Release. The AAB path remains buildable only as
-  a CI/Play-format regression check; it is not the current publication target. The installed app
-  does not check GitHub, self-update, or download models. AlarmControl does not distribute an
-  optional LLM; a user-prepared compatible `.task` is imported explicitly from local storage (§3).
+- **Distribution target: GitHub Releases.** Each new release publishes exactly five cryptographically
+  verified APKs signed with the same update key: `universal`, `arm64-v8a`, `armeabi-v7a`, `x86`,
+  and `x86_64`, each with a matching SHA-256 file. The AAB path remains buildable only as a
+  CI/Play-format regression check; it is not the current publication target. GitHub does not
+  auto-select an APK, so users download one compatible variant or `universal` if unsure. The
+  installed app does not check GitHub, self-update, or download models. Every APK contains the same
+  bundled lightweight classifier. AlarmControl does not distribute an optional LLM; a user-prepared
+  compatible `.task` is imported explicitly from local storage (§3).
 - **Compose stays in `:app`, never in `:core`.** The Material 3 design system / theme lives in the
   `:app` module so the `:data`/`:ml`/`:notifications` layers (which depend on `:core`) can never
   transitively pull UI code into a lower layer. `:core` is deliberately Compose-free; that absence is
@@ -288,12 +291,13 @@ Turn tasks into verifiable goals and loop until green (see §10).
   Gradle Managed Device tests for `:data`, `:ml`, and `:app`.
 - **A compiled release artifact is not automatically distributable.** CI keeps the potentially
   unsigned `bundleRelease` path only for App Bundle compatibility regression. The GitHub
-  distribution APK must instead pass `:app:releaseCandidate`, which requires all four
+  distribution APKs must instead pass `:app:releaseCandidate`, which requires all four
   release-signing environment variables and a committed public certificate SHA-256 pin, runs the
-  device-independent gates, enforces the APK payload limits defined by the build, and
-  cryptographically validates that exact APK signer. This is the installed app's update-signing
-  key, not a Play upload key: never commit it or its credentials, and retain an encrypted offline
-  backup so future releases can update existing installations.
+  device-independent gates, enforces the universal and ABI-specific payload limits defined by the
+  build, checks every output's semantic payload and native ABI set, and cryptographically validates
+  all five APK signers against the same pinned certificate. This is the installed app's
+  update-signing key, not a Play upload key: never commit it or its credentials, and retain an
+  encrypted offline backup so future releases can update existing installations.
 - **Supply-chain verification is mandatory.** CI validates the Gradle wrapper and resolves artifacts
   with strict SHA-256 checks from `gradle/verification-metadata.xml`. `verifyCiActionPins` scans
   workflow, reusable-workflow, and composite-action YAML; remote actions require a full 40-character

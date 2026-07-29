@@ -77,22 +77,28 @@ export ALARMCONTROL_KEYSTORE_FILE="/absolute/path/to/release.jks"
 export ALARMCONTROL_KEYSTORE_PASSWORD="..."
 export ALARMCONTROL_KEY_ALIAS="..."
 export ALARMCONTROL_KEY_PASSWORD="..."
-./gradlew :app:releaseCandidate
+./gradlew -Palarmcontrol.releaseAbiApks=true :app:releaseCandidate
 ```
 
 Providing only some of the variables fails configuration intentionally. `releaseCandidate` runs
 all device-independent quality/offline checks, compiles the instrumented-test and Baseline Profile
-variants, caps the raw semantic classifier at 45 MiB, the physical non-semantic payload at 140 MiB,
-and the complete physical APK at 185 MiB. It also verifies the four semantic assets and their
-manifest hashes, then runs `apksigner` verification for minSdk 26 and requires its sole signer to
-match the committed update-certificate fingerprint. The verified universal APK is the only APK
-under `app/build/outputs/apk/release/`. Only that APK is a GitHub distribution candidate;
-`bundleRelease` remains a CI/format-regression artifact with its existing AAB limits.
+variants, and caps the raw semantic classifier at 45 MiB in every output. The universal APK has a
+140 MiB physical non-semantic payload limit and a 185 MiB complete physical APK limit; each
+ABI-specific APK has corresponding 60 MiB and 105 MiB limits. It verifies the four semantic assets
+and their manifest hashes in all five APKs, confirms that the universal APK contains every supported
+ABI and each split contains only its named ABI, then runs `apksigner` verification for minSdk 26.
+Every APK must have exactly one signer matching the committed update-certificate fingerprint.
+The explicit Gradle property keeps ordinary `assembleRelease` and `bundleRelease` checks
+single-output while enabling the five APK outputs only for GitHub distribution packaging.
 
-The current release APK is universal: it contains native libraries for every supported ABI. GitHub
-Releases does not inspect a device and choose an ABI-specific asset as Play does, so users download
-the one universal APK. The ABI-independent lightweight semantic classifier is bundled in that APK
-for every installation.
+The verified output under `app/build/outputs/apk/release/` is exactly five GitHub distribution
+candidates: `universal`, `arm64-v8a`, `armeabi-v7a`, `x86`, and `x86_64`. GitHub Releases does not
+inspect a device and choose one as Play does. Users download only one compatible APK and its
+matching checksum. Most modern phones and tablets use `arm64-v8a`; older 32-bit ARM devices use
+`armeabi-v7a`; `x86` and `x86_64` are mainly for emulators and special Intel-based devices. The
+universal APK is the fallback when the ABI is unknown. The same ABI-independent lightweight
+semantic classifier is bundled in all five APKs. `bundleRelease` remains a CI/format-regression
+artifact with its existing AAB limits.
 
 ### GitHub Release publication
 
@@ -127,6 +133,14 @@ workflow creates a release with these assets:
 
 - `AlarmControl-<version>-universal.apk`
 - `AlarmControl-<version>-universal.apk.sha256`
+- `AlarmControl-<version>-arm64-v8a.apk`
+- `AlarmControl-<version>-arm64-v8a.apk.sha256`
+- `AlarmControl-<version>-armeabi-v7a.apk`
+- `AlarmControl-<version>-armeabi-v7a.apk.sha256`
+- `AlarmControl-<version>-x86.apk`
+- `AlarmControl-<version>-x86.apk.sha256`
+- `AlarmControl-<version>-x86_64.apk`
+- `AlarmControl-<version>-x86_64.apk.sha256`
 
 An existing tag, release, or same-named asset is never overwritten. Unlike a Play upload key, this
 keystore is the actual app-update signing identity trusted by installed APKs. Keep an independent,
@@ -147,7 +161,8 @@ enforced in the target regions, follow the current
 and register `com.alarmcontrol` plus the long-term release signing key through Android Developer
 Console (or through Play Console if the developer maintains one).
 
-The optional generative LLM is never packaged with the app release or counted as app payload.
+All five APK variants include the same bundled lightweight semantic classifier. The optional
+generative LLM is never packaged with the app release or counted as app payload.
 AlarmControl does not publish an LLM: a user may prepare a compatible self-contained `.task` under
 the model provider's terms and import it through the Storage Access Framework. The GitHub
 app-release workflow does not upload an LLM.

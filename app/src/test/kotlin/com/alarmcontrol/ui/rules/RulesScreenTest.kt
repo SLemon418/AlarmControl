@@ -21,8 +21,10 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextInput
 import com.alarmcontrol.core.filtering.Condition
+import com.alarmcontrol.core.filtering.NotificationImportance
 import com.alarmcontrol.core.filtering.RateScope
 import com.alarmcontrol.core.filtering.RuleExecutionMode
+import com.alarmcontrol.core.filtering.SemanticIntent
 import com.alarmcontrol.ui.NotificationAccessUiState
 import com.alarmcontrol.ui.UiText
 import org.junit.Assert.assertEquals
@@ -89,7 +91,7 @@ class RulesScreenTest {
             )
         }
 
-        composeRule.onNodeWithText("Notification access needed").assertIsDisplayed()
+        composeRule.onNodeWithText("Turn on notification access").assertIsDisplayed()
         composeRule.onNodeWithText("Open settings").performClick()
         assertTrue(grantClicked)
     }
@@ -98,7 +100,7 @@ class RulesScreenTest {
     fun hidesNotificationAccessBanner_whenGranted() {
         setRulesScreen(showHint = false) // default state has notificationAccessGranted = true
 
-        composeRule.onNodeWithText("Notification access needed").assertDoesNotExist()
+        composeRule.onNodeWithText("Turn on notification access").assertDoesNotExist()
     }
 
     @Test
@@ -106,7 +108,8 @@ class RulesScreenTest {
         setSetupHealthScreen(NotificationAccessUiState.DENIED)
 
         assertSetupHealthText(
-            "AlarmControl can't filter or record anything until you grant notification access.",
+            "AlarmControl needs notification access to apply your rules and show activity. " +
+                "Notifications are processed only on this device.",
         )
         composeRule.onNodeWithText("Inactive").assertIsDisplayed()
         composeRule.onNodeWithText("Active").assertDoesNotExist()
@@ -279,6 +282,31 @@ class RulesScreenTest {
         composeRule.onNodeWithText("Package").assertDoesNotExist()
         composeRule.onNodeWithText("+ Condition").performClick()
         composeRule.onNodeWithText("Package").assertIsDisplayed()
+    }
+
+    @Test
+    fun ruleEditor_displaysFriendlyValuesWithoutRawBooleanOrEnumNames() {
+        setRuleEditor(mutableStateOf(friendlyValueEditorState()))
+
+        composeRule.onNodeWithText("Yes").assertExists()
+        composeRule.onNodeWithText("Security").assertExists()
+        composeRule.onNodeWithText("High").assertExists()
+        composeRule.onNodeWithText("true").assertDoesNotExist()
+        composeRule.onNodeWithText(SemanticIntent.SECURITY.name).assertDoesNotExist()
+        composeRule.onNodeWithText(NotificationImportance.HIGH.name).assertDoesNotExist()
+    }
+
+    @Test
+    @Config(qualifiers = "ko")
+    fun ruleEditor_displaysKoreanValuesWithoutRawBooleanOrEnumNames() {
+        setRuleEditor(mutableStateOf(friendlyValueEditorState()))
+
+        composeRule.onNodeWithText("예").assertExists()
+        composeRule.onNodeWithText("보안").assertExists()
+        composeRule.onNodeWithText("높음").assertExists()
+        composeRule.onNodeWithText("true").assertDoesNotExist()
+        composeRule.onNodeWithText(SemanticIntent.SECURITY.name).assertDoesNotExist()
+        composeRule.onNodeWithText(NotificationImportance.HIGH.name).assertDoesNotExist()
     }
 
     @Test
@@ -507,4 +535,24 @@ class RulesScreenTest {
             )
         }
     }
+
+    private fun friendlyValueEditorState(): RuleEditorState =
+        RuleEditorState(
+            root =
+                GroupNode(
+                    key = nextNodeKey(),
+                    anyOf = false,
+                    children =
+                        listOf(
+                            LeafNode(nextNodeKey(), LeafKind.ONGOING, true.toString()),
+                            LeafNode(nextNodeKey(), LeafKind.SEMANTIC_INTENT, SemanticIntent.SECURITY.name),
+                            LeafNode(
+                                nextNodeKey(),
+                                LeafKind.IMPORTANCE_AT_LEAST,
+                                NotificationImportance.HIGH.name,
+                            ),
+                        ),
+                ),
+            editorMode = RuleEditorMode.ADVANCED,
+        )
 }

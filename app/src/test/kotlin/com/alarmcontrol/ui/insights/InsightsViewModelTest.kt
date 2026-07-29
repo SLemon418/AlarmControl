@@ -229,6 +229,13 @@ class InsightsViewModelTest {
                                     DecisionConditionKind.PACKAGE,
                                     ConditionResult.MATCH,
                                 ),
+                                DecisionTraceNode(
+                                    DecisionTraceLane.MONITOR,
+                                    1,
+                                    1,
+                                    DecisionConditionKind.SEMANTIC_INTENT,
+                                    ConditionResult.UNKNOWN,
+                                ),
                             ),
                         recordedAtMillis = 2,
                         id = "11",
@@ -241,7 +248,12 @@ class InsightsViewModelTest {
                 assertEquals(87, item.mlConfidencePercent)
                 assertEquals(UiText.Dynamic("Mute offers"), item.matchedRuleName)
                 assertEquals(UiText.Dynamic("Observe ads"), item.monitoredRuleName)
-                assertEquals(DecisionTraceLane.ACTIVE, item.decisionTrace.single().lane)
+                assertEquals(DecisionTraceLane.ACTIVE, item.decisionTrace.first().lane)
+                assertEquals(uiText(R.string.condition_package), item.decisionTrace.first().conditionLabel)
+                assertEquals(
+                    uiText(R.string.condition_semantic_intent),
+                    item.decisionTrace.last().conditionLabel,
+                )
                 cancelAndIgnoreRemainingEvents()
             }
         }

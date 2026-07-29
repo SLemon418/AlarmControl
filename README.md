@@ -12,10 +12,11 @@ download, or `INTERNET` permission. Notification data stays on the device.
 > alarms, intercept a system alarm that has no notification, mark another app's notification as
 > read, or guarantee that a heads-up notification never appears.
 
-> **Distribution:** GitHub Releases is the intended binary channel. Install only a release that
-> contains both `AlarmControl-<version>-universal.apk` and its `.sha256` file. GitHub's source
-> archives are not Android installers. If those assets are absent, there is no installable public
-> release for that version.
+> **Distribution:** GitHub Releases is the intended binary channel. New releases built from this
+> version publish five APKs signed with the same update key (`universal`, `arm64-v8a`,
+> `armeabi-v7a`, `x86`, and `x86_64`), plus a matching `.sha256` file for each. Download one APK for
+> your device and the checksum with the same variant name. Earlier releases may provide only the
+> valid universal pair. GitHub's source archives are not Android installers.
 
 [Releases](../../releases) · [User guide](docs/USER_GUIDE.md) ·
 [Privacy](docs/PRIVACY.md) · [Build from source](BUILD.md)
@@ -23,7 +24,8 @@ download, or `INTERNET` permission. Notification data stays on the device.
 ## Quick start
 
 1. Use Android 8.0 or later.
-2. Download the signed universal APK and matching checksum from the same GitHub Release.
+2. Download one signed APK for your device—usually `arm64-v8a`, or `universal` if unsure—and its
+   matching checksum from the same GitHub Release.
 3. Allow **Install unknown apps** only for the browser or file manager opening the APK.
 4. Open AlarmControl and grant **Notification access**.
 5. Create a **Monitor** rule first.
@@ -32,7 +34,7 @@ download, or `INTERNET` permission. Notification data stays on the device.
 
 The bundled classifiers work without any additional model file. The optional generative LLM is not
 required for normal filtering. The seven-intent classifier is enabled by default and can be turned
-off under **Settings → On-device semantic analysis**.
+off under **Settings → Smart notification sorting → Sort notifications by content**.
 
 See the [user guide](docs/USER_GUIDE.md) for checksum commands, updates, backup, safe rule setup,
 automation, and troubleshooting.
@@ -124,8 +126,13 @@ Install a newer APK over the existing app. Do not uninstall first: uninstalling 
 data. Android accepts an in-place update only when the new APK has a higher `versionCode` and the
 same signing key. AlarmControl does not check GitHub or update itself.
 
-The universal GitHub APK contains every supported native ABI because GitHub does not perform
-device-specific delivery. The optional generative LLM is separate and is never bundled in the APK.
+GitHub does not select an APK for the device as Google Play does. Most modern phones and tablets
+use `arm64-v8a`; older 32-bit ARM devices use `armeabi-v7a`; `x86` and `x86_64` are mainly for
+emulators and special Intel-based devices. Choose `universal` if unsure. Download and install only
+one variant and verify it with the checksum carrying the same variant name.
+
+All five APKs contain the same bundled lightweight semantic classifier. The optional generative
+LLM is a separate user-provided file and is never bundled in any APK.
 
 Detailed installation, checksum, development-build migration, and recovery guidance is in the
 [user guide](docs/USER_GUIDE.md).

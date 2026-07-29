@@ -26,7 +26,7 @@ declares no `INTERNET` permission and makes no network calls.
    opposite action.
 
 This path invokes AlarmControl's non-exported shortcut trampoline through Android's
-`ShortcutManager`; it does **not** require **Allow external automation** or `AUTH_TOKEN`.
+`ShortcutManager`; it does **not** require **Allow Tasker or MacroDroid** or `AUTH_TOKEN`.
 
 Verified on 2026-07-27 with a Galaxy Note20 5G (Android 13, One UI 5.1), Samsung Modes and Routines,
 and Routine+ 1.0.60: a manual **Pause filtering** routine changed the master switch from on to off,
@@ -45,7 +45,8 @@ Use this route only for Tasker, MacroDroid, or another tool that can send explic
 | Optional target | `com.alarmcontrol.automation.extra.PROFILE_ID` (String) |
 | Required destination | package `com.alarmcontrol` **or** component `com.alarmcontrol/com.alarmcontrol.automation.ProfileToggleReceiver` |
 
-The per-install `AUTH_TOKEN` is shown only after enabling **Settings → Allow external automation**.
+The per-install `AUTH_TOKEN` is shown only after enabling
+**Settings → Automation → Allow Tasker or MacroDroid**.
 Copy it exactly as a String extra. Regenerating it immediately invalidates every existing Routine or
 Tasker task that still uses the old token; the token is never included in backup files or audit rows.
 The destination is mandatory: AlarmControl rejects implicit broadcasts so another app cannot
@@ -61,8 +62,9 @@ subscribe to the public action and observe the token.
 Unknown actions, malformed targets, missing/wrong tokens, and unmatched ids never crash the caller.
 Accepted external requests are limited to 12 per rolling minute to contain broadcast storms.
 
-Enable **AlarmControl → Settings → Allow external automation**, reveal the per-install token, and
-configure the sender with the action, explicit package/component, and String extras shown above.
+Enable **AlarmControl → Settings → Automation → Allow Tasker or MacroDroid**, reveal the
+per-install token, and configure the sender with the action, explicit package/component, and
+String extras shown above.
 Never put the token in an implicit broadcast, logs, screenshots, or a shared automation export.
 
 ## Quick test with adb

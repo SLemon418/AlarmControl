@@ -27,11 +27,14 @@
   전체 화면 Intent 권한을 사용하지 않습니다. 다른 앱의 실제 시스템 알람은 알림으로
   노출되는 경우에만 관찰할 수 있습니다.
 - **오프라인은 약속이 아니라 빌드로 강제합니다.** 앱에는 `INTERNET` 권한이 없습니다.
-- **배포 대상은 GitHub Releases입니다.** 실제 앱 배포 산출물은 암호학적으로 검증한 Release
-  서명 APK이며 GitHub Release에 첨부합니다. AAB 경로는 CI와 Play 형식 호환성 회귀 확인을
-  위해서만 유지하고 현재 배포 대상으로 사용하지 않습니다. 설치된 앱은 GitHub를 확인하거나
-  자동 업데이트하거나 모델을 내려받지 않습니다. AlarmControl은 선택형 LLM을 배포하지
-  않으며 사용자가 준비한 호환 `.task`만 로컬 저장소에서 명시적으로 가져옵니다.
+- **배포 대상은 GitHub Releases입니다.** 앞으로 만드는 각 Release에는 같은 업데이트 키로 서명하고
+  암호학적으로 검증한 APK 5개(`universal`, `arm64-v8a`, `armeabi-v7a`, `x86`,
+  `x86_64`)와 각각에 맞는 SHA-256 파일을 게시합니다. AAB 경로는 CI와 Play 형식 호환성
+  회귀 확인용으로만 유지하며 현재 배포 대상이 아닙니다. GitHub는 APK를 자동 선택하지
+  않으므로 사용자는 호환 변형 하나를 받거나 잘 모르면 `universal`을 선택합니다. 설치된
+  앱은 GitHub를 확인하거나 자동 업데이트하거나 모델을 내려받지 않습니다. 모든 APK에는
+  같은 번들 경량 분류기가 들어 있습니다. AlarmControl은 선택형 LLM을 배포하지 않으며
+  사용자가 준비한 호환 `.task`만 로컬 저장소에서 명시적으로 가져옵니다.
 - **Compose는 `:app`에만 존재합니다.** `:core`, `:data`, `:ml`, `:notifications`에 Compose
   코드를 추가하지 않습니다. 여러 UI 소비자가 실제로 필요해지기 전에는 디자인 시스템이나
   `:feature:*` 모듈을 새로 만들지 않습니다.
@@ -247,11 +250,13 @@
   `pixel2Api34` `aosp-atd` Managed Device에서 `:data`, `:ml`, `:app` 테스트를 실행합니다.
 - Release 산출물이 컴파일됐다고 바로 배포 가능한 것은 아닙니다. CI의 `bundleRelease`는
   App Bundle 호환성 회귀 확인용이며 의도적으로 무서명일 수 있습니다. GitHub에 배포하는
-  APK는 반드시 `:app:releaseCandidate`를 통과해야 하며, 이 작업은 네 서명 환경 변수와
-  커밋된 공개 인증서 SHA-256 지문, 기기 독립 게이트, 빌드에 정의된 APK payload 제한을
-  검사하고 그 정확한 APK 서명자를 암호학적으로 검증합니다. 이 키는 Play upload key가
-  아니라 설치 앱의 실제 업데이트 서명키입니다. 키 저장소와 자격 증명은 커밋하지 않고,
-  이후 Release가 기존 설치를 업데이트할 수 있도록 암호화한 오프라인 백업을 보관합니다.
+  APK 5개는 반드시 `:app:releaseCandidate`를 통과해야 하며, 이 작업은 네 서명 환경
+  변수와 커밋된 공개 인증서 SHA-256 지문, 기기 독립 게이트, 범용·ABI 전용 payload
+  제한을 검사합니다. 또한 모든 산출물의 의미 payload와 native ABI 구성을 확인하고,
+  5개 APK 서명자가 모두 같은 고정 인증서와 일치하는지 암호학적으로 검증합니다. 이 키는
+  Play upload key가 아니라 설치 앱의 실제 업데이트 서명키입니다. 키 저장소와 자격
+  증명은 커밋하지 않고 이후 Release가 기존 설치를 업데이트할 수 있도록 암호화한 오프라인
+  백업을 보관합니다.
 - CI는 Gradle wrapper를 검증하고 `gradle/verification-metadata.xml`의 SHA-256을 strict
   모드로 확인합니다. `verifyCiActionPins`는 워크플로·재사용 워크플로·composite action
   YAML을 모두 검사하며 원격 Action은 40자 커밋 SHA, 컨테이너 Action은 SHA-256 digest로

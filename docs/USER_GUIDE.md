@@ -12,51 +12,72 @@ automatic update, or runtime network access. It evaluates notifications after An
 
 - Android 8.0 (API 26) or later
 - An Android device that can grant notification-listener access
-- Enough free storage for the universal APK and installed app
+- Enough free storage for one chosen APK and the installed app
 - A trusted way to obtain the APK from this repository's GitHub Releases page
 
-The GitHub APK contains all supported native ABIs. Normal filtering needs no separately downloaded
-model. An optional generative LLM file is unrelated to initial setup.
+Every APK variant contains the same bundled lightweight semantic classifier. Normal filtering needs
+no separately downloaded model. An optional generative LLM is a separate user-provided file and is
+unrelated to initial setup.
 
 ## Install from GitHub Releases
 
 ### 1. Download the correct files
 
-Open the repository's [Releases page](../../../releases) and download both files from the same release:
+Open the repository's [Releases page](../../../releases). Releases produced by the current workflow
+contain five APKs signed with the same update key, each with a matching checksum. An earlier
+verified release may provide only the universal APK and its checksum:
 
 ```text
-AlarmControl-<version>-universal.apk
-AlarmControl-<version>-universal.apk.sha256
+AlarmControl-<version>-<variant>.apk
+AlarmControl-<version>-<variant>.apk.sha256
+```
+
+Choose one variant:
+
+| Variant | Use it for |
+|---|---|
+| `arm64-v8a` | Most modern Android phones and tablets |
+| `armeabi-v7a` | Older 32-bit ARM devices |
+| `x86_64` | Mainly 64-bit emulators and special Intel-based devices |
+| `x86` | Mainly older 32-bit emulators and special Intel-based devices |
+| `universal` | Any supported ABI; choose this if unsure |
+
+GitHub does not detect the device or select an APK as Google Play does. Download only one APK and
+the `.sha256` file with the same variant name. Advanced users can check the device's preferred ABI
+over ADB:
+
+```sh
+adb shell getprop ro.product.cpu.abi
 ```
 
 Do not download GitHub's automatically generated **Source code (zip)** or **Source code (tar.gz)**
-as an installer. If a release does not contain both APK and checksum assets, it is not an
-installable AlarmControl release.
+as an installer. If the chosen APK or its matching checksum is missing, do not install that release.
 
 ### 2. Check the download
 
 On macOS:
 
 ```sh
-shasum -a 256 -c AlarmControl-<version>-universal.apk.sha256
+shasum -a 256 -c AlarmControl-<version>-<variant>.apk.sha256
 ```
 
 On Linux:
 
 ```sh
-sha256sum -c AlarmControl-<version>-universal.apk.sha256
+sha256sum -c AlarmControl-<version>-<variant>.apk.sha256
 ```
 
 On Windows PowerShell, display both values and compare them:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\AlarmControl-<version>-universal.apk
-Get-Content .\AlarmControl-<version>-universal.apk.sha256
+Get-FileHash -Algorithm SHA256 .\AlarmControl-<version>-<variant>.apk
+Get-Content .\AlarmControl-<version>-<variant>.apk.sha256
 ```
 
-The hashes must match. A checksum detects a changed or incomplete download and confirms that the
-APK matches the checksum file in that release. It does not independently prove who published both
-files, so obtain them only from the repository you trust.
+Replace `<version>` and `<variant>` with the downloaded file's values. The hashes must match. A
+checksum detects a changed or incomplete download and confirms that the APK matches the checksum
+file in that release. It does not independently prove who published both files, so obtain them only
+from the repository you trust.
 
 ### 3. Install the APK
 
@@ -70,8 +91,8 @@ exception only to the app you are currently using to open the verified APK.
 
 ## Update without losing data
 
-Download and check the new release, then install its APK over the existing AlarmControl
-installation.
+Download one compatible APK and its matching checksum from the new release, check it, then install
+the APK over the existing AlarmControl installation.
 
 Do **not** uninstall first. Uninstalling removes local rules, profiles, records, settings, encrypted
 details, and imported model files. Android accepts an in-place update only when:
@@ -100,11 +121,11 @@ AlarmControl never checks GitHub and never downloads an update itself.
 AlarmControl opens on the **Rules** screen. The essential setup is notification access:
 
 1. Select **Open settings** from the notification-access card.
-2. In Android's notification-access screen, enable **AlarmControl notification filtering**.
+2. In Android's notification-access screen, enable **Manage notifications with AlarmControl**.
 3. Read Android's warning and confirm only if you accept that a notification listener can inspect
    notifications.
 4. Return to AlarmControl.
-5. Check **Settings → App status**. It should show **Notification access: ready**.
+5. Check **Settings → App status**. It should show **Notification access is on**.
 
 Notification access is powerful because Android sends new notification metadata and content to the
 listener for local evaluation. AlarmControl processes it on the device and has no `INTERNET`
@@ -245,8 +266,8 @@ Routines, and authenticated external automation.
 
 ## Pause all filtering
 
-Use **Settings → Filtering enabled** to pause or resume AlarmControl without changing individual
-rule switches. While paused:
+Use **Settings → Apply notification rules** to pause or resume AlarmControl without changing
+individual rule switches. While paused:
 
 - notifications are not filtered;
 - new activity history is not recorded;
@@ -259,7 +280,7 @@ The Quick Settings tile and first-party shortcuts control this same master switc
 ### Samsung Modes and Routines
 
 Samsung Routines can invoke AlarmControl's **Enable filtering**, **Pause filtering**, and published
-profile App Shortcuts. This first-party path does not require **Allow external automation** or an
+profile App Shortcuts. This first-party path does not require **Allow Tasker or MacroDroid** or an
 authentication token.
 
 Menu names vary by One UI version. See the tested setup flow in the
@@ -277,7 +298,7 @@ These first-party controls do not need the external automation opt-in.
 Tasker, MacroDroid, and compatible tools use a separate exported Intent contract:
 
 1. Open **Settings → Automation**.
-2. Enable **Allow external automation**.
+2. Enable **Allow Tasker or MacroDroid**.
 3. Show and copy the current per-install token.
 4. Configure an explicit AlarmControl package or receiver component.
 5. Add the token as the required String extra.
@@ -294,7 +315,8 @@ To opt into encrypted details:
 
 1. Open **Settings → Data & privacy**.
 2. Enable **Store notification title and text**.
-3. Open **Manage app exclusions** and turn storage off for any sensitive app.
+3. Select **Choose apps**. The button also shows how many apps AlarmControl has seen; turn storage
+   off for any sensitive app.
 
 This setting affects eligible future notifications only. Content is:
 
@@ -334,7 +356,7 @@ Open **Settings → Backup & restore**.
 ### Create a backup
 
 1. Optionally enter a password of at least eight characters.
-2. If encryption is enabled, optionally include package-level learning feedback.
+2. If encryption is enabled, optionally enable **Include category corrections**.
 3. Select **Back up**.
 4. Choose a device-local destination in Android's file picker.
 
@@ -350,7 +372,7 @@ file, the automation token, the password, or encryption keys.
 1. Enter the password first if the file is encrypted.
 2. Select **Restore** and choose the local backup.
 3. Review the counts and available sections.
-4. Choose **Merge** or **Replace selected**.
+4. Choose **Add to current data** or **Replace selected data**.
 5. Select the sections to restore.
 6. Confirm **Restore selected**.
 
@@ -363,7 +385,7 @@ important backup and test that it can be opened before uninstalling or resetting
 
 The category and seven-intent semantic classifiers are bundled in the APK. They run locally and
 need no additional model file. The seven-intent classifier is on by default and can be disabled
-under **Settings → On-device semantic analysis → Use bundled 7-intent classifier**. Turning it off
+under **Settings → Smart notification sorting → Sort notifications by content**. Turning it off
 prevents seven-intent inference calls. Notifications whose action depends on semantic or advertisement
 conditions fail open and remain unchanged; unrelated notifications continue with the remaining
 rule signals. Trusted semantic output may satisfy a rule condition; low-confidence, `AMBIGUOUS`,
@@ -374,8 +396,8 @@ gradient, or model update is sent elsewhere.
 
 ### Optional generative LLM
 
-**Settings → On-device semantic analysis** also exposes a separate MediaPipe `.task` import for
-advanced compatibility work:
+**Settings → Smart notification sorting → Choose model file** also exposes a separate MediaPipe
+`.task` import for advanced compatibility work:
 
 - the app never downloads a model;
 - only import a file from a source you trust;
@@ -396,8 +418,8 @@ automation, or backup.
 
 ### Nothing is filtered or recorded
 
-- Confirm **Settings → App status → Notification access: ready**.
-- Confirm **Settings → Filtering enabled** is on.
+- Confirm **Settings → App status → Notification access is on**.
+- Confirm **Settings → Apply notification rules** is on.
 - Confirm at least one rule is enabled.
 - Remember that Monitor records only predictions; use Active for an actual Cancel or Snooze.
 - Post a new representative notification after granting access.
@@ -430,7 +452,7 @@ deleted. Metadata can remain after content expires.
 
 ### External automation is rejected
 
-- Enable **Allow external automation**.
+- Enable **Allow Tasker or MacroDroid**.
 - Use the latest token as a String extra.
 - Explicitly target the AlarmControl package or receiver component.
 - Check the recent local automation results in Settings.

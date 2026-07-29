@@ -4,10 +4,12 @@ import com.alarmcontrol.R
 import com.alarmcontrol.core.filtering.Condition
 import com.alarmcontrol.core.filtering.ConditionResult
 import com.alarmcontrol.core.filtering.MAX_RULE_NAME_CHARS
+import com.alarmcontrol.core.filtering.NotificationImportance
 import com.alarmcontrol.core.filtering.Rule
 import com.alarmcontrol.core.filtering.RuleAction
 import com.alarmcontrol.core.filtering.RuleAnalysisIssueKind
 import com.alarmcontrol.core.filtering.RuleDefinitionValidator
+import com.alarmcontrol.core.filtering.SemanticIntent
 import com.alarmcontrol.notifications.ConditionTrace
 import com.alarmcontrol.ui.UiText
 import com.alarmcontrol.ui.uiText
@@ -63,12 +65,14 @@ private fun Condition.leafSummary(): UiText =
         is Condition.Ongoing -> booleanSummary(value, R.string.rule_summary_ongoing, R.string.rule_summary_dismissible)
         is Condition.MlCategoryEquals -> uiText(R.string.rule_summary_ml, category)
         is Condition.IsAdvertisement -> booleanSummary(value, R.string.rule_summary_is_ad, R.string.rule_summary_not_ad)
-        is Condition.SemanticIntentEquals -> uiText(R.string.rule_summary_semantic_intent, intent.name)
+        is Condition.SemanticIntentEquals ->
+            uiText(R.string.rule_summary_semantic_intent, uiText(intent.labelRes()))
         is Condition.Conversation ->
             booleanSummary(value, R.string.rule_summary_conversation, R.string.rule_summary_not_conversation)
         is Condition.ForegroundService ->
             booleanSummary(value, R.string.rule_summary_foreground, R.string.rule_summary_not_foreground)
-        is Condition.ImportanceAtLeast -> uiText(R.string.rule_summary_importance, minimum.name)
+        is Condition.ImportanceAtLeast ->
+            uiText(R.string.rule_summary_importance, uiText(minimum.labelRes()))
         is Condition.RateAtLeast -> rateSummary()
         is Condition.TimeWindow ->
             uiText(
@@ -95,6 +99,26 @@ private fun Condition.RateAtLeast.rateSummary(): UiText =
         threshold,
         windowMillis / MILLIS_PER_MINUTE,
     )
+
+internal fun SemanticIntent.labelRes(): Int =
+    when (this) {
+        SemanticIntent.MARKETING -> R.string.semantic_marketing
+        SemanticIntent.TRANSACTIONAL -> R.string.semantic_transactional
+        SemanticIntent.SECURITY -> R.string.semantic_security
+        SemanticIntent.DELIVERY -> R.string.semantic_delivery
+        SemanticIntent.SOCIAL -> R.string.semantic_social
+        SemanticIntent.OTHER -> R.string.semantic_other
+        SemanticIntent.AMBIGUOUS -> R.string.semantic_ambiguous
+    }
+
+internal fun NotificationImportance.labelRes(): Int =
+    when (this) {
+        NotificationImportance.MIN -> R.string.importance_min
+        NotificationImportance.LOW -> R.string.importance_low
+        NotificationImportance.DEFAULT -> R.string.importance_default
+        NotificationImportance.HIGH -> R.string.importance_high
+        NotificationImportance.MAX -> R.string.importance_max
+    }
 
 /** Parenthesizes nested composites so the structure reads clearly. */
 private fun Condition.summarizeChild(): UiText =

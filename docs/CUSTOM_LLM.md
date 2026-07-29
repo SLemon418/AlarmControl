@@ -19,8 +19,9 @@ The installed app neither trains a foundation model nor sends training data anyw
 The APK already contains the 47,050,248-byte (44.87 MiB) seven-intent semantic classifier. It is a
 fixed-output LiteRT classifier, not a generative LLM, and needs no additional file or setup. Rules
 and this bundled classifier remain the default real-time path even when no custom LLM is imported.
-It is enabled by default but can be turned off under **Settings → On-device semantic analysis**;
-disabling it skips seven-intent inference and leaves the separate custom-LLM setting unchanged.
+It is enabled by default but can be turned off under
+**Settings → Smart notification sorting → Sort notifications by content**; disabling it skips
+seven-intent inference and leaves the separate custom-LLM setting unchanged.
 
 ## Required model format
 
@@ -147,7 +148,7 @@ risk but do not prove resistance; adversarial evaluation is still required.
 
 1. Keep the final `.task` and its checksum in storage you control.
 2. Copy the extracted `.task` to local device storage.
-3. Open **Settings → On-device semantic analysis → Choose local model**.
+3. Open **Settings → Smart notification sorting → Choose model file**.
 4. Select the `.task` itself through Android's local-only Storage Access Framework picker.
 5. Wait for copying and native loading to finish, then record the displayed size and SHA-256.
 

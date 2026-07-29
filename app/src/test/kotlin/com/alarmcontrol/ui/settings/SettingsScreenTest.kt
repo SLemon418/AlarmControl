@@ -45,20 +45,23 @@ class SettingsScreenTest {
             destination = SettingsDestination.LOCAL_AI,
         )
 
-        composeRule.onNodeWithText("Use bundled 7-intent classifier").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Use deferred local LLM analysis").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Sort notifications by content").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Use a custom model for extra analysis").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Allow LLM verdicts to trigger rules").assertDoesNotExist()
-        composeRule.onNodeWithText("Model status: ready").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Model file is ready").performScrollTo().assertIsDisplayed()
         composeRule
             .onNodeWithText(
-                "Local file integrity verified",
+                "File checked",
                 substring = true,
             ).performScrollTo()
             .assertIsDisplayed()
-        composeRule.onNodeWithText("SHA-256: ${"a".repeat(64)}").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Choose local model").performScrollTo().assertIsDisplayed()
         composeRule
-            .onNodeWithText("Import models only from a source you trust", substring = true)
+            .onNodeWithText("File fingerprint (SHA-256): ${"a".repeat(64)}")
+            .performScrollTo()
+            .assertIsDisplayed()
+        composeRule.onNodeWithText("Choose model file").performScrollTo().assertIsDisplayed()
+        composeRule
+            .onNodeWithText("Choose model files only from a source you trust", substring = true)
             .performScrollTo()
             .assertIsDisplayed()
     }
@@ -73,7 +76,7 @@ class SettingsScreenTest {
         )
 
         composeRule
-            .onNodeWithContentDescription("Use bundled 7-intent classifier")
+            .onNodeWithContentDescription("Sort notifications by content")
             .performScrollTo()
             .performClick()
 
@@ -94,7 +97,7 @@ class SettingsScreenTest {
         )
 
         composeRule
-            .onNodeWithContentDescription("Use deferred local LLM analysis")
+            .onNodeWithContentDescription("Use a custom model for extra analysis")
             .performScrollTo()
             .performClick()
 
@@ -113,12 +116,12 @@ class SettingsScreenTest {
         )
 
         composeRule
-            .onNodeWithContentDescription("Use deferred local LLM analysis")
+            .onNodeWithContentDescription("Use a custom model for extra analysis")
             .performScrollTo()
             .assertIsNotEnabled()
         composeRule
             .onNodeWithText(
-                "Automatic background LLM analysis is unavailable",
+                "does not use it to filter notifications automatically",
                 substring = true,
             ).assertIsDisplayed()
     }
@@ -148,7 +151,7 @@ class SettingsScreenTest {
         )
 
         composeRule
-            .onNodeWithText("incompatible or invalid model", substring = true)
+            .onNodeWithText("This file is not compatible", substring = true)
             .performScrollTo()
             .assertIsDisplayed()
     }
@@ -164,7 +167,7 @@ class SettingsScreenTest {
         )
 
         composeRule
-            .onNodeWithText("changed or its integrity record is missing", substring = true)
+            .onNodeWithText("changed or could not be checked", substring = true)
             .performScrollTo()
             .assertIsDisplayed()
     }
@@ -183,7 +186,7 @@ class SettingsScreenTest {
             onOpenBatterySettings = { batteryOpened = true },
         )
 
-        composeRule.onNodeWithText("Notification access: action needed").assertIsDisplayed()
+        composeRule.onNodeWithText("Notification access is off").assertIsDisplayed()
         composeRule.onNodeWithText("Open settings").performClick()
         composeRule.onNodeWithText("Review battery settings").performClick()
 
@@ -214,7 +217,7 @@ class SettingsScreenTest {
 
         composeRule.onNodeWithText("Review restore").assertIsDisplayed()
         composeRule.onNodeWithText("4 rules · 2 profiles · 30 days of history").assertIsDisplayed()
-        composeRule.onNodeWithText("Replace selected").performClick()
+        composeRule.onNodeWithText("Replace selected data").performClick()
         assertTrue(selection?.replaceExisting == true)
     }
 
@@ -345,7 +348,7 @@ class SettingsScreenTest {
 
         composeRule
             .onNodeWithText(
-                "Bundled classifier: Inactive · Custom LLM — Model status: not loaded",
+                "Built-in sorting: Inactive · Optional custom model: Model file not opened",
             ).performScrollTo()
             .assertIsDisplayed()
     }
@@ -360,13 +363,13 @@ class SettingsScreenTest {
         val subtitleBounds =
             composeRule
                 .onNodeWithText(
-                    "Pause or resume filtering without changing individual rule switches.",
+                    "Turn all filtering on or off at once.",
                     substring = true,
                 ).fetchSemanticsNode()
                 .boundsInRoot
         val switchBounds =
             composeRule
-                .onNodeWithContentDescription("Filtering enabled")
+                .onNodeWithContentDescription("Apply notification rules")
                 .fetchSemanticsNode()
                 .boundsInRoot
 

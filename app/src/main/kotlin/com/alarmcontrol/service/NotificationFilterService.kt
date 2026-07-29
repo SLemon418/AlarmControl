@@ -1030,21 +1030,21 @@ internal class RealtimeSemanticRuleResolver(
             requirements.activeNeedsSemantic &&
                 trustedIntent == null
         if (requirements.activeNeedsSemantic && trustedIntent == null) {
-            val monitorDecision = matcher.evaluateMonitor(snapshot, compiled)
-            val monitor = monitorDecision.resolve(null)
+            val evaluation =
+                matcher.evaluateAfterSemanticFailureWithTraces(
+                    snapshot,
+                    compiled,
+                )
+            val active = evaluation.activeDecision.resolve(RuleAction.Keep)
+            val monitor = evaluation.monitorDecision.resolve(null)
             return RealtimeSemanticRuleEvaluation(
-                action = RuleAction.Keep,
-                matchedRuleId = null,
+                action = requireNotNull(active.action),
+                matchedRuleId = active.ruleId,
                 monitoredAction = monitor.action,
                 monitoredRuleId = monitor.ruleId,
                 classification = classification,
                 needsDelayedObservation = true,
-                decisionTrace =
-                    matcher.decisionTrace(
-                        snapshot,
-                        monitorDecision,
-                        DecisionTraceLane.MONITOR,
-                    ),
+                decisionTrace = evaluation.decisionTrace,
                 monitorNeedsPostCommitSemantic = false,
             )
         }
