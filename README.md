@@ -183,3 +183,9 @@ unsigned APK/AAB is not a publishable release.
 
 Device validation has included a Galaxy Note20 5G on Android 13 / One UI 5.1. Device-specific
 results are evidence for that configuration, not a performance guarantee for every Android device.
+
+## License
+
+Copyright 2026 SLemon418.
+
+AlarmControl is licensed under the [Apache License 2.0](LICENSE).
