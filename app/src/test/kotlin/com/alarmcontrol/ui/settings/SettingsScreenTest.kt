@@ -17,6 +17,8 @@ import com.alarmcontrol.ui.NotificationAccessUiState
 import com.alarmcontrol.ui.privacy.LocalSensitiveWindowController
 import com.alarmcontrol.ui.privacy.SensitiveWindowController
 import com.alarmcontrol.ui.theme.AlarmControlTheme
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -43,6 +45,7 @@ class SettingsScreenTest {
             destination = SettingsDestination.LOCAL_AI,
         )
 
+        composeRule.onNodeWithText("Use bundled 7-intent classifier").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Use deferred local LLM analysis").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Allow LLM verdicts to trigger rules").assertDoesNotExist()
         composeRule.onNodeWithText("Model status: ready").performScrollTo().assertIsDisplayed()
@@ -58,6 +61,23 @@ class SettingsScreenTest {
             .onNodeWithText("Import models only from a source you trust", substring = true)
             .performScrollTo()
             .assertIsDisplayed()
+    }
+
+    @Test
+    fun `bundled classifier switch hoists its change`() {
+        var enabled = true
+        setScreen(
+            state = SettingsUiState(semanticClassifierEnabled = true),
+            destination = SettingsDestination.LOCAL_AI,
+            onSemanticClassifierChange = { enabled = it },
+        )
+
+        composeRule
+            .onNodeWithContentDescription("Use bundled 7-intent classifier")
+            .performScrollTo()
+            .performClick()
+
+        assertFalse(enabled)
     }
 
     @Test
@@ -298,6 +318,39 @@ class SettingsScreenTest {
     }
 
     @Test
+    fun `overview language picker shows current language and hoists selection`() {
+        var selected = AppLanguage.ENGLISH
+        setScreen(
+            state = SettingsUiState(),
+            appLanguage = selected,
+            onAppLanguageChange = { selected = it },
+        )
+
+        composeRule.onNodeWithText("English").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("App language").performClick()
+        composeRule.onNodeWithText("한국어").performClick()
+
+        assertEquals(AppLanguage.KOREAN, selected)
+    }
+
+    @Test
+    fun `overview distinguishes bundled classifier from custom LLM status`() {
+        setScreen(
+            state =
+                SettingsUiState(
+                    semanticClassifierEnabled = false,
+                    llmModelStatus = LlmModelUiStatus.NOT_LOADED,
+                ),
+        )
+
+        composeRule
+            .onNodeWithText(
+                "Bundled classifier: Inactive · Custom LLM — Model status: not loaded",
+            ).performScrollTo()
+            .assertIsDisplayed()
+    }
+
+    @Test
     fun `large font stacks setting switches below their full text`() {
         setScreen(
             state = SettingsUiState(filteringEnabled = true),
@@ -326,12 +379,15 @@ class SettingsScreenTest {
     private fun setScreen(
         state: SettingsUiState,
         destination: SettingsDestination = SettingsDestination.OVERVIEW,
+        onSemanticClassifierChange: (Boolean) -> Unit = {},
         onLlmAnalysisChange: (Boolean) -> Unit = {},
         onOpenNotificationAccess: () -> Unit = {},
         onOpenBatterySettings: () -> Unit = {},
         onRestoreSelectionChange: (RestoreSelectionUi) -> Unit = {},
         onCopyAutomationToken: (String) -> Unit = {},
         onDynamicColorChange: (Boolean) -> Unit = {},
+        appLanguage: AppLanguage = AppLanguage.SYSTEM,
+        onAppLanguageChange: (AppLanguage) -> Unit = {},
         onNavigate: (SettingsDestination) -> Unit = {},
         sensitiveWindowController: SensitiveWindowController? = null,
         fontScale: Float? = null,
@@ -353,6 +409,7 @@ class SettingsScreenTest {
                         onNavigate = onNavigate,
                         onFilteringChange = {},
                         onExternalAutomationChange = {},
+                        onSemanticClassifierChange = onSemanticClassifierChange,
                         onLlmAnalysisChange = onLlmAnalysisChange,
                         onImportLlmModel = {},
                         onPrepareExport = { _, _ -> },
@@ -365,6 +422,8 @@ class SettingsScreenTest {
                         onRestoreSelectionChange = onRestoreSelectionChange,
                         onCopyAutomationToken = onCopyAutomationToken,
                         onDynamicColorChange = onDynamicColorChange,
+                        appLanguage = appLanguage,
+                        onAppLanguageChange = onAppLanguageChange,
                     )
                 }
             }

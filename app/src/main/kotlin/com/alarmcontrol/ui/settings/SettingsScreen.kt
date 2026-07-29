@@ -4,6 +4,7 @@ import android.net.Uri
 import android.text.format.DateUtils
 import android.text.format.Formatter
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.appcompat.app.AppCompatDelegate
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,6 +21,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -86,6 +88,10 @@ fun SettingsRoute(
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val appLanguage =
+        AppLanguage.fromLanguageTags(
+            AppCompatDelegate.getApplicationLocales().toLanguageTags(),
+        )
     DisposableEffect(lifecycleOwner) {
         val observer =
             LifecycleEventObserver { _, event ->
@@ -105,9 +111,14 @@ fun SettingsRoute(
         onBack = onBack,
         onFilteringChange = viewModel::setFilteringEnabled,
         onDynamicColorChange = viewModel::setDynamicColorEnabled,
+        appLanguage = appLanguage,
+        onAppLanguageChange = { language ->
+            AppCompatDelegate.setApplicationLocales(language.toLocaleList())
+        },
         onExternalAutomationChange = viewModel::setExternalAutomationEnabled,
         onRotateAutomationToken = viewModel::rotateExternalAutomationToken,
         onCopyAutomationToken = viewModel::copyAutomationToken,
+        onSemanticClassifierChange = viewModel::setSemanticClassifierEnabled,
         onLlmAnalysisChange = viewModel::setLlmAnalysisEnabled,
         onSemanticAnalysisScopeChange = viewModel::setSemanticAnalysisScope,
         onEventRetentionChange = viewModel::setEventRetentionDays,
@@ -158,6 +169,7 @@ fun SettingsScreen(
     onCompleteImport: (Uri?) -> Unit,
     onUserMessageShown: () -> Unit,
     onSemanticAnalysisScopeChange: (SemanticAnalysisScope) -> Unit = {},
+    onSemanticClassifierChange: (Boolean) -> Unit = {},
     onRemoveLlmModel: () -> Unit = {},
     onEventRetentionChange: (Int) -> Unit = {},
     onInsightRetentionChange: (Int) -> Unit = {},
@@ -176,6 +188,8 @@ fun SettingsScreen(
     onRotateAutomationToken: () -> Unit = {},
     onCopyAutomationToken: (String) -> Unit = {},
     onDynamicColorChange: (Boolean) -> Unit = {},
+    appLanguage: AppLanguage = AppLanguage.SYSTEM,
+    onAppLanguageChange: (AppLanguage) -> Unit = {},
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
     var backupPassword by remember { mutableStateOf("") }
@@ -193,9 +207,7 @@ fun SettingsScreen(
         rememberLauncherForActivityResult(CreateLocalDocument("application/json"), onCompleteExport)
     val importLauncher = rememberLauncherForActivityResult(OpenLocalDocument(), onCompleteImport)
     val modelImportLauncher =
-        rememberLauncherForActivityResult(OpenLocalDocument()) { uri ->
-            uri?.let(onImportLlmModel)
-        }
+        rememberLauncherForActivityResult(OpenLocalDocument()) { it?.let(onImportLlmModel) }
     var pendingClear by remember { mutableStateOf<ClearAction?>(null) }
 
     SettingsContent(
@@ -215,9 +227,12 @@ fun SettingsScreen(
         onIncludeLearningFeedbackChange = { includeLearningFeedback = it },
         onFilteringChange = onFilteringChange,
         onDynamicColorChange = onDynamicColorChange,
+        appLanguage = appLanguage,
+        onAppLanguageChange = onAppLanguageChange,
         onExternalAutomationChange = onExternalAutomationChange,
         onRotateAutomationToken = onRotateAutomationToken,
         onCopyAutomationToken = onCopyAutomationToken,
+        onSemanticClassifierChange = onSemanticClassifierChange,
         onLlmAnalysisChange = onLlmAnalysisChange,
         onSemanticAnalysisScopeChange = onSemanticAnalysisScopeChange,
         onChooseModel = { modelImportLauncher.launch(arrayOf("application/octet-stream", "application/zip")) },
@@ -283,9 +298,12 @@ private fun SettingsContent(
     onIncludeLearningFeedbackChange: (Boolean) -> Unit,
     onFilteringChange: (Boolean) -> Unit,
     onDynamicColorChange: (Boolean) -> Unit,
+    appLanguage: AppLanguage,
+    onAppLanguageChange: (AppLanguage) -> Unit,
     onExternalAutomationChange: (Boolean) -> Unit,
     onRotateAutomationToken: () -> Unit,
     onCopyAutomationToken: (String) -> Unit,
+    onSemanticClassifierChange: (Boolean) -> Unit,
     onLlmAnalysisChange: (Boolean) -> Unit,
     onSemanticAnalysisScopeChange: (SemanticAnalysisScope) -> Unit,
     onChooseModel: () -> Unit,
@@ -338,6 +356,8 @@ private fun SettingsContent(
                                 state = state,
                                 onFilteringChange = onFilteringChange,
                                 onDynamicColorChange = onDynamicColorChange,
+                                appLanguage = appLanguage,
+                                onAppLanguageChange = onAppLanguageChange,
                                 onOpenNotificationAccess = onOpenNotificationAccess,
                                 onOpenBatterySettings = onOpenBatterySettings,
                                 onNavigate = onNavigate,
@@ -350,8 +370,9 @@ private fun SettingsContent(
                                 onCopyAutomationToken = onCopyAutomationToken,
                             )
                         SettingsDestination.LOCAL_AI ->
-                            LlmSettingsSection(
+                            LocalAiSettingsSection(
                                 state,
+                                onSemanticClassifierChange,
                                 onLlmAnalysisChange,
                                 onSemanticAnalysisScopeChange,
                                 onChooseModel,
@@ -478,6 +499,8 @@ private fun SettingsOverview(
     state: SettingsUiState,
     onFilteringChange: (Boolean) -> Unit,
     onDynamicColorChange: (Boolean) -> Unit,
+    appLanguage: AppLanguage,
+    onAppLanguageChange: (AppLanguage) -> Unit,
     onOpenNotificationAccess: () -> Unit,
     onOpenBatterySettings: () -> Unit,
     onNavigate: (SettingsDestination) -> Unit,
@@ -501,6 +524,11 @@ private fun SettingsOverview(
                 checked = state.dynamicColorEnabled,
                 onCheckedChange = onDynamicColorChange,
             )
+            HorizontalDivider()
+            AppLanguagePicker(
+                selected = appLanguage,
+                onSelect = onAppLanguageChange,
+            )
         }
     }
     SettingsNavigationCard(
@@ -515,7 +543,18 @@ private fun SettingsOverview(
     )
     SettingsNavigationCard(
         title = stringResource(R.string.settings_llm_section),
-        summary = state.llmStatusText(),
+        summary =
+            stringResource(
+                R.string.settings_local_ai_overview_summary,
+                stringResource(
+                    if (state.semanticClassifierEnabled) {
+                        R.string.profiles_active
+                    } else {
+                        R.string.profiles_inactive
+                    },
+                ),
+                state.llmStatusText(),
+            ),
         status = null,
         onClick = { onNavigate(SettingsDestination.LOCAL_AI) },
     )
@@ -531,6 +570,69 @@ private fun SettingsOverview(
         status = null,
         onClick = { onNavigate(SettingsDestination.DATA_PRIVACY) },
     )
+}
+
+@Composable
+private fun AppLanguagePicker(
+    selected: AppLanguage,
+    onSelect: (AppLanguage) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val title = stringResource(R.string.settings_app_language)
+    val subtitle = stringResource(R.string.settings_app_language_summary)
+    val picker = @Composable {
+        Box {
+            OutlinedButton(
+                onClick = { expanded = true },
+                modifier = Modifier.semantics { contentDescription = title },
+            ) {
+                Text(stringResource(selected.labelRes))
+                Icon(Icons.Filled.KeyboardArrowDown, contentDescription = null)
+            }
+            DropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+            ) {
+                AppLanguage.entries.forEach { language ->
+                    DropdownMenuItem(
+                        text = { Text(stringResource(language.labelRes)) },
+                        onClick = {
+                            expanded = false
+                            onSelect(language)
+                        },
+                    )
+                }
+            }
+        }
+    }
+    val labels = @Composable {
+        Column {
+            Text(title, style = MaterialTheme.typography.titleMedium)
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+    if (LocalDensity.current.fontScale >= LARGE_FONT_SCALE) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            labels()
+            Box(Modifier.align(Alignment.End)) { picker() }
+        }
+    } else {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Box(Modifier.weight(1f)) { labels() }
+            picker()
+        }
+    }
 }
 
 @Composable
@@ -784,13 +886,21 @@ private val AutomationOutcomeUi.labelRes: Int
         }
 
 @Composable
-private fun LlmSettingsSection(
+private fun LocalAiSettingsSection(
     state: SettingsUiState,
+    onSemanticClassifierChange: (Boolean) -> Unit,
     onLlmAnalysisChange: (Boolean) -> Unit,
     onSemanticAnalysisScopeChange: (SemanticAnalysisScope) -> Unit,
     onChooseModel: () -> Unit,
     onRemoveModel: () -> Unit,
 ) {
+    SettingSwitchRow(
+        title = stringResource(R.string.settings_semantic_classifier_enabled),
+        subtitle = stringResource(R.string.settings_semantic_classifier_summary),
+        checked = state.semanticClassifierEnabled,
+        onCheckedChange = onSemanticClassifierChange,
+    )
+    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
     SettingSwitchRow(
         title = stringResource(R.string.settings_llm_enabled),
         subtitle =

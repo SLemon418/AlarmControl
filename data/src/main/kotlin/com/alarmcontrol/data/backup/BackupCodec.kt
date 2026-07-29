@@ -420,6 +420,7 @@ private fun JSONArray?.orEmpty(): JSONArray = this ?: JSONArray()
 private fun SettingsSnapshot.toJson(): JSONObject =
     JSONObject()
         .put("filteringEnabled", filteringEnabled)
+        .put("semanticClassifierEnabled", semanticClassifierEnabled)
         .put("externalAutomationEnabled", externalAutomationEnabled)
         .put("llmAnalysisEnabled", llmAnalysisEnabled)
         .put("semanticAnalysisScope", semanticAnalysisScope.name)
@@ -429,6 +430,7 @@ private fun SettingsSnapshot.toJson(): JSONObject =
 private fun JSONObject.toSettings(): SettingsSnapshot =
     SettingsSnapshot(
         filteringEnabled = optBoolean("filteringEnabled", true),
+        semanticClassifierEnabled = optBoolean("semanticClassifierEnabled", true),
         externalAutomationEnabled = optBoolean("externalAutomationEnabled", false),
         llmAnalysisEnabled = optBoolean("llmAnalysisEnabled", false),
         llmAutoActionsEnabled = false,

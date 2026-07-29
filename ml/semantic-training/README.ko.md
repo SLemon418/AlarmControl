@@ -162,7 +162,7 @@ locale별 macro-F1 0.80 이상, 신뢰 가능한 actionable coverage 전체
 배포 후보는 명시적으로 dynamic INT8 변환을 요청한다.
 
 ```bash
-ml/llm-training/.venv-convert/bin/python \
+/absolute/path/to/litert-venv/bin/python \
   ml/semantic-training/convert_koelectra_litert.py \
   --model-dir /absolute/path/to/training-output/best \
   --output-dir /absolute/path/to/litert-output \

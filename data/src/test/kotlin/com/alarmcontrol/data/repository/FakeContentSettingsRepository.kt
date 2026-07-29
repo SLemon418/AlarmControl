@@ -22,6 +22,7 @@ internal class FakeContentSettingsRepository(
     private val excludedPackagesState = MutableStateFlow(excludedPackages)
 
     override val filteringEnabled: Flow<Boolean> = flowOf(true)
+    override val semanticClassifierEnabled: Flow<Boolean> = flowOf(true)
     override val llmAnalysisEnabled: Flow<Boolean> = flowOf(false)
     override val llmAutoActionsEnabled: Flow<Boolean> = flowOf(false)
     override val externalAutomationEnabled: Flow<Boolean> = flowOf(false)
@@ -33,6 +34,8 @@ internal class FakeContentSettingsRepository(
     override val contentExcludedPackages: Flow<Set<String>> = excludedPackagesState
 
     override suspend fun setFilteringEnabled(enabled: Boolean) = Unit
+
+    override suspend fun setSemanticClassifierEnabled(enabled: Boolean) = Unit
 
     override suspend fun setLlmAnalysisEnabled(enabled: Boolean) = Unit
 

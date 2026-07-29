@@ -137,6 +137,25 @@ class SettingsRepositoryImplTest {
         }
 
     @Test
+    fun `bundled semantic classifier defaults on and persists user choice`() =
+        runTest {
+            val repository = repository()
+
+            assertTrue(repository.semanticClassifierEnabled.first())
+            repository.setSemanticClassifierEnabled(false)
+
+            assertFalse(repository.semanticClassifierEnabled.first())
+            assertFalse(repository.snapshot().semanticClassifierEnabled)
+
+            repository.restore(SettingsSnapshot(semanticClassifierEnabled = true))
+            assertTrue(repository.semanticClassifierEnabled.first())
+
+            repository.setSemanticClassifierEnabled(false)
+            repository.reset()
+            assertTrue(repository.semanticClassifierEnabled.first())
+        }
+
+    @Test
     fun `DataStore read failure pauses filtering and aborts authoritative snapshots`() =
         runTest {
             val failingStore =
@@ -149,6 +168,7 @@ class SettingsRepositoryImplTest {
             val repository = repository(failingStore)
 
             assertFalse(repository.filteringEnabled.first())
+            assertFalse(repository.semanticClassifierEnabled.first())
             assertTrue(runCatching { repository.snapshot() }.exceptionOrNull() is IOException)
             assertTrue(runCatching { repository.maintenanceSnapshot() }.exceptionOrNull() is IOException)
         }

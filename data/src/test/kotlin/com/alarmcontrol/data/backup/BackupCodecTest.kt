@@ -116,6 +116,7 @@ class BackupCodecTest {
             settings =
                 SettingsSnapshot(
                     filteringEnabled = false,
+                    semanticClassifierEnabled = false,
                     eventRetentionDays = 90,
                     dailyInsightRetentionDays = 730,
                     semanticAnalysisScope = SemanticAnalysisScope.ALL_NOTIFICATIONS,
@@ -141,6 +142,16 @@ class BackupCodecTest {
     @Test
     fun `encoded form carries the format version`() {
         assertEquals(true, BackupCodec.encode(sample).contains("\"version\": ${BackupCodec.FORMAT_VERSION}"))
+    }
+
+    @Test
+    fun `backup without bundled classifier preference restores enabled`() {
+        val root = JSONObject(BackupCodec.encode(sample))
+        root.getJSONObject("settings").remove("semanticClassifierEnabled")
+
+        val restored = BackupCodec.decode(root.toString())
+
+        assertEquals(true, restored.settings?.semanticClassifierEnabled)
     }
 
     @Test

@@ -37,6 +37,7 @@ Do not commit `local.properties`.
 ./gradlew ktlintFormat               # apply Kotlin formatting fixes
 ./gradlew detekt ktlintCheck         # static-analysis/style checks only
 ./gradlew :app:offlineGuard          # merged manifests + runtime dependency graphs
+./gradlew build                      # full device-independent build and quality gates
 ./gradlew --dependency-verification strict check
 ```
 
@@ -146,10 +147,10 @@ enforced in the target regions, follow the current
 and register `com.alarmcontrol` plus the long-term release signing key through Android Developer
 Console (or through Play Console if the developer maintains one).
 
-The optional generative LLM is never packaged with the app release or counted as app payload. If a
-compatible model is made available, distribute it separately with its license and hash; the user
-then imports it through the Storage Access Framework. The GitHub app-release workflow does not
-upload an LLM.
+The optional generative LLM is never packaged with the app release or counted as app payload.
+AlarmControl does not publish an LLM: a user may prepare a compatible self-contained `.task` under
+the model provider's terms and import it through the Storage Access Framework. The GitHub
+app-release workflow does not upload an LLM.
 
 ## Instrumented tests
 
@@ -157,7 +158,7 @@ The JVM suite does not replace tests that require the real Android runtime. With
 or emulator, run:
 
 ```sh
-./gradlew :data:connectedDebugAndroidTest  # supported Room v1/v2/v3/v10/v12 -> v13 migrations
+./gradlew :data:connectedDebugAndroidTest  # supported Room v1/v2/v3/v10/v12 -> v15 migrations
 ./gradlew :ml:connectedDebugAndroidTest    # bundled TFLite runtime/asset compatibility
 ./gradlew :app:connectedDebugAndroidTest   # Activity/Hilt, listener, automation, LLM fallback, WorkManager
 ```
@@ -247,9 +248,8 @@ Performance numbers are device-specific and are not inferred from APK-only compi
   suppress or weaken the guard.
 - **No compatible LLM model** — the optional MediaPipe model is not part of the build. Import a
   compatible local quantized model from Settings; rules and bundled TFLite still work without it.
-  To create the app-specific Gemma candidate, follow
-  [`ml/llm-training/README.md`](ml/llm-training/README.md); do not import safetensors, GGUF, or the
-  intermediate `.tflite`.
+  Follow the [custom LLM guide](docs/CUSTOM_LLM.md); safetensors, GGUF, and an intermediate
+  `.tflite` are not importable substitutes for a compatible self-contained `.task`.
 - **LLM integrity record missing/mismatched** — re-import the trusted local model from Settings.
   AlarmControl intentionally will not load a model whose import-time SHA-256 record cannot be
   verified.

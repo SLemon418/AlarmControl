@@ -31,7 +31,8 @@ download, or `INTERNET` permission. Notification data stays on the device.
 7. Change the rule to **Active** only after its matches are safe.
 
 The bundled classifiers work without any additional model file. The optional generative LLM is not
-required for normal filtering.
+required for normal filtering. The seven-intent classifier is enabled by default and can be turned
+off under **Settings → On-device semantic analysis**.
 
 See the [user guide](docs/USER_GUIDE.md) for checksum commands, updates, backup, safe rule setup,
 automation, and troubleshooting.
@@ -45,11 +46,13 @@ automation, and troubleshooting.
 - **Honest actions:** Cancel and Snooze call Android notification APIs. Keep and Log only are
   record-only decisions with no hidden platform side effect.
 - **On-device categorization:** bundled local models classify broad categories and seven semantic
-  intents. Missing, ambiguous, timed-out, or low-confidence results fail open.
+  intents. The seven-intent model can be disabled independently; disabled, missing, ambiguous,
+  timed-out, or low-confidence semantic results fail open.
 - **Local learning:** explicit label corrections adjust package-level predictions locally without
   runtime backpropagation or data export.
 - **Insights and records:** review activity, date-range trends, app/channel/rule breakdowns,
   decision traces, and conservative rule suggestions.
+- **English and Korean UI:** follow the system language or choose either language inside Settings.
 - **Profiles and automation:** group rules into profiles and control them from the app, Quick
   Settings, launcher shortcuts, Samsung Modes and Routines, Tasker, or MacroDroid.
 - **Local backup and restore:** export rules, profiles, selected settings, and daily summaries to a
@@ -101,14 +104,15 @@ Only trusted bundled semantic results may become an Active-rule signal. The mode
 vocabulary, labels, and manifest are hash-bound assets. Classification failure leaves the
 notification unchanged.
 
-A separate MediaPipe `.task` generative LLM can be imported manually from local storage for
-compatibility work. AlarmControl never downloads it. The current build has no verified automatic
-background LLM profile, and generative results are observation-only: they cannot retroactively
-cancel or snooze a notification.
+A user-built, self-contained MediaPipe `.task` generative model can be imported manually from local
+storage for compatibility checks. AlarmControl does not provide, train, or download that model.
+The current build verifies storage integrity and native loading only: it has no verified automatic
+background profile or manual inference screen, so an unverified import is not routed to notification
+analysis.
 
-Training, conversion, and evaluation details live in
-[ml/semantic-training](ml/semantic-training/README.md) and
-[ml/llm-training](ml/llm-training/README.md).
+The bundled encoder pipeline lives in [ml/semantic-training](ml/semantic-training/README.md).
+The fixed contract for preparing a user-supplied generative model is documented in the
+[custom LLM guide](docs/CUSTOM_LLM.md).
 
 ## Installation and updates
 
@@ -145,6 +149,7 @@ See [Automation: Samsung Routines, Tasker, and MacroDroid](docs/automation.md).
 | [Rules guide](docs/RULES_GUIDE.md) | Conditions, priorities, Monitor/Active behavior, and platform limits |
 | [Automation guide](docs/automation.md) | Samsung Routines, Quick Settings, Tasker, and MacroDroid |
 | [Privacy and local data](docs/PRIVACY.md) | Stored data, encryption, retention, backup, and deletion |
+| [Custom LLM guide](docs/CUSTOM_LLM.md) | Contract for training, converting, and importing a user-supplied `.task` |
 | [Build guide](BUILD.md) | Toolchain, tests, signing, and GitHub Release preparation |
 | [Architecture rules](CLAUDE.md) | Locked offline, privacy, module, and release constraints |
 

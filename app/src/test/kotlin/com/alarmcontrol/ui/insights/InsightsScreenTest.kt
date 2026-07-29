@@ -174,6 +174,37 @@ class InsightsScreenTest {
         composeRule.onNodeWithText("Analyzing your local activity", substring = true).assertIsDisplayed()
     }
 
+    @Test
+    fun todayMetricsShowAllFourRecordedActions() {
+        composeRule.setContent {
+            InsightsScreen(
+                state =
+                    InsightsUiState(
+                        isLoading = false,
+                        metrics =
+                            InsightsMetrics(
+                                cancelled = 1,
+                                snoozed = 2,
+                                loggedOnly = 3,
+                                kept = 4,
+                            ),
+                    ),
+                onUndo = {},
+                onRecategorize = { _, _, _, _ -> },
+                onUserMessageShown = {},
+            )
+        }
+
+        composeRule.onNodeWithContentDescription("Cancelled: 1").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Snoozed: 2").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Logged only: 3").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Kept: 4").assertIsDisplayed()
+        composeRule
+            .onNodeWithText("10 decisions recorded locally today")
+            .performScrollTo()
+            .assertIsDisplayed()
+    }
+
     // Labels are already resolved by the ViewModel: a real rule name and a deleted-rule fallback.
     private val day =
         DailyInsightUi(
@@ -298,7 +329,12 @@ class InsightsScreenTest {
             )
         }
 
-        composeRule.onNodeWithText("The storage limit removed some activity", substring = true).assertIsDisplayed()
+        composeRule
+            .onNodeWithTag(INSIGHTS_LIST_TEST_TAG)
+            .performScrollToNode(hasText("The storage limit removed some activity", substring = true))
+        composeRule
+            .onNodeWithText("The storage limit removed some activity", substring = true)
+            .assertIsDisplayed()
     }
 
     @Test
@@ -609,6 +645,14 @@ class InsightsScreenTest {
         val list = composeRule.onNodeWithTag(INSIGHTS_ANALYSIS_TEST_TAG)
         composeRule.onNodeWithText("Local analysis").assertIsDisplayed()
         composeRule.onNodeWithText("10 of 20 silenced (50%)").assertIsDisplayed()
+        list.performScrollToNode(hasText("All notifications"))
+        composeRule.onNodeWithText("All notifications").assertIsDisplayed()
+        composeRule.onNodeWithText("Silenced").assertIsDisplayed()
+        list.performScrollToNode(hasText("Time of day"))
+        composeRule
+            .onNodeWithContentDescription(
+                "24-hour chart showing all and silenced notifications. Peak at 09:00 with 20 notifications.",
+            ).assertIsDisplayed()
         list.performScrollToNode(hasText("Shop"))
         composeRule.onNodeWithText("Shop").assertIsDisplayed()
         list.performScrollToNode(hasText("Quiet offers"))

@@ -858,6 +858,7 @@ class BackupRepositoryImplTest {
             val desired =
                 SettingsSnapshot(
                     filteringEnabled = true,
+                    semanticClassifierEnabled = false,
                     externalAutomationEnabled = true,
                     llmAnalysisEnabled = true,
                 )
@@ -1054,6 +1055,8 @@ internal class InMemoryBackupSettingsRepository : SettingsRepository {
     var failEnabledRestore = false
 
     override val filteringEnabled: Flow<Boolean> = state.mapValue(SettingsSnapshot::filteringEnabled)
+    override val semanticClassifierEnabled: Flow<Boolean> =
+        state.mapValue(SettingsSnapshot::semanticClassifierEnabled)
     override val llmAnalysisEnabled: Flow<Boolean> = state.mapValue(SettingsSnapshot::llmAnalysisEnabled)
     override val llmAutoActionsEnabled: Flow<Boolean> = kotlinx.coroutines.flow.flowOf(false)
     override val externalAutomationEnabled: Flow<Boolean> = state.mapValue(SettingsSnapshot::externalAutomationEnabled)
@@ -1065,6 +1068,9 @@ internal class InMemoryBackupSettingsRepository : SettingsRepository {
     override val contentExcludedPackages: Flow<Set<String>> = kotlinx.coroutines.flow.flowOf(emptySet())
 
     override suspend fun setFilteringEnabled(enabled: Boolean) = update { copy(filteringEnabled = enabled) }
+
+    override suspend fun setSemanticClassifierEnabled(enabled: Boolean) =
+        update { copy(semanticClassifierEnabled = enabled) }
 
     override suspend fun setLlmAnalysisEnabled(enabled: Boolean) = update { copy(llmAnalysisEnabled = enabled) }
 

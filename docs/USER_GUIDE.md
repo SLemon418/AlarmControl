@@ -11,7 +11,7 @@ automatic update, or runtime network access. It evaluates notifications after An
 ## Requirements
 
 - Android 8.0 (API 26) or later
-- A certified Android device that can grant notification-listener access
+- An Android device that can grant notification-listener access
 - Enough free storage for the universal APK and installed app
 - A trusted way to obtain the APK from this repository's GitHub Releases page
 
@@ -118,6 +118,13 @@ data; use **Settings → Data & privacy** for deletion.
 The Settings screen also reports the current battery policy. Exempting AlarmControl from battery
 optimization is optional. With normal optimization enabled, periodic daily summaries may run late,
 but the notification listener and live Records view remain separate from that schedule.
+
+### Change the app language
+
+AlarmControl has complete English and Korean interfaces. Open **Settings → App language** and
+choose **System default**, **English**, or **한국어**. Changing the selection recreates the current
+screen so Android can reload translated resources; it does not clear rules or local data. On
+Android 13 and later this selection stays synchronized with Android's App Languages setting.
 
 ## Safe first-rule setup
 
@@ -355,8 +362,12 @@ important backup and test that it can be opened before uninstalling or resetting
 ### Bundled classifiers
 
 The category and seven-intent semantic classifiers are bundled in the APK. They run locally and
-need no setup. Trusted semantic output may satisfy a rule condition; low-confidence,
-`AMBIGUOUS`, unavailable, or timed-out output leaves the notification unchanged.
+need no additional model file. The seven-intent classifier is on by default and can be disabled
+under **Settings → On-device semantic analysis → Use bundled 7-intent classifier**. Turning it off
+prevents seven-intent inference calls. Notifications whose action depends on semantic or advertisement
+conditions fail open and remain unchanged; unrelated notifications continue with the remaining
+rule signals. Trusted semantic output may satisfy a rule condition; low-confidence, `AMBIGUOUS`,
+unavailable, or timed-out output also leaves the notification unchanged.
 
 Corrections made from Insights update local package-level feedback only. No notification corpus,
 gradient, or model update is sent elsewhere.
@@ -370,8 +381,13 @@ advanced compatibility work:
 - only import a file from a source you trust;
 - the file is copied into private app storage and checked against its recorded SHA-256 after import;
 - that integrity check detects later changes but does not certify the model publisher;
-- the current build has no verified profile for automatic background LLM analysis;
-- generative results are observation-only and cannot change an already handled notification.
+- the current build has no verified profile for automatic background LLM analysis or a manual
+  inference screen; and
+- an unverified import can reach native-load `Ready` state but is not used to analyze notifications.
+
+AlarmControl does not provide or train this model. A technical user may prepare a compatible
+self-contained text-only `.task` by following the [custom LLM guide](CUSTOM_LLM.md). Training
+weights, GGUF, safetensors, LoRA adapters, and raw `.tflite` files cannot be imported directly.
 
 No optional LLM is required for rules, bundled semantic classification, Insights, profiles,
 automation, or backup.

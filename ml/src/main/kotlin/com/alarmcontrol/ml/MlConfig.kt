@@ -24,16 +24,16 @@ internal object MlConfig {
 
     /**
      * Path (relative to the app's private `filesDir`) where the on-device generative LLM model is
-     * expected (Milestone 4). The model is **not** bundled in the APK — it's far too large — so it's
-     * imported by the user through local Storage Access Framework UI; if absent, the LLM analyzer
-     * reports unavailable and the app falls back to rules + the classifier (§5). Nothing is ever
-     * downloaded by the app (§3).
+     * expected (Milestone 4). The model is **not** bundled in the APK; it is prepared and imported
+     * by the user through local Storage Access Framework UI. If absent, the LLM analyzer reports
+     * unavailable and the app falls back to rules + the classifier (§5). Nothing is ever downloaded
+     * by the app (§3).
      */
     const val LLM_MODEL_FILE = "llm/ad-context-model.task"
 
     /**
-     * Combined prompt + output context. This must match the KV-cache length used by
-     * `ml/llm-training/convert_to_litert.py`; MediaPipe's `maxTokens` is not an output-only limit.
+     * Combined prompt + output context. An imported task's KV-cache length must match this value;
+     * MediaPipe's `maxTokens` is not an output-only limit.
      */
     const val LLM_CONTEXT_TOKENS = 4_096
 

@@ -9,10 +9,11 @@ read system constraints; it cannot transmit data.
 
 ## Transient processing
 
-Android supplies notification title/body content to the listener so local text rules, the bundled
-classifier, and an explicitly enabled local LLM can evaluate it. By default, that content exists
-only in memory for the current processing job. A timeout, model failure, or missing signal falls
-back to the classical rules path.
+Android supplies notification title/body content to the listener so local text rules and the
+bundled classifier can evaluate it. AlarmControl v0.1.0 does not pass notification content to an
+imported LLM: imported models remain disabled until the exact local model has a verified
+compatibility profile. By default, notification content exists only in memory for the current
+processing job. A timeout, model failure, or missing signal falls back to the classical rules path.
 
 ## Data stored locally
 
@@ -66,7 +67,8 @@ does not perform cloud or runtime backpropagation.
 
 Storage Access Framework export/import requests are local-only. Backup v6 can contain rules,
 profiles, selected settings, richer channel/app/hour/semantic daily summaries, and supported
-condition types, including semantic-analysis scope and breakdown-completeness metadata. It can
+condition types, including the bundled-classifier preference, semantic-analysis scope, and
+breakdown-completeness metadata. It can
 optionally include package-level learning votes only inside a password-derived PBKDF2-HMAC-SHA256 +
 AES-256-GCM envelope. Plain backup is intentionally portable and should be treated as readable by
 anyone who receives the file. New encrypted exports require at least eight password characters;

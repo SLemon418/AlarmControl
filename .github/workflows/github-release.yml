@@ -136,7 +136,6 @@ jobs:
           ./gradlew \
             '-Dorg.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8' \
             --no-daemon \
-            --max-workers=1 \
             --dependency-verification strict \
             :app:releaseCandidate
 

@@ -101,13 +101,19 @@ change the Active winner, the bounded real-time inference runs before that actio
 semantic work runs after the Active decision and cannot change it. `AMBIGUOUS`, low-confidence,
 timed-out, missing, or invalid output is unavailable and fails open.
 
+The bundled seven-intent classifier is enabled by default. Turning it off in **Settings → On-device
+semantic analysis** prevents both real-time and Monitor inference calls. Notifications whose action
+depends on semantic or advertisement conditions remain unchanged; other notifications continue
+with the remaining rule signals.
+
 `IsAdvertisement(true)` remains compatible and means `MARKETING`; it is not a separate eighth
 class. User corrections update a local seven-class shrinkage prior; no gradients or notification
 text are exported.
 
-The separately imported generative LLM is optional and observation-only. Its late output may enrich
-future local corrections, statistics, or suggestions, but it can never trigger or retroactively
-change a notification action.
+AlarmControl v0.1.0 does not run an imported generative LLM because no compatibility profile is
+enabled. If a future verified profile enables this optional path, its output remains
+observation-only: it may enrich future local corrections, statistics, or suggestions, but it can
+never trigger or retroactively change a notification action.
 
 ## Analysis, explanations, and suggestions
 

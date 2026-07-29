@@ -666,6 +666,7 @@ private class RetentionSettings(
     excludedPackages: Set<String>,
 ) : SettingsRepository {
     override val filteringEnabled: Flow<Boolean> = flowOf(true)
+    override val semanticClassifierEnabled: Flow<Boolean> = flowOf(true)
     override val llmAnalysisEnabled: Flow<Boolean> = flowOf(false)
     override val llmAutoActionsEnabled: Flow<Boolean> = flowOf(false)
     override val externalAutomationEnabled: Flow<Boolean> = flowOf(false)
@@ -677,6 +678,8 @@ private class RetentionSettings(
     override val contentExcludedPackages: Flow<Set<String>> = flowOf(excludedPackages)
 
     override suspend fun setFilteringEnabled(enabled: Boolean) = Unit
+
+    override suspend fun setSemanticClassifierEnabled(enabled: Boolean) = Unit
 
     override suspend fun setLlmAnalysisEnabled(enabled: Boolean) = Unit
 

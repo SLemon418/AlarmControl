@@ -147,9 +147,10 @@ Release 자산은 저장소 공개 범위를 그대로 따릅니다. 비공개 �
 Android Developer Console(또는 계속 보유할 Play Console)에서 `com.alarmcontrol`과 장기
 Release 서명키를 등록해야 합니다.
 
-선택형 생성 LLM은 앱 Release에 포함하거나 앱 payload로 계산하지 않습니다. 호환 모델을
-제공할 경우 라이선스와 해시를 명시한 별도 파일로 배포하며 사용자가 Storage Access
-Framework로 직접 가져옵니다. GitHub 앱 Release 워크플로는 LLM을 업로드하지 않습니다.
+선택형 생성 LLM은 앱 Release에 포함하거나 앱 payload로 계산하지 않습니다. AlarmControl은
+LLM을 배포하지 않습니다. 사용자가 모델 제공자의 조건에 따라 호환되는 self-contained
+`.task`를 준비하고 Storage Access Framework로 직접 가져올 수 있습니다. GitHub 앱 Release
+워크플로는 LLM을 업로드하지 않습니다.
 
 ## 계측 테스트
 
@@ -157,7 +158,7 @@ JVM 테스트는 실제 Android 런타임 검증을 대체하지 않습니다. �
 있을 때 다음 명령을 실행합니다.
 
 ```sh
-./gradlew :data:connectedDebugAndroidTest  # Room v1/v2/v3/v10/v12 -> v13 마이그레이션
+./gradlew :data:connectedDebugAndroidTest  # Room v1/v2/v3/v10/v12 -> v15 마이그레이션
 ./gradlew :ml:connectedDebugAndroidTest    # 번들 TFLite 런타임/에셋 호환성
 ./gradlew :app:connectedDebugAndroidTest   # Activity/Hilt, 리스너, 자동화, LLM 폴백, WorkManager
 ```
@@ -250,9 +251,8 @@ AndroidX TraceProcessor 방식은 기기 내부 localhost HTTP 소켓 때문에 
   억제하거나 약화하지 않습니다.
 - **No compatible LLM model**: MediaPipe 모델은 앱에 포함되지 않습니다. 설정에서 호환되는
   로컬 양자화 모델을 가져옵니다. 모델이 없어도 규칙과 번들 TFLite는 정상 동작합니다.
-  앱 전용 Gemma 후보 생성 절차는
-  [`ml/llm-training/README.ko.md`](ml/llm-training/README.ko.md)를 따릅니다.
-  safetensors, GGUF, 중간 `.tflite`는 직접 가져오지 않습니다.
+  [사용자 LLM 안내](docs/CUSTOM_LLM.ko.md)를 따르세요. safetensors, GGUF, 중간
+  `.tflite`는 호환되는 self-contained `.task`를 대신해 직접 가져올 수 없습니다.
 - **LLM 무결성 기록 누락/불일치**: 설정에서 신뢰하는 로컬 모델을 다시 가져옵니다.
   AlarmControl은 가져올 때 기록한 SHA-256 값을 검증할 수 없는 모델을 의도적으로
   불러오지 않습니다.

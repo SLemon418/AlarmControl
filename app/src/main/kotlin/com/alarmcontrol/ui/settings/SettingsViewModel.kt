@@ -87,8 +87,14 @@ class SettingsViewModel
             combine(
                 settingsRepository.llmAnalysisEnabled,
                 settingsRepository.semanticAnalysisScope,
-                ::LlmSettings,
-            ).let { llmSettings ->
+                settingsRepository.semanticClassifierEnabled,
+            ) { llmEnabled, semanticScope, classifierEnabled ->
+                LlmSettings(
+                    enabled = llmEnabled,
+                    scope = semanticScope,
+                    classifierEnabled = classifierEnabled,
+                )
+            }.let { llmSettings ->
                 val generalSettings =
                     combine(
                         settingsRepository.filteringEnabled,
@@ -146,6 +152,7 @@ class SettingsViewModel
                         automation.token,
                         llm.enabled,
                         llm.scope,
+                        llm.classifierEnabled,
                         retention.eventDays,
                         retention.insightDays,
                         general.dynamicColor,
@@ -182,6 +189,7 @@ class SettingsViewModel
                     llmAnalysisEnabled = settings.llmEnabled,
                     llmBackgroundAnalysisAvailable = llmBackgroundAnalysisAvailable,
                     semanticAnalysisScope = settings.semanticScope,
+                    semanticClassifierEnabled = settings.semanticClassifierEnabled,
                     eventRetentionDays = settings.eventDays,
                     dailyInsightRetentionDays = settings.insightDays,
                     dynamicColorEnabled = settings.dynamicColor,
@@ -240,6 +248,10 @@ class SettingsViewModel
 
         fun setFilteringEnabled(enabled: Boolean) {
             launchSettingUpdate { settingsRepository.setFilteringEnabled(enabled) }
+        }
+
+        fun setSemanticClassifierEnabled(enabled: Boolean) {
+            launchSettingUpdate { settingsRepository.setSemanticClassifierEnabled(enabled) }
         }
 
         fun setLlmAnalysisEnabled(enabled: Boolean) {
@@ -644,6 +656,7 @@ class SettingsViewModel
             val automationToken: String,
             val llmEnabled: Boolean,
             val semanticScope: SemanticAnalysisScope,
+            val semanticClassifierEnabled: Boolean,
             val eventDays: Int,
             val insightDays: Int,
             val dynamicColor: Boolean,
@@ -660,6 +673,7 @@ class SettingsViewModel
         private data class LlmSettings(
             val enabled: Boolean,
             val scope: SemanticAnalysisScope,
+            val classifierEnabled: Boolean,
         )
 
         private data class AutomationSettings(

@@ -3,10 +3,10 @@ package com.alarmcontrol.ml.llm
 import com.alarmcontrol.core.filtering.SemanticIntent
 
 /**
- * Structured output of an on-device LLM context analysis (Milestone 4). Designed from day one around
- * semantic advertisement detection: [isAdvertisement] is the headline verdict, [confidenceScore] is a
- * calibrated 0f‥1f probability, and [reasoning] is a short in-memory justification. Reasoning must
- * never be persisted, backed up, or logged.
+ * Structured output of an on-device LLM context analysis (Milestone 4). [intent] is the seven-way
+ * semantic verdict, [confidenceScore] is a bounded model-reported score, and [reasoning] is a short
+ * in-memory justification. The score is not a calibrated probability unless the exact model has
+ * been evaluated and calibrated separately. Reasoning must never be persisted, backed up, or logged.
  *
  * Pure data — no Android or LLM-runtime types — so the rules engine and UI consume it without
  * depending on any inference library (CLAUDE.md §4/§5).

@@ -37,6 +37,11 @@
     <string name="back">뒤로</string>
     <string name="settings_dynamic_color">동적 색상 사용</string>
     <string name="settings_dynamic_color_summary">AlarmControl 기본 색상 대신 이 기기의 배경화면에서 가져온 색상을 사용합니다.</string>
+    <string name="settings_app_language">앱 언어</string>
+    <string name="settings_app_language_summary">시스템 기본값, English 또는 한국어를 선택합니다. 언어를 바꾸면 화면이 다시 시작됩니다.</string>
+    <string name="settings_language_system">시스템 기본값</string>
+    <string name="settings_language_english">English</string>
+    <string name="settings_language_korean">한국어</string>
     <string name="settings_automation_section">자동화</string>
     <string name="settings_data_privacy">데이터 및 개인정보</string>
     <string name="settings_data_privacy_summary">보관 기간을 정하고 로컬 저장 내용을 관리하거나 선택한 데이터를 삭제합니다.</string>
@@ -78,6 +83,9 @@
     <string name="automation_outcome_invalid">잘못된 요청</string>
     <string name="automation_outcome_not_found">대상 없음</string>
     <string name="settings_llm_section">기기 내 의미 분석</string>
+    <string name="settings_local_ai_overview_summary">번들 분류기: %1$s · 사용자 LLM — %2$s</string>
+    <string name="settings_semantic_classifier_enabled">번들 7분류 모델 사용</string>
+    <string name="settings_semantic_classifier_summary">끄면 7종 의미 추론을 건너뜁니다. 의미·광고 조건에 동작이 의존하는 알림은 변경하지 않고, 그 밖의 알림은 나머지 규칙 신호로 처리합니다.</string>
     <string name="settings_llm_enabled">로컬 LLM 지연 의미 분석 사용</string>
     <string name="settings_llm_summary">선택 기능이며 기본값은 꺼짐입니다. 이 기기에 저장된 호환 가능한 양자화 MediaPipe .task 모델을 선택하세요.</string>
     <string name="settings_llm_summary_unverified">이 빌드에서 호환 모델 프로필을 검증하기 전까지 LLM 자동 백그라운드 분석은 사용할 수 없습니다. 호환성 확인을 위한 로컬 모델 가져오기는 가능합니다.</string>
@@ -334,7 +342,10 @@
     <string name="insights_analysis_empty_body">다른 기간을 선택하거나 다음 일일 백그라운드 집계를 기다려 주세요. 실시간 활동은 기록 탭에서 확인할 수 있습니다.</string>
     <string name="insights_analysis_trend">알림 추세</string>
     <string name="insights_analysis_trend_description">%2$s 단위 %1$d개 구간의 전체 알림 및 조용히 처리 추세</string>
-    <string name="insights_analysis_trend_legend">%1$s마다 배경은 전체 알림, 앞쪽은 조용히 처리한 알림입니다.</string>
+    <string name="insights_analysis_trend_legend">%1$s마다 전체 알림 막대와 조용히 처리한 알림 막대를 나란히 표시합니다.</string>
+    <string name="insights_chart_total">전체 알림</string>
+    <string name="insights_chart_silenced">조용히 처리</string>
+    <string name="insights_hour_chart_description">전체 알림과 조용히 처리한 알림을 보여주는 24시간 차트입니다. 최고 시간대는 %1$02d시이며 알림은 %2$d개입니다.</string>
     <string name="insights_analysis_apps">알림이 많은 앱</string>
     <string name="insights_analysis_rules">규칙 처리 순위</string>
     <string name="insights_analysis_semantics">의미 분류</string>

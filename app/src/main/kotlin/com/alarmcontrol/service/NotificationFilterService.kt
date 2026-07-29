@@ -157,6 +157,7 @@ class NotificationFilterService : NotificationListenerService() {
     // evaluates against this hot snapshot instead of re-reading the DB per event (M3 performance).
     private val compiledRules = MutableStateFlow<CompiledRuleSet?>(null)
     private val filteringEnabled = MutableStateFlow<Boolean?>(null)
+    private val semanticClassifierEnabled = MutableStateFlow<Boolean?>(null)
     private val llmAnalysisEnabled = MutableStateFlow<Boolean?>(null)
     private val semanticAnalysisScope = MutableStateFlow<SemanticAnalysisScope?>(null)
     private val contentStorageEnabled = MutableStateFlow<Boolean?>(null)
@@ -232,12 +233,14 @@ class NotificationFilterService : NotificationListenerService() {
                                     )
                                 combine(
                                     settingsRepository.filteringEnabled,
+                                    settingsRepository.semanticClassifierEnabled,
                                     llmSettings,
                                     settingsRepository.notificationContentStorageEnabled,
                                     settingsRepository.contentExcludedPackages,
-                                ) { filtering, llm, storeContent, excludedPackages ->
+                                ) { filtering, classifierEnabled, llm, storeContent, excludedPackages ->
                                     ListenerSettings(
                                         filtering,
+                                        classifierEnabled,
                                         llm.enabled,
                                         llm.scope,
                                         storeContent,
@@ -300,6 +303,7 @@ class NotificationFilterService : NotificationListenerService() {
 
     private fun publishSettings(settings: ListenerSettings) {
         filteringEnabled.value = settings.filtering
+        semanticClassifierEnabled.value = settings.semanticClassifierEnabled
         llmAnalysisEnabled.value = settings.llmEnabled
         semanticAnalysisScope.value = settings.semanticScope
         contentStorageEnabled.value = settings.storeContent
@@ -310,6 +314,7 @@ class NotificationFilterService : NotificationListenerService() {
         filteringEnabled.value?.let { filtering ->
             ListenerSettings(
                 filtering = filtering,
+                semanticClassifierEnabled = semanticClassifierEnabled.value ?: false,
                 llmEnabled = llmAnalysisEnabled.value ?: false,
                 semanticScope = semanticAnalysisScope.value ?: SemanticAnalysisScope.RULES_ONLY,
                 storeContent = contentStorageEnabled.value ?: false,
@@ -325,6 +330,7 @@ class NotificationFilterService : NotificationListenerService() {
             publishSettings(
                 ListenerSettings(
                     filtering = false,
+                    semanticClassifierEnabled = false,
                     llmEnabled = false,
                     semanticScope = SemanticAnalysisScope.RULES_ONLY,
                     storeContent = false,
@@ -405,6 +411,7 @@ class NotificationFilterService : NotificationListenerService() {
             withTimeoutOrNull(CACHE_READY_TIMEOUT_MILLIS) {
                 ListenerRuntime(
                     filtering = filteringEnabled.filterNotNull().first(),
+                    semanticClassifierEnabled = semanticClassifierEnabled.filterNotNull().first(),
                     llmEnabled = llmAnalysisEnabled.filterNotNull().first(),
                     storeContent = contentStorageEnabled.filterNotNull().first(),
                     excludedPackages = contentExcludedPackages.filterNotNull().first(),
@@ -419,6 +426,7 @@ class NotificationFilterService : NotificationListenerService() {
                 snapshot,
                 runtime.compiledRules,
                 runtime.semanticGeneration,
+                runtime.semanticClassifierEnabled,
                 token,
             ) ?: return
         if (
@@ -476,6 +484,7 @@ class NotificationFilterService : NotificationListenerService() {
                 compiled = runtime.compiledRules,
                 existingClassification = evaluated.semanticClassification,
                 classifySemantic = postCommitNeedsSemantic,
+                classifierEnabled = runtime.semanticClassifierEnabled,
                 existingDecisionTrace = evaluated.decisionTrace,
             )
         if (semanticGeneration.get() != evaluated.semanticGeneration) return
@@ -559,6 +568,7 @@ class NotificationFilterService : NotificationListenerService() {
         snapshot: NotificationSnapshot,
         compiled: CompiledRuleSet,
         semanticGeneration: Long,
+        semanticClassifierEnabled: Boolean,
         token: NotificationProcessingCoordinator.ProcessingToken,
     ): EvaluatedNotification? {
         if (!token.isCurrent()) return null
@@ -607,7 +617,12 @@ class NotificationFilterService : NotificationListenerService() {
                 rateCountExpectation = null,
             )
         }
-        val semanticEvaluation = semanticRuleResolver.resolve(common, compiled)
+        val semanticEvaluation =
+            semanticRuleResolver.resolve(
+                snapshot = common,
+                compiled = compiled,
+                classifierEnabled = semanticClassifierEnabled,
+            )
         if (!token.isCurrent()) return null
         return EvaluatedNotification(
             common = common,
@@ -891,6 +906,7 @@ class NotificationFilterService : NotificationListenerService() {
 
     private data class ListenerSettings(
         val filtering: Boolean,
+        val semanticClassifierEnabled: Boolean,
         val llmEnabled: Boolean,
         val semanticScope: SemanticAnalysisScope,
         val storeContent: Boolean,
@@ -899,6 +915,7 @@ class NotificationFilterService : NotificationListenerService() {
 
     private data class ListenerRuntime(
         val filtering: Boolean,
+        val semanticClassifierEnabled: Boolean,
         val llmEnabled: Boolean,
         val storeContent: Boolean,
         val excludedPackages: Set<String>,
@@ -999,10 +1016,11 @@ internal class RealtimeSemanticRuleResolver(
     suspend fun resolve(
         snapshot: NotificationSnapshot,
         compiled: CompiledRuleSet,
+        classifierEnabled: Boolean = true,
     ): RealtimeSemanticRuleEvaluation {
         val requirements = matcher.semanticResolutionRequirements(snapshot, compiled)
         val classification =
-            if (requirements.activeNeedsSemantic) {
+            if (requirements.activeNeedsSemantic && classifierEnabled) {
                 classify(snapshot, SemanticInferenceUrgency.REALTIME)
             } else {
                 null
@@ -1067,11 +1085,12 @@ internal class RealtimeSemanticRuleResolver(
         compiled: CompiledRuleSet,
         existingClassification: SemanticClassificationResult? = null,
         classifySemantic: Boolean = true,
+        classifierEnabled: Boolean = true,
         existingDecisionTrace: List<DecisionTraceNode> = emptyList(),
     ): PostCommitMonitorSemanticEvaluation {
         val classification =
             existingClassification
-                ?: if (classifySemantic) {
+                ?: if (classifySemantic && classifierEnabled) {
                     classify(snapshot, SemanticInferenceUrgency.BACKGROUND)
                 } else {
                     null

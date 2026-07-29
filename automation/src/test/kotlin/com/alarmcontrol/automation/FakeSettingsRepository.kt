@@ -11,10 +11,12 @@ import kotlinx.coroutines.flow.MutableStateFlow
 class FakeSettingsRepository(
     enabled: Boolean = true,
     filtering: Boolean = true,
+    semanticClassifier: Boolean = true,
     llmEnabled: Boolean = false,
 ) : SettingsRepository {
     private val state = MutableStateFlow(enabled)
     private val filteringState = MutableStateFlow(filtering)
+    private val semanticClassifierState = MutableStateFlow(semanticClassifier)
     private val llmState = MutableStateFlow(llmEnabled)
     private val llmAutoActionsState = MutableStateFlow(false)
     private val eventRetentionState = MutableStateFlow(RetentionDefaults.EVENT_DAYS)
@@ -25,6 +27,7 @@ class FakeSettingsRepository(
     private val excludedPackagesState = MutableStateFlow(emptySet<String>())
 
     override val filteringEnabled: Flow<Boolean> = filteringState
+    override val semanticClassifierEnabled: Flow<Boolean> = semanticClassifierState
 
     override val externalAutomationEnabled: Flow<Boolean> = state
     override val externalAutomationToken: Flow<String> = tokenState
@@ -43,6 +46,10 @@ class FakeSettingsRepository(
 
     override suspend fun setFilteringEnabled(enabled: Boolean) {
         filteringState.value = enabled
+    }
+
+    override suspend fun setSemanticClassifierEnabled(enabled: Boolean) {
+        semanticClassifierState.value = enabled
     }
 
     override suspend fun setExternalAutomationEnabled(enabled: Boolean) {
@@ -96,6 +103,7 @@ class FakeSettingsRepository(
     override suspend fun snapshot(): SettingsSnapshot =
         SettingsSnapshot(
             filteringEnabled = filteringState.value,
+            semanticClassifierEnabled = semanticClassifierState.value,
             externalAutomationEnabled = state.value,
             llmAnalysisEnabled = llmState.value,
             llmAutoActionsEnabled = llmAutoActionsState.value,
@@ -113,6 +121,7 @@ class FakeSettingsRepository(
 
     override suspend fun restore(snapshot: SettingsSnapshot) {
         filteringState.value = snapshot.filteringEnabled
+        semanticClassifierState.value = snapshot.semanticClassifierEnabled
         state.value = snapshot.externalAutomationEnabled
         llmState.value = snapshot.llmAnalysisEnabled
         llmAutoActionsState.value = snapshot.llmAutoActionsEnabled
@@ -123,6 +132,7 @@ class FakeSettingsRepository(
     override suspend fun reset() {
         state.value = false
         filteringState.value = false
+        semanticClassifierState.value = true
         llmState.value = false
         llmAutoActionsState.value = false
         eventRetentionState.value = RetentionDefaults.EVENT_DAYS

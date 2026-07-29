@@ -52,6 +52,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.pluralStringResource
@@ -414,10 +415,35 @@ private fun SectionHeading(
 
 @Composable
 private fun MetricsRow(metrics: InsightsMetrics) {
+    val colors = MaterialTheme.colorScheme
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
-            MetricCard(stringResource(R.string.insights_cancelled), metrics.cancelled, Modifier.weight(1f))
-            MetricCard(stringResource(R.string.insights_snoozed), metrics.snoozed, Modifier.weight(1f))
+            MetricCard(
+                label = stringResource(R.string.insights_cancelled),
+                value = metrics.cancelled,
+                accentColor = colors.error,
+                modifier = Modifier.weight(1f),
+            )
+            MetricCard(
+                label = stringResource(R.string.insights_snoozed),
+                value = metrics.snoozed,
+                accentColor = colors.primary,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
+            MetricCard(
+                label = stringResource(R.string.insights_action_logged),
+                value = metrics.loggedOnly,
+                accentColor = colors.outline,
+                modifier = Modifier.weight(1f),
+            )
+            MetricCard(
+                label = stringResource(R.string.insights_action_kept),
+                value = metrics.kept,
+                accentColor = colors.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
         }
         Text(
             stringResource(R.string.insights_recorded_today, metrics.totalRecorded),
@@ -431,7 +457,7 @@ private fun MetricsRow(metrics: InsightsMetrics) {
 private fun DailyMutedTrend(days: List<DailyInsightUi>) {
     val chronological = days.asReversed()
     val maximum = chronological.maxOfOrNull(DailyInsightUi::mutedCount)?.coerceAtLeast(1) ?: 1
-    val barColor = MaterialTheme.colorScheme.tertiary
+    val barColor = MaterialTheme.colorScheme.primary
     val description = stringResource(R.string.insights_trend_description, chronological.size)
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -466,15 +492,25 @@ private const val DAILY_APP_DISPLAY_LIMIT = 5
 private fun MetricCard(
     label: String,
     value: Int,
+    accentColor: Color,
     modifier: Modifier = Modifier,
 ) {
     Card(
         modifier = modifier.semantics { contentDescription = "$label: $value" },
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
     ) {
-        Column(Modifier.padding(14.dp)) {
+        Column(
+            Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Canvas(Modifier.size(8.dp)) { drawCircle(accentColor) }
+                Text(label, style = MaterialTheme.typography.labelMedium)
+            }
             Text(value.toString(), style = MaterialTheme.typography.headlineSmall)
-            Text(label, style = MaterialTheme.typography.labelMedium)
         }
     }
 }
@@ -572,7 +608,7 @@ private fun DailyInsightCard(
                             else -> stringResource(R.string.insights_delta_same)
                         },
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.tertiary,
+                    color = MaterialTheme.colorScheme.primary,
                 )
             }
             Text(
@@ -842,11 +878,11 @@ private fun TopRulesList(rules: List<RuleTriggerUi>) {
 
 @Composable
 private fun CountBadge(count: Int) {
-    Surface(shape = MaterialTheme.shapes.small, color = MaterialTheme.colorScheme.secondaryContainer) {
+    Surface(shape = MaterialTheme.shapes.small, color = MaterialTheme.colorScheme.primaryContainer) {
         Text(
             text = count.toString(),
             style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSecondaryContainer,
+            color = MaterialTheme.colorScheme.onPrimaryContainer,
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
         )
     }
