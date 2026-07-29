@@ -76,7 +76,7 @@ export ALARMCONTROL_KEYSTORE_FILE="/absolute/path/to/release.jks"
 export ALARMCONTROL_KEYSTORE_PASSWORD="..."
 export ALARMCONTROL_KEY_ALIAS="..."
 export ALARMCONTROL_KEY_PASSWORD="..."
-./gradlew :app:releaseCandidate
+./gradlew -Palarmcontrol.releaseAbiApks=true :app:releaseCandidate
 ```
 
 일부 변수만 제공하면 의도적으로 설정 단계에서 실패합니다. `releaseCandidate`는 기기 없이
@@ -87,6 +87,8 @@ export ALARMCONTROL_KEY_PASSWORD="..."
 지원 ABI 전체가 있으며 각 분할 APK에는 이름과 같은 ABI만 있는지 검사합니다. 이어서
 minSdk 26 기준 `apksigner` 검증을 실행하며 각 APK의 유일한 서명자가 커밋된 업데이트
 인증서 지문과 일치해야 합니다.
+명시적인 Gradle 속성은 일반 `assembleRelease`와 `bundleRelease` 검증을 단일 산출물로
+유지하고, GitHub 배포 패키징에서만 APK 5개를 활성화합니다.
 
 `app/build/outputs/apk/release/` 아래 검증 산출물은 정확히 5개이며 모두 GitHub 배포
 후보입니다: `universal`, `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`. GitHub Releases는

@@ -77,7 +77,7 @@ export ALARMCONTROL_KEYSTORE_FILE="/absolute/path/to/release.jks"
 export ALARMCONTROL_KEYSTORE_PASSWORD="..."
 export ALARMCONTROL_KEY_ALIAS="..."
 export ALARMCONTROL_KEY_PASSWORD="..."
-./gradlew :app:releaseCandidate
+./gradlew -Palarmcontrol.releaseAbiApks=true :app:releaseCandidate
 ```
 
 Providing only some of the variables fails configuration intentionally. `releaseCandidate` runs
@@ -88,6 +88,8 @@ ABI-specific APK has corresponding 60 MiB and 105 MiB limits. It verifies the fo
 and their manifest hashes in all five APKs, confirms that the universal APK contains every supported
 ABI and each split contains only its named ABI, then runs `apksigner` verification for minSdk 26.
 Every APK must have exactly one signer matching the committed update-certificate fingerprint.
+The explicit Gradle property keeps ordinary `assembleRelease` and `bundleRelease` checks
+single-output while enabling the five APK outputs only for GitHub distribution packaging.
 
 The verified output under `app/build/outputs/apk/release/` is exactly five GitHub distribution
 candidates: `universal`, `arm64-v8a`, `armeabi-v7a`, `x86`, and `x86_64`. GitHub Releases does not

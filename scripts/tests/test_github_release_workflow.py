@@ -8,6 +8,7 @@ from pathlib import Path
 WORKFLOWS = Path(__file__).resolve().parents[2] / ".github" / "workflows"
 WORKFLOW = WORKFLOWS / "github-release.yml"
 ANDROID_WORKFLOW = WORKFLOWS / "android.yml"
+APP_BUILD = Path(__file__).resolve().parents[2] / "app" / "build.gradle.kts"
 MANAGED_DEVICE_COMMAND = (
     "run: ./gradlew --dependency-verification strict "
     "-Pandroid.testoptions.manageddevices.emulator.gpu=swiftshader_indirect "
@@ -19,6 +20,7 @@ class GitHubReleaseWorkflowTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.workflow = WORKFLOW.read_text(encoding="utf-8")
         cls.android_workflow = ANDROID_WORKFLOW.read_text(encoding="utf-8")
+        cls.app_build = APP_BUILD.read_text(encoding="utf-8")
 
     def test_release_tests_the_checked_out_tag_commit(self) -> None:
         self.assertIn(
@@ -63,6 +65,7 @@ class GitHubReleaseWorkflowTest(unittest.TestCase):
 
     def test_packages_and_publishes_all_five_apk_variants(self) -> None:
         self.assertIn("scripts/package_release_apks.py", self.workflow)
+        self.assertIn("-Palarmcontrol.releaseAbiApks=true", self.workflow)
         self.assertIn(
             "if (( ${#apks[@]} != 5 || ${#checksums[@]} != 5 )); then",
             self.workflow,
@@ -72,6 +75,21 @@ class GitHubReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("if (( ${#assets[@]} != 10 )); then", self.workflow)
         self.assertIn('"${assets[@]}"', self.workflow)
         self.assertNotIn("Expected one release APK", self.workflow)
+
+    def test_release_abi_apks_are_opt_in_so_aab_verification_stays_single_output(
+        self,
+    ) -> None:
+        self.assertIn(
+            'gradleProperty("alarmcontrol.releaseAbiApks")',
+            self.app_build,
+        )
+        self.assertIn("isEnable = releaseAbiApksEnabled.get()", self.app_build)
+        self.assertIn(".orElse(false)", self.app_build)
+        self.assertNotIn(
+            "-Palarmcontrol.releaseAbiApks=true",
+            self.android_workflow,
+        )
+        self.assertIn(":app:bundleRelease", self.android_workflow)
 
     def test_release_explains_abi_choice(self) -> None:
         for label in (

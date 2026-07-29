@@ -58,6 +58,13 @@ val supportedReleaseApkAbis =
         "x86_64",
     )
 val expectedReleaseApkLabels = supportedReleaseApkAbis + "universal"
+val releaseAbiApksEnabled =
+    providers
+        .gradleProperty("alarmcontrol.releaseAbiApks")
+        .map { value ->
+            value.toBooleanStrictOrNull()
+                ?: error("alarmcontrol.releaseAbiApks must be true or false")
+        }.orElse(false)
 val semanticBundleEntries =
     setOf(
         "base/assets/semantic_notification_classifier.tflite",
@@ -526,10 +533,11 @@ android {
     // GitHub does not select a device ABI. Publish one smaller APK for every ABI actually supplied
     // by current runtime dependencies while retaining a universal fallback. AGP's default list
     // also contains legacy ABIs with no native libraries, so keep this set aligned with verified
-    // dependency payloads rather than emitting empty, misleading APKs.
+    // dependency payloads rather than emitting empty, misleading APKs. Keep this opt-in because
+    // AGP's AAB pre-bundle path requires a single release output.
     splits {
         abi {
-            isEnable = true
+            isEnable = releaseAbiApksEnabled.get()
             reset()
             include(*supportedReleaseApkAbis.toTypedArray())
             isUniversalApk = true
@@ -565,8 +573,8 @@ android {
     }
 }
 
-// The ABI split DSL is module-wide. Keep development and test builds as one universal APK while
-// the release variant retains the five GitHub distribution outputs configured above.
+// The ABI split DSL is module-wide. When GitHub distribution packaging enables it, keep
+// development and test builds as one universal APK while release retains the five outputs above.
 androidComponents {
     onVariants(selector().all()) { variant ->
         if (variant.buildType != "release") {
@@ -1189,9 +1197,13 @@ tasks.named("check").configure {
 // mistaken for a publishable artifact.
 val verifyReleaseSigningConfiguration by tasks.registering {
     group = "verification"
-    description = "Fails unless release credentials and the public certificate pin are configured."
+    description = "Fails unless release credentials, certificate pin, and ABI packaging are configured."
 
     doLast {
+        check(releaseAbiApksEnabled.get()) {
+            "GitHub release APK packaging must run with " +
+                "-Palarmcontrol.releaseAbiApks=true"
+        }
         check(hasCompleteReleaseSigning) {
             "Release signing is not configured. Set ALARMCONTROL_KEYSTORE_FILE, " +
                 "ALARMCONTROL_KEYSTORE_PASSWORD, ALARMCONTROL_KEY_ALIAS, and ALARMCONTROL_KEY_PASSWORD."

@@ -137,6 +137,7 @@ jobs:
             '-Dorg.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8' \
             --no-daemon \
             --dependency-verification strict \
+            -Palarmcontrol.releaseAbiApks=true \
             :app:releaseCandidate
 
       - name: Confirm package identity and package APKs
