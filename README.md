@@ -181,9 +181,6 @@ The release gates verify formatting, static analysis, tests, dependency integrit
 manifests/classpaths, model assets, APK payload limits, and APK signature validity. A compiled or
 unsigned APK/AAB is not a publishable release.
 
-Device validation has included a Galaxy Note20 5G on Android 13 / One UI 5.1. Device-specific
-results are evidence for that configuration, not a performance guarantee for every Android device.
-
 ## License
 
 Copyright 2026 SLemon418.

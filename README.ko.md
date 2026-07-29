@@ -180,9 +180,6 @@ Kotlin, Coroutines/Flow, Jetpack Compose, Hilt, Room, DataStore, WorkManager, Li
 모델 자산, APK 용량 제한, APK 서명 유효성을 검사합니다. 컴파일됐거나 서명되지 않은
 APK/AAB는 게시 가능한 릴리스가 아닙니다.
 
-Galaxy Note20 5G의 Android 13 / One UI 5.1 환경에서 실기기 검증을 진행했습니다.
-기기별 결과는 해당 구성의 증거이며 모든 Android 기기의 성능을 보장하지 않습니다.
-
 ## 라이선스
 
 Copyright 2026 SLemon418.
