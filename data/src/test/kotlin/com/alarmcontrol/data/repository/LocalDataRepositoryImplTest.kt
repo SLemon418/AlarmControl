@@ -1,5 +1,7 @@
 package com.alarmcontrol.data.repository
 
+import com.alarmcontrol.core.settings.MaintenanceSettingsSnapshot
+import com.alarmcontrol.core.settings.SettingsRepository
 import com.alarmcontrol.data.db.entity.AdFeedbackPriorEntity
 import com.alarmcontrol.data.db.entity.CategoryFeedbackEntity
 import com.alarmcontrol.data.db.entity.DailyInsightEntity
@@ -9,11 +11,19 @@ import com.alarmcontrol.data.db.entity.RuleEntity
 import com.alarmcontrol.data.db.entity.RuleSuggestionDismissalEntity
 import com.alarmcontrol.data.db.entity.SemanticFeedbackPriorEntity
 import com.alarmcontrol.data.db.model.StoredRuleAction
+import com.alarmcontrol.data.security.MaintenancePolicyAccessGuard
 import com.alarmcontrol.data.security.NotificationContentAccessGuard
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Test
+import java.io.IOException
 
 class LocalDataRepositoryImplTest {
     private val rules = FakeRuleDao()
@@ -25,7 +35,17 @@ class LocalDataRepositoryImplTest {
     private val automationAudit = FakeAutomationAuditDao()
     private val suggestions = FakeRuleSuggestionDao()
     private val contentCipher = FakeNotificationContentCipher()
-    private val repository =
+    private val contentAccessGuard = NotificationContentAccessGuard()
+    private val maintenancePolicyAccessGuard = MaintenancePolicyAccessGuard()
+    private val settings =
+        FakeContentSettingsRepository(
+            contentEnabled = true,
+            contentAccessGuard = contentAccessGuard,
+            maintenancePolicyAccessGuard = maintenancePolicyAccessGuard,
+        )
+    private val repository = createRepository(settings)
+
+    private fun createRepository(settingsRepository: SettingsRepository) =
         LocalDataRepositoryImpl(
             ImmediateTransactionRunner(),
             rules,
@@ -36,8 +56,10 @@ class LocalDataRepositoryImplTest {
             llmObservations,
             automationAudit,
             suggestions,
+            settingsRepository,
             contentCipher,
-            NotificationContentAccessGuard(),
+            contentAccessGuard,
+            maintenancePolicyAccessGuard,
         )
 
     @Test
@@ -155,6 +177,77 @@ class LocalDataRepositoryImplTest {
         }
 
     @Test
+    fun `policy reconciliation removes only content forbidden by the current settings`() =
+        runTest {
+            storeEncryptedContent("com.private", 1L)
+            storeEncryptedContent("com.allowed", 2L)
+            settings.setContentExcludedPackages(setOf("com.private"))
+
+            val counts = repository.reconcileStoredNotificationContentPolicy()
+
+            assertEquals(1, counts.encryptedContents)
+            assertEquals(1, events.countEncryptedContents())
+
+            settings.setNotificationContentStorageEnabled(false)
+            val disabledCounts = repository.reconcileStoredNotificationContentPolicy()
+
+            assertEquals(1, disabledCounts.encryptedContents)
+            assertEquals(0, events.countEncryptedContents())
+            assertEquals(true, contentCipher.keyDeleted)
+        }
+
+    @Test
+    fun `policy read failure preserves every ciphertext and the encryption key`() =
+        runTest {
+            storeEncryptedContent("com.allowed", 1L)
+            val failingSettings =
+                object : SettingsRepository by settings {
+                    override suspend fun maintenanceSnapshot(): MaintenanceSettingsSnapshot =
+                        throw IOException("unreadable")
+                }
+            val target = createRepository(failingSettings)
+
+            val error =
+                runCatching { target.reconcileStoredNotificationContentPolicy() }
+                    .exceptionOrNull()
+
+            assertEquals(IOException::class.java, error?.javaClass)
+            assertEquals(1, events.countEncryptedContents())
+            assertFalse(contentCipher.keyDeleted)
+        }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `queued enable wins before reconciliation and preserves newly allowed content`() =
+        runTest {
+            settings.setNotificationContentStorageEnabled(false)
+            storeEncryptedContent("com.allowed", 1L)
+            val guardHeld = CompletableDeferred<Unit>()
+            val releaseGuard = CompletableDeferred<Unit>()
+            val blocker =
+                async {
+                    contentAccessGuard.withLock {
+                        guardHeld.complete(Unit)
+                        releaseGuard.await()
+                    }
+                }
+            guardHeld.await()
+
+            val enable = async { settings.setNotificationContentStorageEnabled(true) }
+            runCurrent()
+            val reconcile = async { repository.reconcileStoredNotificationContentPolicy() }
+            runCurrent()
+            releaseGuard.complete(Unit)
+            advanceUntilIdle()
+
+            blocker.await()
+            enable.await()
+            reconcile.await()
+            assertEquals(1, events.countEncryptedContents())
+            assertFalse(contentCipher.keyDeleted)
+        }
+
+    @Test
     fun `partial clear leaves unrelated categories intact`() =
         runTest {
             events.insert(sampleEvent())
@@ -219,4 +312,25 @@ class LocalDataRepositoryImplTest {
             matchedRuleId = null,
             recordedAtMillis = 1,
         )
+
+    private suspend fun storeEncryptedContent(
+        packageName: String,
+        id: Long,
+    ) {
+        events.insertWithTrace(
+            sampleEvent().copy(id = id, packageName = packageName, hadEncryptedContent = true),
+            emptyList(),
+            contentCipher
+                .encrypt("$packageName-content".encodeToByteArray())
+                .let {
+                    com.alarmcontrol.data.db.entity.EncryptedNotificationContentEntity(
+                        formatVersion = it.formatVersion,
+                        aadId = it.aadId,
+                        nonce = it.nonce,
+                        ciphertext = it.ciphertext,
+                        createdAtMillis = 1,
+                    )
+                },
+        )
+    }
 }

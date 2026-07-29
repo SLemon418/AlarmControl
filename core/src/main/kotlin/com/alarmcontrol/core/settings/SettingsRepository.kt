@@ -83,8 +83,23 @@ interface SettingsRepository {
 
     suspend fun setContentExcludedPackages(packageNames: Set<String>)
 
+    /**
+     * Atomically adds or removes one package from the persisted exclusion set. Unrelated entries
+     * must be preserved, and storage read/write failures must leave the existing set unchanged.
+     */
+    suspend fun setContentPackageExcluded(
+        packageName: String,
+        excluded: Boolean,
+    )
+
     /** Returns one coherent, portable snapshot for local backup. */
     suspend fun snapshot(): SettingsSnapshot
+
+    /**
+     * Returns one coherent policy snapshot for destructive local maintenance. Unlike UI-facing
+     * flows, implementations must propagate storage read failures instead of substituting defaults.
+     */
+    suspend fun maintenanceSnapshot(): MaintenanceSettingsSnapshot
 
     /** Restores all preferences in one local DataStore edit after validation. */
     suspend fun restore(snapshot: SettingsSnapshot)
@@ -103,6 +118,14 @@ data class SettingsSnapshot(
     val semanticAnalysisScope: SemanticAnalysisScope = SemanticAnalysisScope.RULES_ONLY,
     val eventRetentionDays: Int = RetentionDefaults.EVENT_DAYS,
     val dailyInsightRetentionDays: Int = RetentionDefaults.DAILY_INSIGHT_DAYS,
+)
+
+/** Settings that authorize local retention and encrypted-content deletion. */
+data class MaintenanceSettingsSnapshot(
+    val eventRetentionDays: Int = RetentionDefaults.EVENT_DAYS,
+    val dailyInsightRetentionDays: Int = RetentionDefaults.DAILY_INSIGHT_DAYS,
+    val notificationContentStorageEnabled: Boolean = false,
+    val contentExcludedPackages: Set<String> = emptySet(),
 )
 
 object RetentionDefaults {

@@ -99,6 +99,25 @@ class RulesScreenTest {
     }
 
     @Test
+    fun ruleEditorRouteOnlyClosesAfterLoadingCompletesWithoutADraft() {
+        val state = mutableStateOf(RulesUiState())
+        var closeCount = 0
+        composeRule.setContent {
+            RuleEditorRouteCloseEffect(
+                isLoading = state.value.isLoading,
+                editorMissing = state.value.editor == null,
+                onClose = { closeCount += 1 },
+            )
+        }
+
+        composeRule.runOnIdle {
+            assertEquals(0, closeCount)
+            state.value = state.value.copy(isLoading = false)
+        }
+        composeRule.runOnIdle { assertEquals(1, closeCount) }
+    }
+
+    @Test
     fun addRuleFabHasAnAccessibleName() {
         setRulesScreen(showHint = false)
 

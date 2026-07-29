@@ -88,9 +88,11 @@ fun ProfileEditorRoute(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val editor = state.editor
-    LaunchedEffect(editor) {
-        if (editor == null) onClose()
-    }
+    ProfileEditorRouteCloseEffect(
+        isLoading = state.isLoading,
+        editorMissing = editor == null,
+        onClose = onClose,
+    )
     editor?.let {
         ProfileEditorScreen(
             state = it,
@@ -101,6 +103,17 @@ fun ProfileEditorRoute(
             onConfirmDiscard = viewModel::onConfirmDiscardEditor,
             onCancelDiscard = viewModel::onCancelDiscardEditor,
         )
+    }
+}
+
+@Composable
+internal fun ProfileEditorRouteCloseEffect(
+    isLoading: Boolean,
+    editorMissing: Boolean,
+    onClose: () -> Unit,
+) {
+    LaunchedEffect(isLoading, editorMissing) {
+        if (!isLoading && editorMissing) onClose()
     }
 }
 

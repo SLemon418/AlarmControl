@@ -1,5 +1,7 @@
 package com.alarmcontrol.core.privacy
 
+import com.alarmcontrol.core.settings.MaintenanceSettingsSnapshot
+
 /** Counts of locally deleted records; no notification content is represented. */
 data class ClearedDataCounts(
     val rules: Int = 0,
@@ -23,6 +25,15 @@ interface LocalDataRepository {
 
     /** Deletes retained title/body payloads for one newly excluded package. */
     suspend fun clearStoredNotificationContentForPackage(packageName: String): ClearedDataCounts
+
+    /**
+     * Re-reads the current content-storage policy while holding the content access boundary, then
+     * removes only payloads that policy currently forbids.
+     */
+    suspend fun reconcileStoredNotificationContentPolicy(): ClearedDataCounts
+
+    /** Applies [policy] while the caller holds the maintenance-policy boundary. */
+    suspend fun reconcileStoredNotificationContentPolicy(policy: MaintenanceSettingsSnapshot): ClearedDataCounts
 
     suspend fun clearAllDatabaseData(): ClearedDataCounts
 }

@@ -1,8 +1,10 @@
 package com.alarmcontrol.data.repository
 
+import com.alarmcontrol.core.settings.MaintenanceSettingsSnapshot
 import com.alarmcontrol.core.settings.RetentionDefaults
 import com.alarmcontrol.core.settings.SettingsRepository
 import com.alarmcontrol.core.settings.SettingsSnapshot
+import com.alarmcontrol.data.security.MaintenancePolicyAccessGuard
 import com.alarmcontrol.data.security.NotificationContentAccessGuard
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -13,6 +15,8 @@ internal class FakeContentSettingsRepository(
     contentEnabled: Boolean = true,
     excludedPackages: Set<String> = emptySet(),
     private val contentAccessGuard: NotificationContentAccessGuard = NotificationContentAccessGuard(),
+    private val maintenancePolicyAccessGuard: MaintenancePolicyAccessGuard =
+        MaintenancePolicyAccessGuard(),
 ) : SettingsRepository {
     private val contentEnabledState = MutableStateFlow(contentEnabled)
     private val excludedPackagesState = MutableStateFlow(excludedPackages)
@@ -47,25 +51,53 @@ internal class FakeContentSettingsRepository(
     override suspend fun setDynamicColorEnabled(enabled: Boolean) = Unit
 
     override suspend fun setNotificationContentStorageEnabled(enabled: Boolean) {
-        contentAccessGuard.withLock {
-            contentEnabledState.value = enabled
+        maintenancePolicyAccessGuard.withLock {
+            contentAccessGuard.withLock {
+                contentEnabledState.value = enabled
+            }
         }
     }
 
     override suspend fun setContentExcludedPackages(packageNames: Set<String>) {
-        contentAccessGuard.withLock {
-            excludedPackagesState.value = packageNames
+        maintenancePolicyAccessGuard.withLock {
+            contentAccessGuard.withLock {
+                excludedPackagesState.value = packageNames
+            }
+        }
+    }
+
+    override suspend fun setContentPackageExcluded(
+        packageName: String,
+        excluded: Boolean,
+    ) {
+        maintenancePolicyAccessGuard.withLock {
+            contentAccessGuard.withLock {
+                excludedPackagesState.value =
+                    if (excluded) {
+                        excludedPackagesState.value + packageName
+                    } else {
+                        excludedPackagesState.value - packageName
+                    }
+            }
         }
     }
 
     override suspend fun snapshot(): SettingsSnapshot = SettingsSnapshot()
 
+    override suspend fun maintenanceSnapshot(): MaintenanceSettingsSnapshot =
+        MaintenanceSettingsSnapshot(
+            notificationContentStorageEnabled = contentEnabledState.value,
+            contentExcludedPackages = excludedPackagesState.value,
+        )
+
     override suspend fun restore(snapshot: SettingsSnapshot) = Unit
 
     override suspend fun reset() {
-        contentAccessGuard.withLock {
-            contentEnabledState.value = false
-            excludedPackagesState.value = emptySet()
+        maintenancePolicyAccessGuard.withLock {
+            contentAccessGuard.withLock {
+                contentEnabledState.value = false
+                excludedPackagesState.value = emptySet()
+            }
         }
     }
 }

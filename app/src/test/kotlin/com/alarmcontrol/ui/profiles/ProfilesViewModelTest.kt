@@ -212,6 +212,26 @@ class ProfilesViewModelTest {
         }
 
     @Test
+    fun `restored profile draft is present in the initial ui state`() {
+        val draft =
+            ProfileEditorState(
+                id = "7",
+                name = "Night focus",
+                selectedRuleIds = setOf("1", "2"),
+                hasUnsavedChanges = true,
+            )
+        val savedState =
+            SavedStateHandle(
+                mapOf(PROFILE_EDITOR_DRAFT_SAVED_STATE_KEY to checkNotNull(ProfileEditorDraftCodec.encode(draft))),
+            )
+
+        val initial = viewModel(savedState).uiState.value
+
+        assertTrue(initial.isLoading)
+        assertEquals(draft, initial.editor)
+    }
+
+    @Test
     fun `discarding a profile draft removes its process death state`() =
         runTest {
             val savedState = SavedStateHandle()

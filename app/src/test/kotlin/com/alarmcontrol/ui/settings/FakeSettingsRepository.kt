@@ -1,5 +1,6 @@
 package com.alarmcontrol.ui.settings
 
+import com.alarmcontrol.core.settings.MaintenanceSettingsSnapshot
 import com.alarmcontrol.core.settings.RetentionDefaults
 import com.alarmcontrol.core.settings.SettingsRepository
 import com.alarmcontrol.core.settings.SettingsSnapshot
@@ -84,6 +85,21 @@ class FakeSettingsRepository(
         excludedPackagesState.value = packageNames
     }
 
+    override suspend fun setContentPackageExcluded(
+        packageName: String,
+        excluded: Boolean,
+    ) {
+        val updated =
+            if (excluded) {
+                excludedPackagesState.value + packageName
+            } else {
+                excludedPackagesState.value - packageName
+            }
+        beforeSetContentExcludedPackages(updated)
+        operationLog += "excluded-package:$packageName:$excluded"
+        excludedPackagesState.value = updated
+    }
+
     override suspend fun snapshot(): SettingsSnapshot =
         SettingsSnapshot(
             filteringEnabled = filteringState.value,
@@ -91,6 +107,14 @@ class FakeSettingsRepository(
             llmAnalysisEnabled = llmState.value,
             eventRetentionDays = eventRetentionState.value,
             dailyInsightRetentionDays = insightRetentionState.value,
+        )
+
+    override suspend fun maintenanceSnapshot(): MaintenanceSettingsSnapshot =
+        MaintenanceSettingsSnapshot(
+            eventRetentionDays = eventRetentionState.value,
+            dailyInsightRetentionDays = insightRetentionState.value,
+            notificationContentStorageEnabled = contentStorageState.value,
+            contentExcludedPackages = excludedPackagesState.value,
         )
 
     override suspend fun restore(snapshot: SettingsSnapshot) {

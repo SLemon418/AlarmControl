@@ -14,11 +14,13 @@ import com.alarmcontrol.core.insights.DailyInsight
 import com.alarmcontrol.core.insights.RuleTriggerCount
 import com.alarmcontrol.core.profile.FilteringProfile
 import com.alarmcontrol.core.result.DataResult
+import com.alarmcontrol.core.settings.MaintenanceSettingsSnapshot
 import com.alarmcontrol.core.settings.SettingsRepository
 import com.alarmcontrol.core.settings.SettingsSnapshot
 import com.alarmcontrol.data.backup.BackupCodec
 import com.alarmcontrol.data.backup.BackupCryptor
 import com.alarmcontrol.data.db.TransactionRunner
+import com.alarmcontrol.data.mapper.toWrite
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
@@ -124,6 +126,72 @@ class BackupRepositoryImplTest {
                 FilteringProfile(id = "1", name = "Focus", ruleIds = setOf(newId)),
                 profileRepository.observeProfiles().first().single(),
             )
+        }
+
+    @Test
+    fun `merge keeps an existing local insight day and imports only missing days`() =
+        runTest {
+            val local =
+                DailyInsight(
+                    epochDay = 20_000,
+                    windowStartMillis = 10,
+                    windowEndMillis = 20,
+                    totalNotifications = 4,
+                    mutedCount = 1,
+                    topRules = emptyList(),
+                    categoryBreakdown = listOf(CategoryCount("local", 4)),
+                    generatedAtMillis = 30,
+                )
+            val missing =
+                local.copy(
+                    epochDay = 20_001,
+                    windowStartMillis = 20,
+                    windowEndMillis = 30,
+                    totalNotifications = 2,
+                    mutedCount = 0,
+                    categoryBreakdown = listOf(CategoryCount("backup", 2)),
+                    generatedAtMillis = 40,
+                )
+            dailyDao.store(local.toWrite())
+            val payload =
+                BackupCodec.encode(
+                    BackupData(
+                        rules = emptyList(),
+                        dailyInsights =
+                            listOf(
+                                local.copy(
+                                    totalNotifications = 99,
+                                    mutedCount = 99,
+                                    categoryBreakdown = listOf(CategoryCount("overwritten", 99)),
+                                ),
+                                missing,
+                            ),
+                    ),
+                )
+
+            val result =
+                backup.restore(
+                    serialized = payload,
+                    options =
+                        RestoreOptions(
+                            mode = RestoreMode.MERGE,
+                            rulesAndProfiles = false,
+                            settings = false,
+                        ),
+                )
+
+            assertTrue(result is DataResult.Success)
+            assertEquals(
+                BackupSummary(
+                    rulesRestored = 0,
+                    insightsRestored = 1,
+                    insightConflictsSkipped = 1,
+                ),
+                (result as DataResult.Success).data,
+            )
+            val insights = dailyRepository.observeRecent(10).first().associateBy(DailyInsight::epochDay)
+            assertEquals(local, insights.getValue(local.epochDay))
+            assertEquals(missing, insights.getValue(missing.epochDay))
         }
 
     @Test
@@ -424,8 +492,33 @@ class BackupRepositoryImplTest {
         }
 
     @Test
-    fun `settings activation failure after database commit leaves destructive gates off`() =
+    fun `settings failure after database commit reports partial success and leaves gates off`() =
         runTest {
+            val original =
+                SettingsSnapshot(
+                    filteringEnabled = true,
+                    externalAutomationEnabled = true,
+                    llmAnalysisEnabled = false,
+                )
+            settings.restore(original)
+            val checkpoints = mutableListOf<SettingsSnapshot>()
+            val runner =
+                object : TransactionRunner {
+                    override suspend fun <T> run(block: suspend () -> T): T {
+                        checkpoints += settings.current
+                        return block()
+                    }
+                }
+            val repository =
+                BackupRepositoryImpl(
+                    runner,
+                    ruleDao,
+                    dailyDao,
+                    profileDao,
+                    feedbackDao,
+                    llmObservationDao,
+                    settings,
+                )
             val desired =
                 SettingsSnapshot(
                     filteringEnabled = true,
@@ -433,6 +526,75 @@ class BackupRepositoryImplTest {
                     llmAnalysisEnabled = true,
                 )
             settings.failEnabledRestore = true
+            val imported =
+                DailyInsight(
+                    epochDay = 20_100,
+                    windowStartMillis = 100,
+                    windowEndMillis = 200,
+                    totalNotifications = 3,
+                    mutedCount = 1,
+                    topRules = emptyList(),
+                    categoryBreakdown = emptyList(),
+                    generatedAtMillis = 300,
+                )
+            val payload =
+                BackupCodec.encode(
+                    BackupData(
+                        rules = emptyList(),
+                        dailyInsights = listOf(imported),
+                        settings = desired,
+                    ),
+                )
+
+            val result =
+                repository.restore(
+                    payload,
+                    options =
+                        RestoreOptions(
+                            rulesAndProfiles = false,
+                            dailyInsights = true,
+                            settings = true,
+                        ),
+                )
+
+            assertTrue(result is DataResult.Success)
+            assertEquals(
+                BackupSummary(
+                    rulesRestored = 0,
+                    insightsRestored = 1,
+                    settingsReviewRequired = true,
+                ),
+                (result as DataResult.Success).data,
+            )
+            assertFalse(checkpoints.single().filteringEnabled)
+            assertFalse(checkpoints.single().externalAutomationEnabled)
+            assertFalse(checkpoints.single().llmAutoActionsEnabled)
+            assertEquals(imported, dailyRepository.observeRecent(10).first().single())
+            assertFalse(settings.current.filteringEnabled)
+            assertFalse(settings.current.externalAutomationEnabled)
+            assertFalse(settings.current.llmAutoActionsEnabled)
+        }
+
+    @Test
+    fun `settings-only failure returns failure and restores prior settings`() =
+        runTest {
+            val original =
+                SettingsSnapshot(
+                    filteringEnabled = false,
+                    externalAutomationEnabled = false,
+                    llmAnalysisEnabled = false,
+                    eventRetentionDays = 14,
+                    dailyInsightRetentionDays = 90,
+                )
+            settings.restore(original)
+            settings.failEnabledRestore = true
+            val desired =
+                original.copy(
+                    filteringEnabled = true,
+                    externalAutomationEnabled = true,
+                    llmAnalysisEnabled = true,
+                    eventRetentionDays = 30,
+                )
             val payload =
                 BackupCodec.encode(
                     BackupData(
@@ -442,12 +604,19 @@ class BackupRepositoryImplTest {
                     ),
                 )
 
-            val result = backup.restore(payload)
+            val result =
+                backup.restore(
+                    payload,
+                    options =
+                        RestoreOptions(
+                            rulesAndProfiles = false,
+                            dailyInsights = false,
+                            settings = true,
+                        ),
+                )
 
             assertTrue(result is DataResult.Failure)
-            assertFalse(settings.current.filteringEnabled)
-            assertFalse(settings.current.externalAutomationEnabled)
-            assertFalse(settings.current.llmAutoActionsEnabled)
+            assertEquals(original, settings.current)
         }
 }
 
@@ -490,7 +659,18 @@ private class InMemoryBackupSettingsRepository : SettingsRepository {
 
     override suspend fun setContentExcludedPackages(packageNames: Set<String>) = Unit
 
+    override suspend fun setContentPackageExcluded(
+        packageName: String,
+        excluded: Boolean,
+    ) = Unit
+
     override suspend fun snapshot(): SettingsSnapshot = state.value
+
+    override suspend fun maintenanceSnapshot(): MaintenanceSettingsSnapshot =
+        MaintenanceSettingsSnapshot(
+            eventRetentionDays = state.value.eventRetentionDays,
+            dailyInsightRetentionDays = state.value.dailyInsightRetentionDays,
+        )
 
     override suspend fun restore(snapshot: SettingsSnapshot) {
         if (failEnabledRestore && snapshot.filteringEnabled) {

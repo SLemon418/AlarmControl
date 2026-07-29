@@ -33,13 +33,16 @@ import io.mockk.mockk
 import io.mockk.verify
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -47,6 +50,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.io.ByteArrayOutputStream
 
 @RunWith(RobolectricTestRunner::class)
 @Config(application = Application::class, sdk = [34])
@@ -180,8 +184,8 @@ class SettingsViewModelTest {
         runTest {
             repository.setNotificationContentStorageEnabled(true)
             repository.operationLog.clear()
-            coEvery { localDataRepository.clearStoredNotificationContent() } answers {
-                repository.operationLog += "clear-content"
+            coEvery { localDataRepository.reconcileStoredNotificationContentPolicy() } answers {
+                repository.operationLog += "reconcile-content"
                 ClearedDataCounts()
             }
             val vm = viewModel()
@@ -193,18 +197,18 @@ class SettingsViewModelTest {
                 cancelAndIgnoreRemainingEvents()
             }
 
-            coVerify(exactly = 1) { localDataRepository.clearStoredNotificationContent() }
+            coVerify(exactly = 1) { localDataRepository.reconcileStoredNotificationContentPolicy() }
             assertTrue(
                 repository.operationLog.indexOf("content-storage:false") <
-                    repository.operationLog.indexOf("clear-content"),
+                    repository.operationLog.indexOf("reconcile-content"),
             )
         }
 
     @Test
     fun `excluding a package blocks future capture before deleting its ciphertext`() =
         runTest {
-            coEvery { localDataRepository.clearStoredNotificationContentForPackage("com.example.bank") } answers {
-                repository.operationLog += "clear-package"
+            coEvery { localDataRepository.reconcileStoredNotificationContentPolicy() } answers {
+                repository.operationLog += "reconcile-content"
                 ClearedDataCounts()
             }
             val vm = viewModel()
@@ -212,12 +216,11 @@ class SettingsViewModelTest {
             vm.setContentPackageExcluded("com.example.bank", excluded = true)
 
             assertTrue(
-                repository.operationLog.indexOf("excluded-packages:com.example.bank") <
-                    repository.operationLog.indexOf("clear-package"),
+                repository.operationLog.indexOf("excluded-package:com.example.bank:true") <
+                    repository.operationLog.indexOf("reconcile-content"),
             )
-            coVerify(exactly = 1) {
-                localDataRepository.clearStoredNotificationContentForPackage("com.example.bank")
-            }
+            assertTrue(repository.operationLog.none { it.startsWith("excluded-packages:") })
+            coVerify(exactly = 1) { localDataRepository.reconcileStoredNotificationContentPolicy() }
         }
 
     @Test
@@ -389,6 +392,115 @@ class SettingsViewModelTest {
             coVerify(exactly = 1) { localDataRepository.clearAllDatabaseData() }
         }
 
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `prepared encrypted export preserves its password and feedback option until SAF returns`() =
+        runTest {
+            val uri = mockk<Uri>()
+            val output = ByteArrayOutputStream()
+            val passphrase = "private-password".toCharArray()
+            var receivedPassphrase: CharArray? = null
+            every { contentResolver.openOutputStream(uri) } returns output
+            coEvery { backupRepository.export(any(), includeLearningFeedback = true) } coAnswers {
+                receivedPassphrase = firstArg<CharArray?>()?.copyOf()
+                """{"version":6}"""
+            }
+            val vm = viewModel()
+
+            vm.prepareBackupExport(passphrase, includeLearningFeedback = true)
+            vm.completeBackupExport(uri)
+            advanceUntilIdle()
+
+            assertTrue(receivedPassphrase.contentEquals("private-password".toCharArray()))
+            assertTrue(output.toString(Charsets.UTF_8.name()) == """{"version":6}""")
+            assertTrue(passphrase.all { it == '\u0000' })
+        }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `SAF export result without an in-memory operation fails closed`() =
+        runTest {
+            val uri = mockk<Uri>()
+            val vm = viewModel()
+
+            vm.completeBackupExport(uri)
+            advanceUntilIdle()
+
+            coVerify(exactly = 0) { backupRepository.export(any(), any()) }
+            verify(exactly = 0) { contentResolver.openOutputStream(any()) }
+        }
+
+    @Test
+    fun `SAF import result without an in-memory operation fails closed`() =
+        runTest {
+            val uri = mockk<Uri>()
+            val vm = viewModel()
+
+            vm.completeBackupImport(uri)
+
+            verify(exactly = 0) { contentResolver.openInputStream(any()) }
+            coVerify(exactly = 0) { backupRepository.preview(any(), any()) }
+        }
+
+    @Test
+    fun `cancelled SAF selection wipes the pending password without exporting`() =
+        runTest {
+            val passphrase = "private-password".toCharArray()
+            val vm = viewModel()
+
+            vm.prepareBackupExport(passphrase, includeLearningFeedback = false)
+            vm.completeBackupExport(null)
+
+            assertTrue(passphrase.all { it == '\u0000' })
+            coVerify(exactly = 0) { backupRepository.export(any(), any()) }
+        }
+
+    @Test
+    fun `restore message prioritizes settings review warning over restored counts`() {
+        val result =
+            DataResult.Success(
+                BackupSummary(
+                    rulesRestored = 2,
+                    insightsRestored = 1,
+                    profilesRestored = 3,
+                    feedbackRestored = 4,
+                    settingsReviewRequired = true,
+                    insightConflictsSkipped = 5,
+                ),
+            )
+
+        assertEquals(
+            com.alarmcontrol.ui.uiText(R.string.message_backup_restored_settings_review),
+            result.restoreMessage(),
+        )
+    }
+
+    @Test
+    fun `restore message reports existing insight days kept during merge`() {
+        val result =
+            DataResult.Success(
+                BackupSummary(
+                    rulesRestored = 2,
+                    insightsRestored = 1,
+                    profilesRestored = 3,
+                    feedbackRestored = 4,
+                    insightConflictsSkipped = 5,
+                ),
+            )
+
+        assertEquals(
+            com.alarmcontrol.ui.uiText(
+                R.string.message_backup_restored_with_existing_days,
+                2,
+                3,
+                1,
+                4,
+                5,
+            ),
+            result.restoreMessage(),
+        )
+    }
+
     @Test
     fun `backup import previews first and restores only after confirmation`() =
         runTest {
@@ -413,7 +525,8 @@ class SettingsViewModelTest {
 
             vm.uiState.test {
                 awaitUntil { it.llmModelStatus == LlmModelUiStatus.NOT_LOADED }
-                vm.importBackupFrom(uri, null)
+                vm.prepareBackupImport(null)
+                vm.completeBackupImport(uri)
                 val preview = awaitUntil { it.backupPreview != null }.backupPreview!!
                 assertTrue(preview.rules == 2 && preview.dailyInsights == 3)
                 vm.updateRestoreSelection(preview.selection.copy(learningFeedback = true))
@@ -447,6 +560,7 @@ class SettingsViewModelTest {
             val secondBackup = "invalid local backup"
             val suppliedPassphrase = "password".toCharArray()
             var retainedPassphrase: CharArray? = null
+            var receivedPassphrase: CharArray? = null
             every { contentResolver.openInputStream(firstUri) } returns firstBackup.byteInputStream()
             every { contentResolver.openInputStream(secondUri) } returns secondBackup.byteInputStream()
             coEvery { backupRepository.preview(firstBackup, null) } returns
@@ -463,16 +577,19 @@ class SettingsViewModelTest {
                 )
             coEvery { backupRepository.preview(secondBackup, any()) } coAnswers {
                 retainedPassphrase = secondArg()
+                receivedPassphrase = secondArg<CharArray?>()?.copyOf()
                 error("Storage failure")
             }
             val vm = viewModel()
 
             vm.uiState.test {
                 awaitUntil { it.llmModelStatus == LlmModelUiStatus.NOT_LOADED }
-                vm.importBackupFrom(firstUri, null)
+                vm.prepareBackupImport(null)
+                vm.completeBackupImport(firstUri)
                 awaitUntil { it.backupPreview != null }
 
-                vm.importBackupFrom(secondUri, suppliedPassphrase)
+                vm.prepareBackupImport(suppliedPassphrase)
+                vm.completeBackupImport(secondUri)
                 awaitUntil { it.backupPreview == null && it.userMessage != null }
                 vm.confirmRestore()
                 cancelAndIgnoreRemainingEvents()
@@ -480,6 +597,7 @@ class SettingsViewModelTest {
 
             assertTrue(suppliedPassphrase.all { it == '\u0000' })
             assertTrue(retainedPassphrase?.all { it == '\u0000' } == true)
+            assertTrue(receivedPassphrase.contentEquals("password".toCharArray()))
             coVerify(exactly = 0) { backupRepository.restore(any(), any(), any()) }
         }
 }

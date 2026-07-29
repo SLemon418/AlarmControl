@@ -342,6 +342,28 @@ class RulesViewModelTest {
         }
 
     @Test
+    fun `activity shortcut completion waits until its editor is published`() =
+        runTest {
+            val workerDispatcher = StandardTestDispatcher(testScheduler)
+            val vm = viewModel(workerDispatcher = workerDispatcher)
+
+            vm.uiState.test {
+                assertEquals(null, awaitItem().editor)
+                val completion =
+                    vm.onCreateRuleFromActivity(QuickRuleDraft("com.example.shop", "promotion"))
+
+                assertFalse(completion.isCompleted)
+                workerDispatcher.scheduler.runCurrent()
+                assertTrue(completion.await())
+                assertEquals(
+                    "com.example.shop",
+                    awaitUntil { it.editor != null }.editor?.guidedPackageName,
+                )
+                cancelAndIgnoreRemainingEvents()
+            }
+        }
+
+    @Test
     fun `late activity shortcut resolution cannot replace a newer editor draft`() =
         runTest {
             val workerDispatcher = StandardTestDispatcher(testScheduler)
@@ -349,11 +371,13 @@ class RulesViewModelTest {
 
             vm.uiState.test {
                 awaitUntil { !it.isLoading }
-                vm.onCreateRuleFromActivity(QuickRuleDraft("com.example.shop", "promotion"))
+                val completion =
+                    vm.onCreateRuleFromActivity(QuickRuleDraft("com.example.shop", "promotion"))
                 vm.onUseTemplate(RuleTemplate.KEEP_ALARMS)
                 val draft = awaitUntil { it.editor != null }.editor!!
                 workerDispatcher.scheduler.runCurrent()
 
+                assertFalse(completion.await())
                 assertEquals(EditorAction.KEEP, draft.action)
                 assertEquals(
                     Condition.AllOf(listOf(Condition.CategoryEquals("alarm"))),
@@ -579,6 +603,25 @@ class RulesViewModelTest {
                 cancelAndIgnoreRemainingEvents()
             }
         }
+
+    @Test
+    fun `restored rule draft is present in the first public state`() {
+        val draft =
+            RuleEditorState(
+                name = "Restored immediately",
+                root = Condition.PackageEquals("com.example").toEditableRoot(),
+                hasUnsavedChanges = true,
+            )
+        val savedState =
+            SavedStateHandle(
+                mapOf(RULE_EDITOR_DRAFT_SAVED_STATE_KEY to RuleEditorDraftCodec.encode(draft)),
+            )
+
+        val initial = viewModel(savedStateHandle = savedState).uiState.value
+
+        assertTrue(initial.isLoading)
+        assertEquals("Restored immediately", initial.editor?.name)
+    }
 
     @Test
     fun `discarding a rule draft removes its process death state`() =

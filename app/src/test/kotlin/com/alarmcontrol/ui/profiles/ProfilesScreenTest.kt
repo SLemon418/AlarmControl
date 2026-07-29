@@ -112,6 +112,27 @@ class ProfilesScreenTest {
     }
 
     @Test
+    fun `editor route waits for loading before closing a missing editor`() {
+        val state = mutableStateOf(ProfilesUiState())
+        var closeCount = 0
+        composeRule.setContent {
+            ProfileEditorRouteCloseEffect(
+                isLoading = state.value.isLoading,
+                editorMissing = state.value.editor == null,
+                onClose = { closeCount += 1 },
+            )
+        }
+
+        composeRule.runOnIdle {
+            assertEquals(0, closeCount)
+            state.value = state.value.copy(isLoading = false)
+        }
+        composeRule.runOnIdle {
+            assertEquals(1, closeCount)
+        }
+    }
+
+    @Test
     fun `delete requires confirmation and hoists the confirmed action`() {
         val profile = ProfileListItem("7", "Focus", memberCount = 2, enabledCount = 1)
         val state = mutableStateOf(ProfilesUiState(isLoading = false, profiles = listOf(profile)))

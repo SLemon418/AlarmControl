@@ -2,6 +2,8 @@ package com.alarmcontrol.data.repository
 
 import com.alarmcontrol.core.privacy.ClearedDataCounts
 import com.alarmcontrol.core.privacy.LocalDataRepository
+import com.alarmcontrol.core.settings.MaintenanceSettingsSnapshot
+import com.alarmcontrol.core.settings.SettingsRepository
 import com.alarmcontrol.data.db.TransactionRunner
 import com.alarmcontrol.data.db.dao.AutomationAuditDao
 import com.alarmcontrol.data.db.dao.CategoryFeedbackDao
@@ -11,6 +13,7 @@ import com.alarmcontrol.data.db.dao.NotificationEventDao
 import com.alarmcontrol.data.db.dao.ProfileDao
 import com.alarmcontrol.data.db.dao.RuleDao
 import com.alarmcontrol.data.db.dao.RuleSuggestionDao
+import com.alarmcontrol.data.security.MaintenancePolicyAccessGuard
 import com.alarmcontrol.data.security.NotificationContentAccessGuard
 import com.alarmcontrol.data.security.NotificationContentCipher
 import javax.inject.Inject
@@ -27,8 +30,10 @@ class LocalDataRepositoryImpl
         private val llmObservationDao: LlmObservationDao,
         private val automationAuditDao: AutomationAuditDao,
         private val ruleSuggestionDao: RuleSuggestionDao,
+        private val settingsRepository: SettingsRepository,
         private val contentCipher: NotificationContentCipher,
         private val contentAccessGuard: NotificationContentAccessGuard,
+        private val maintenancePolicyAccessGuard: MaintenancePolicyAccessGuard,
     ) : LocalDataRepository {
         override suspend fun clearActivityHistory(): ClearedDataCounts =
             contentAccessGuard.withLock {
@@ -72,6 +77,32 @@ class LocalDataRepositoryImpl
                 ClearedDataCounts(encryptedContents = count)
             }
         }
+
+        override suspend fun reconcileStoredNotificationContentPolicy(): ClearedDataCounts =
+            maintenancePolicyAccessGuard.withLock {
+                reconcileStoredNotificationContentPolicy(settingsRepository.maintenanceSnapshot())
+            }
+
+        override suspend fun reconcileStoredNotificationContentPolicy(
+            policy: MaintenanceSettingsSnapshot,
+        ): ClearedDataCounts =
+            contentAccessGuard.withLock {
+                if (policy.notificationContentStorageEnabled) {
+                    val count =
+                        transactionRunner.run {
+                            var deleted = 0
+                            policy.contentExcludedPackages.forEach { packageName ->
+                                deleted += eventDao.deleteEncryptedContentsForPackage(packageName)
+                            }
+                            deleted
+                        }
+                    ClearedDataCounts(encryptedContents = count)
+                } else {
+                    val count = transactionRunner.run { eventDao.deleteAllEncryptedContents() }
+                    contentCipher.deleteKey()
+                    ClearedDataCounts(encryptedContents = count)
+                }
+            }
 
         override suspend fun clearAllDatabaseData(): ClearedDataCounts =
             contentAccessGuard.withLock {

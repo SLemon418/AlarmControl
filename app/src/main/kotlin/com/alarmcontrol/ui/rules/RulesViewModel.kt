@@ -28,7 +28,10 @@ import com.alarmcontrol.ui.UiText
 import com.alarmcontrol.ui.app.AppIdentityResolver
 import com.alarmcontrol.ui.uiText
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
@@ -37,6 +40,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.stateIn
@@ -196,7 +200,11 @@ class RulesViewModel
                     availableSources = content.sources,
                     pendingDelete = deleteConfirmation,
                 )
-            }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), RulesUiState())
+            }.stateIn(
+                viewModelScope,
+                SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+                RulesUiState(editor = editor.value),
+            )
 
         /** Re-reads whether notification access is granted; call when the screen resumes. */
         fun refreshNotificationAccess() {
@@ -208,77 +216,53 @@ class RulesViewModel
                 }
         }
 
-        /** Opens an unsaved package-level draft from a privacy-safe activity-feed item. */
-        fun onCreateRuleFromActivity(draft: QuickRuleDraft) {
+        /**
+         * Prepares an unsaved package-level draft from a privacy-safe activity item.
+         *
+         * The returned result becomes true only after this exact request publishes its editor.
+         */
+        fun onCreateRuleFromActivity(draft: QuickRuleDraft): Deferred<Boolean> {
+            val completion = CompletableDeferred<Boolean>()
             val generation = editorRequestGeneration.incrementAndGet()
             editorRequestJob?.cancel()
-            editorRequestJob =
-                viewModelScope.launch {
-                    val appName = withContext(dispatcher) { appIdentityResolver.resolve(draft.packageName).label }
-                    if (editorRequestGeneration.get() != generation) return@launch
-                    val conditions =
-                        if (draft.marketingMonitor) {
-                            listOf(
-                                Condition.PackageEquals(draft.packageName),
-                                Condition.AnyOf(
-                                    listOf(
-                                        Condition.MlCategoryEquals("promotion"),
-                                        Condition.SemanticIntentEquals(
-                                            com.alarmcontrol.core.filtering.SemanticIntent.MARKETING,
-                                        ),
-                                    ),
-                                ),
-                            )
-                        } else {
-                            buildList {
-                                add(Condition.PackageEquals(draft.packageName))
-                                if (draft.channelId.isNullOrBlank()) {
-                                    draft.category
-                                        ?.takeIf(String::isNotBlank)
-                                        ?.let { add(Condition.CategoryEquals(it)) }
-                                } else {
-                                    add(Condition.ChannelEquals(draft.channelId))
-                                }
+            val request =
+                viewModelScope.launch(start = CoroutineStart.LAZY) {
+                    val appName =
+                        runCatchingPreservingCancellation {
+                            withContext(dispatcher) {
+                                appIdentityResolver.resolve(draft.packageName).label
                             }
+                        }.getOrElse {
+                            if (editorRequestGeneration.get() == generation) {
+                                messages.value = uiText(R.string.message_generic_error)
+                            }
+                            return@launch
                         }
+                    if (editorRequestGeneration.get() != generation) return@launch
+                    val preparedEditor =
+                        draft.toEditorState(
+                            appName = appName,
+                            protectionPriority = suggestedProtectionPriority(),
+                        )
                     setEditor(
-                        RuleEditorState(
-                            name = appName.takeIf { draft.marketingMonitor }.orEmpty(),
-                            root = Condition.AllOf(conditions).toEditableRoot(),
-                            action = if (draft.keep) EditorAction.KEEP else EditorAction.CANCEL,
-                            executionMode =
-                                if (draft.keep) {
-                                    RuleExecutionMode.ACTIVE
-                                } else {
-                                    RuleExecutionMode.MONITOR
-                                },
-                            priority = if (draft.keep) suggestedProtectionPriority().toString() else "0",
-                            simulation =
-                                RuleSimulationState(
-                                    packageName = draft.packageName,
-                                    category = draft.category.orEmpty(),
-                                    channelId = draft.channelId.orEmpty(),
-                                ),
-                            hasUnsavedChanges = true,
-                            editorMode =
-                                if (draft.marketingMonitor || (!draft.keep && !draft.category.isNullOrBlank())) {
-                                    RuleEditorMode.ADVANCED
-                                } else {
-                                    RuleEditorMode.GUIDED
-                                },
-                            guidedPackageName = draft.packageName,
-                            guidedAppName = appName,
-                            guidedChannelId = draft.channelId,
-                            guidedScope =
-                                if (draft.channelId.isNullOrBlank()) {
-                                    GuidedRuleScope.APP
-                                } else {
-                                    GuidedRuleScope.CHANNEL
-                                },
-                        ),
+                        preparedEditor,
                         invalidatePendingRequest = false,
                     )
+                    uiState.first { state ->
+                        state.editor?.copy(warnings = emptyList()) == preparedEditor
+                    }
+                    if (
+                        editorRequestGeneration.get() != generation ||
+                        editor.value !== preparedEditor
+                    ) {
+                        return@launch
+                    }
+                    completion.complete(true)
                 }
+            editorRequestJob = request
+            request.invokeOnCompletion { completion.complete(false) }
+            request.start()
+            return completion
         }
 
         fun onAddRule() {
@@ -596,6 +580,59 @@ class RulesViewModel
             val editorWarnings: List<UiText> = emptyList(),
         )
     }
+
+private fun QuickRuleDraft.toEditorState(
+    appName: String,
+    protectionPriority: Int,
+): RuleEditorState {
+    val conditions =
+        if (marketingMonitor) {
+            listOf(
+                Condition.PackageEquals(packageName),
+                Condition.AnyOf(
+                    listOf(
+                        Condition.MlCategoryEquals("promotion"),
+                        Condition.SemanticIntentEquals(SemanticIntent.MARKETING),
+                    ),
+                ),
+            )
+        } else {
+            buildList {
+                add(Condition.PackageEquals(packageName))
+                if (channelId.isNullOrBlank()) {
+                    category
+                        ?.takeIf(String::isNotBlank)
+                        ?.let { add(Condition.CategoryEquals(it)) }
+                } else {
+                    add(Condition.ChannelEquals(channelId))
+                }
+            }
+        }
+    return RuleEditorState(
+        name = appName.takeIf { marketingMonitor }.orEmpty(),
+        root = Condition.AllOf(conditions).toEditableRoot(),
+        action = if (keep) EditorAction.KEEP else EditorAction.CANCEL,
+        executionMode = if (keep) RuleExecutionMode.ACTIVE else RuleExecutionMode.MONITOR,
+        priority = if (keep) protectionPriority.toString() else "0",
+        simulation =
+            RuleSimulationState(
+                packageName = packageName,
+                category = category.orEmpty(),
+                channelId = channelId.orEmpty(),
+            ),
+        hasUnsavedChanges = true,
+        editorMode =
+            if (marketingMonitor || (!keep && !category.isNullOrBlank())) {
+                RuleEditorMode.ADVANCED
+            } else {
+                RuleEditorMode.GUIDED
+            },
+        guidedPackageName = packageName,
+        guidedAppName = appName,
+        guidedChannelId = channelId,
+        guidedScope = if (channelId.isNullOrBlank()) GuidedRuleScope.APP else GuidedRuleScope.CHANNEL,
+    )
+}
 
 private fun RuleEditorState.toGuidedRoot(): GroupNode {
     val children =

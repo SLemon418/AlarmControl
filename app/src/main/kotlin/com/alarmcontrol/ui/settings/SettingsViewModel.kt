@@ -74,6 +74,7 @@ class SettingsViewModel
         private val backupPreview = MutableStateFlow<BackupPreviewUi?>(null)
         private val settingsMutationMutex = Mutex()
         private val backupRestoreLock = Any()
+        private val pendingBackupSelection = PendingBackupSelectionStore()
         private var pendingRestore: PendingRestore? = null
         private val backupImportGeneration = AtomicLong()
         private val appHealth = MutableStateFlow<AppHealthSnapshot?>(null)
@@ -274,7 +275,7 @@ class SettingsViewModel
                     settingsRepository.setNotificationContentStorageEnabled(true)
                 } else {
                     settingsRepository.setNotificationContentStorageEnabled(false)
-                    localDataRepository.clearStoredNotificationContent()
+                    localDataRepository.reconcileStoredNotificationContentPolicy()
                 }
             }
         }
@@ -284,12 +285,9 @@ class SettingsViewModel
             excluded: Boolean,
         ) {
             launchSettingUpdate {
-                val current = settingsRepository.contentExcludedPackages.first()
-                settingsRepository.setContentExcludedPackages(
-                    if (excluded) current + packageName else current - packageName,
-                )
+                settingsRepository.setContentPackageExcluded(packageName, excluded)
                 if (excluded) {
-                    localDataRepository.clearStoredNotificationContentForPackage(packageName)
+                    localDataRepository.reconcileStoredNotificationContentPolicy()
                 }
             }
         }
@@ -387,10 +385,29 @@ class SettingsViewModel
         }
 
         /** Writes the current backup JSON to the SAF-chosen [uri]; all on-device (CLAUDE.md §3). */
-        fun exportBackupTo(
-            uri: Uri,
+        fun prepareBackupExport(
             passphrase: CharArray?,
             includeLearningFeedback: Boolean,
+        ) {
+            pendingBackupSelection.prepareExport(passphrase, includeLearningFeedback)
+        }
+
+        fun completeBackupExport(uri: Uri?) {
+            val pending = pendingBackupSelection.takeExport()
+            if (pending == null) {
+                if (uri != null) messages.value = uiText(R.string.message_backup_selection_expired)
+                return
+            }
+            if (uri == null) {
+                pending.clear()
+                return
+            }
+            exportBackupTo(uri, pending)
+        }
+
+        private fun exportBackupTo(
+            uri: Uri,
+            pending: PendingBackupSelection.Export,
         ) {
             viewModelScope.launch(ioDispatcher) {
                 try {
@@ -398,8 +415,8 @@ class SettingsViewModel
                         runCatchingPreservingCancellation {
                             val json =
                                 backupRepository.export(
-                                    passphrase = passphrase?.takeIf { it.isNotEmpty() },
-                                    includeLearningFeedback = includeLearningFeedback,
+                                    passphrase = pending.passphrase,
+                                    includeLearningFeedback = pending.includeLearningFeedback,
                                 )
                             appContext.contentResolver.openOutputStream(uri)?.use { it.writeBackupText(json) }
                                 ?: error("Backup destination unavailable")
@@ -408,19 +425,36 @@ class SettingsViewModel
                             onFailure = { uiText(R.string.message_backup_export_failed) },
                         )
                 } finally {
-                    passphrase?.fill('\u0000')
+                    pending.clear()
                 }
             }
         }
 
+        fun prepareBackupImport(passphrase: CharArray?) {
+            pendingBackupSelection.prepareImport(passphrase)
+        }
+
+        fun completeBackupImport(uri: Uri?) {
+            val pending = pendingBackupSelection.takeImport()
+            if (pending == null) {
+                if (uri != null) messages.value = uiText(R.string.message_backup_selection_expired)
+                return
+            }
+            if (uri == null) {
+                pending.clear()
+                return
+            }
+            importBackupFrom(uri, pending)
+        }
+
         /** Reads and validates a SAF backup, then exposes a confirmation preview without mutating data. */
-        fun importBackupFrom(
+        private fun importBackupFrom(
             uri: Uri,
-            passphrase: CharArray?,
+            pending: PendingBackupSelection.Import,
         ) {
             val generation = beginBackupImport()
             viewModelScope.launch(ioDispatcher) {
-                val retainedPassphrase = passphrase?.takeIf { it.isNotEmpty() }?.copyOf()
+                val retainedPassphrase = pending.passphrase?.copyOf()
                 var retainedByPendingRestore = false
                 try {
                     val read =
@@ -464,7 +498,7 @@ class SettingsViewModel
                     )
                 } finally {
                     if (!retainedByPendingRestore) retainedPassphrase?.fill('\u0000')
-                    passphrase?.fill('\u0000')
+                    pending.clear()
                 }
             }
         }
@@ -518,6 +552,7 @@ class SettingsViewModel
         }
 
         override fun onCleared() {
+            pendingBackupSelection.clear()
             invalidateBackupImport()
             super.onCleared()
         }
@@ -706,16 +741,30 @@ private fun RestoreSelectionUi.toDomain(): RestoreOptions =
         learningFeedback = learningFeedback,
     )
 
-private fun DataResult<BackupSummary>.restoreMessage(): UiText =
+internal fun DataResult<BackupSummary>.restoreMessage(): UiText =
     when (this) {
         is DataResult.Success ->
-            uiText(
-                R.string.message_backup_restored,
-                data.rulesRestored,
-                data.profilesRestored,
-                data.insightsRestored,
-                data.feedbackRestored,
-            )
+            when {
+                data.settingsReviewRequired ->
+                    uiText(R.string.message_backup_restored_settings_review)
+                data.insightConflictsSkipped > 0 ->
+                    uiText(
+                        R.string.message_backup_restored_with_existing_days,
+                        data.rulesRestored,
+                        data.profilesRestored,
+                        data.insightsRestored,
+                        data.feedbackRestored,
+                        data.insightConflictsSkipped,
+                    )
+                else ->
+                    uiText(
+                        R.string.message_backup_restored,
+                        data.rulesRestored,
+                        data.profilesRestored,
+                        data.insightsRestored,
+                        data.feedbackRestored,
+                    )
+            }
         is DataResult.Failure -> uiText(R.string.message_backup_restore_failed)
         DataResult.Loading -> uiText(R.string.message_backup_restoring)
     }

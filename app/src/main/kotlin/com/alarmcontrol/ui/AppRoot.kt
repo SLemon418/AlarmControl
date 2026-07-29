@@ -17,6 +17,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -61,7 +63,10 @@ private enum class TopDestination(
 @Composable
 fun AppRoot() {
     val navController = rememberNavController()
-    var quickRuleDraft by remember { mutableStateOf<QuickRuleDraft?>(null) }
+    var quickRuleDraft by
+        rememberSaveable(stateSaver = QuickRuleDraftSaver) {
+            mutableStateOf<QuickRuleDraft?>(null)
+        }
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = backStackEntry?.destination
     val currentRoute =
@@ -296,3 +301,53 @@ private const val PROFILES_LIST_ROUTE = "profiles/list"
 private const val PROFILE_EDITOR_ROUTE = "profiles/editor"
 internal const val BOTTOM_NAVIGATION_TEST_TAG = "bottom_navigation"
 internal const val NAVIGATION_RAIL_TEST_TAG = "navigation_rail"
+
+internal val QuickRuleDraftSaver =
+    listSaver<QuickRuleDraft?, Any>(
+        save = { draft ->
+            if (draft == null) {
+                emptyList()
+            } else {
+                listOf(
+                    draft.packageName,
+                    draft.category != null,
+                    draft.category.orEmpty(),
+                    draft.channelId != null,
+                    draft.channelId.orEmpty(),
+                    draft.keep,
+                    draft.marketingMonitor,
+                )
+            }
+        },
+        restore = { values ->
+            if (values.isEmpty()) {
+                null
+            } else {
+                QuickRuleDraft(
+                    packageName = values[PACKAGE_NAME_INDEX] as String,
+                    category =
+                        if (values[CATEGORY_PRESENT_INDEX] as Boolean) {
+                            values[CATEGORY_INDEX] as String
+                        } else {
+                            null
+                        },
+                    channelId =
+                        if (values[CHANNEL_PRESENT_INDEX] as Boolean) {
+                            values[CHANNEL_INDEX] as String
+                        } else {
+                            null
+                        },
+                    keep = values[KEEP_INDEX] as Boolean,
+                    marketingMonitor = values[MARKETING_MONITOR_INDEX] as Boolean,
+                )
+            }
+        },
+    )
+
+private const val PACKAGE_NAME_INDEX = 0
+private const val CATEGORY_PRESENT_INDEX = 1
+private const val CATEGORY_INDEX = 2
+private const val CHANNEL_PRESENT_INDEX = 3
+private const val CHANNEL_INDEX = 4
+private const val KEEP_INDEX = 5
+private const val MARKETING_MONITOR_INDEX = 6

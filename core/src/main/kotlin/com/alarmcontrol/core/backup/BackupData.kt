@@ -65,11 +65,17 @@ data class BackupPreview(
     val adFeedbackVotes: Int,
 )
 
-/** Outcome counts from a restore, surfaced to the user. */
+/**
+ * Outcome counts from a restore, surfaced to the user. [settingsReviewRequired] means the selected
+ * Room data committed but settings finalization failed, so side-effecting settings remain disabled
+ * until the user reviews them. [insightConflictsSkipped] counts MERGE days kept from local storage.
+ */
 data class BackupSummary(
     val rulesRestored: Int,
     val insightsRestored: Int,
     val profilesRestored: Int = 0,
     val settingsRestored: Boolean = false,
     val feedbackRestored: Int = 0,
+    val settingsReviewRequired: Boolean = false,
+    val insightConflictsSkipped: Int = 0,
 )

@@ -154,7 +154,10 @@
     <string name="message_backup_exported">Backup exported</string>
     <string name="message_backup_export_failed">Couldn\'t export backup</string>
     <string name="message_backup_read_failed">Couldn\'t read backup</string>
+    <string name="message_backup_selection_expired">Backup selection expired. Choose the file again.</string>
     <string name="message_backup_restored">Restored %1$d rules, %2$d profiles, %3$d days, and %4$d learning votes</string>
+    <string name="message_backup_restored_settings_review">Data was restored, but settings could not be applied. Review Settings before re-enabling filtering or automation.</string>
+    <string name="message_backup_restored_with_existing_days">Restored %1$d rules, %2$d profiles, %3$d new days, and %4$d learning votes; kept %5$d existing days</string>
     <string name="message_backup_restore_failed">Couldn\'t restore backup</string>
     <string name="message_backup_restoring">Restoring…</string>
 

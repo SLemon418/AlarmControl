@@ -121,8 +121,10 @@ fun SettingsRoute(
         onClearAll = viewModel::clearAllData,
         onImportLlmModel = viewModel::importLlmModelFrom,
         onRemoveLlmModel = viewModel::removeLlmModel,
-        onExport = viewModel::exportBackupTo,
-        onImport = viewModel::importBackupFrom,
+        onPrepareExport = viewModel::prepareBackupExport,
+        onCompleteExport = viewModel::completeBackupExport,
+        onPrepareImport = viewModel::prepareBackupImport,
+        onCompleteImport = viewModel::completeBackupImport,
         onRestoreSelectionChange = viewModel::updateRestoreSelection,
         onConfirmRestore = viewModel::confirmRestore,
         onCancelRestore = viewModel::cancelRestore,
@@ -150,8 +152,10 @@ fun SettingsScreen(
     onExternalAutomationChange: (Boolean) -> Unit,
     onLlmAnalysisChange: (Boolean) -> Unit,
     onImportLlmModel: (Uri) -> Unit,
-    onExport: (Uri, CharArray?, Boolean) -> Unit,
-    onImport: (Uri, CharArray?) -> Unit,
+    onPrepareExport: (CharArray?, Boolean) -> Unit,
+    onCompleteExport: (Uri?) -> Unit,
+    onPrepareImport: (CharArray?) -> Unit,
+    onCompleteImport: (Uri?) -> Unit,
     onUserMessageShown: () -> Unit,
     onSemanticAnalysisScopeChange: (SemanticAnalysisScope) -> Unit = {},
     onRemoveLlmModel: () -> Unit = {},
@@ -186,16 +190,8 @@ fun SettingsScreen(
 
     // Storage Access Framework: the user picks where the JSON lives; the app never touches the network.
     val exportLauncher =
-        rememberLauncherForActivityResult(CreateLocalDocument("application/json")) { uri ->
-            uri?.let { onExport(it, backupPassword.toPassphrase(), includeLearningFeedback) }
-            backupPassword = ""
-            includeLearningFeedback = false
-        }
-    val importLauncher =
-        rememberLauncherForActivityResult(OpenLocalDocument()) { uri ->
-            uri?.let { onImport(it, backupPassword.toPassphrase()) }
-            backupPassword = ""
-        }
+        rememberLauncherForActivityResult(CreateLocalDocument("application/json"), onCompleteExport)
+    val importLauncher = rememberLauncherForActivityResult(OpenLocalDocument(), onCompleteImport)
     val modelImportLauncher =
         rememberLauncherForActivityResult(OpenLocalDocument()) { uri ->
             uri?.let(onImportLlmModel)
@@ -226,8 +222,17 @@ fun SettingsScreen(
         onSemanticAnalysisScopeChange = onSemanticAnalysisScopeChange,
         onChooseModel = { modelImportLauncher.launch(arrayOf("application/octet-stream", "application/zip")) },
         onRemoveLlmModel = onRemoveLlmModel,
-        onBackup = { exportLauncher.launch("alarmcontrol-backup.json") },
-        onRestore = { importLauncher.launch(arrayOf("application/json")) },
+        onBackup = {
+            onPrepareExport(backupPassword.toPassphrase(), includeLearningFeedback)
+            backupPassword = ""
+            includeLearningFeedback = false
+            exportLauncher.launch("alarmcontrol-backup.json")
+        },
+        onRestore = {
+            onPrepareImport(backupPassword.toPassphrase())
+            backupPassword = ""
+            importLauncher.launch(arrayOf("application/json"))
+        },
         onEventRetentionChange = onEventRetentionChange,
         onInsightRetentionChange = onInsightRetentionChange,
         onNotificationContentStorageChange = onNotificationContentStorageChange,

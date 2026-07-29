@@ -2,12 +2,17 @@ package com.alarmcontrol.ui
 
 import android.app.Application
 import androidx.compose.material3.Text
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import com.alarmcontrol.ui.rules.QuickRuleDraft
 import com.alarmcontrol.ui.theme.AlarmControlTheme
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -55,6 +60,31 @@ class AppRootTest {
         composeRule.onNodeWithTag(BOTTOM_NAVIGATION_TEST_TAG).assertDoesNotExist()
         composeRule.onNodeWithTag(NAVIGATION_RAIL_TEST_TAG).assertDoesNotExist()
         composeRule.onNodeWithText("Content").assertIsDisplayed()
+    }
+
+    @Test
+    fun pendingQuickRuleDraftSurvivesActivityStateRestoration() {
+        val restorationTester = StateRestorationTester(composeRule)
+        lateinit var state: MutableState<QuickRuleDraft?>
+        val expected =
+            QuickRuleDraft(
+                packageName = "com.example.shop",
+                category = null,
+                channelId = "offers",
+                keep = true,
+                marketingMonitor = false,
+            )
+        restorationTester.setContent {
+            state =
+                rememberSaveable(stateSaver = QuickRuleDraftSaver) {
+                    mutableStateOf<QuickRuleDraft?>(null)
+                }
+        }
+        composeRule.runOnIdle { state.value = expected }
+
+        restorationTester.emulateSavedInstanceStateRestore()
+
+        composeRule.runOnIdle { assertEquals(expected, state.value) }
     }
 
     private fun setNavigation(

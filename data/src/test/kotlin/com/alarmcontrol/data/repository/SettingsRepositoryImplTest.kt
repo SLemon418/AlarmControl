@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import com.alarmcontrol.core.settings.SettingsSnapshot
 import com.alarmcontrol.data.security.NotificationContentAccessGuard
 import kotlinx.coroutines.flow.first
@@ -112,7 +113,7 @@ class SettingsRepositoryImplTest {
         }
 
     @Test
-    fun `DataStore read failure pauses filtering instead of using the fresh install default`() =
+    fun `DataStore read failure pauses filtering and aborts authoritative snapshots`() =
         runTest {
             val failingStore =
                 object : DataStore<Preferences> {
@@ -124,7 +125,8 @@ class SettingsRepositoryImplTest {
             val repository = SettingsRepositoryImpl(failingStore, NotificationContentAccessGuard())
 
             assertFalse(repository.filteringEnabled.first())
-            assertFalse(repository.snapshot().filteringEnabled)
+            assertTrue(runCatching { repository.snapshot() }.exceptionOrNull() is IOException)
+            assertTrue(runCatching { repository.maintenanceSnapshot() }.exceptionOrNull() is IOException)
         }
 
     @Test
@@ -153,18 +155,63 @@ class SettingsRepositoryImplTest {
 
             repository.setNotificationContentStorageEnabled(true)
             repository.setContentExcludedPackages(setOf("com.bank", "com.password"))
+            repository.setContentPackageExcluded("com.bank", excluded = false)
+            repository.setContentPackageExcluded("com.private", excluded = true)
 
             assertTrue(repository.notificationContentStorageEnabled.first())
-            assertEquals(setOf("com.bank", "com.password"), repository.contentExcludedPackages.first())
+            assertEquals(setOf("com.password", "com.private"), repository.contentExcludedPackages.first())
             assertFalse(
                 repository
                     .snapshot()
-                    .let { snapshot -> snapshot.toString().contains("com.bank") },
+                    .let { snapshot -> snapshot.toString().contains("com.private") },
             )
 
             repository.reset()
             assertFalse(repository.notificationContentStorageEnabled.first())
             assertEquals(emptySet<String>(), repository.contentExcludedPackages.first())
+        }
+
+    @Test
+    fun `atomic package update preserves persisted exclusions across read and edit failures`() =
+        runTest {
+            val excludedPackagesKey = stringSetPreferencesKey("content_excluded_packages")
+            val backingStore =
+                PreferenceDataStoreFactory.create {
+                    File(tempFolder.root, "atomic-content-exclusions.preferences_pb")
+                }
+            backingStore.edit { preferences ->
+                preferences[excludedPackagesKey] = setOf("com.existing")
+            }
+            var rejectEdits = false
+            val failingReadStore =
+                object : DataStore<Preferences> {
+                    override val data = flow<Preferences> { throw IOException("unreadable") }
+
+                    override suspend fun updateData(transform: suspend (t: Preferences) -> Preferences): Preferences {
+                        if (rejectEdits) throw IOException("unwritable")
+                        return backingStore.updateData(transform)
+                    }
+                }
+            val repository =
+                SettingsRepositoryImpl(failingReadStore, NotificationContentAccessGuard())
+
+            repository.setContentPackageExcluded("com.new", excluded = true)
+
+            assertEquals(
+                setOf("com.existing", "com.new"),
+                backingStore.data.first()[excludedPackagesKey],
+            )
+
+            rejectEdits = true
+            assertTrue(
+                runCatching {
+                    repository.setContentPackageExcluded("com.existing", excluded = false)
+                }.exceptionOrNull() is IOException,
+            )
+            assertEquals(
+                setOf("com.existing", "com.new"),
+                backingStore.data.first()[excludedPackagesKey],
+            )
         }
 
     @Test
@@ -268,6 +315,28 @@ class SettingsRepositoryImplTest {
 
             assertEquals(30, repository.eventRetentionDays.first())
             assertEquals(365, repository.dailyInsightRetentionDays.first())
+            assertTrue(
+                runCatching { repository.maintenanceSnapshot() }.exceptionOrNull() is
+                    IllegalStateException,
+            )
+        }
+
+    @Test
+    fun `invalid persisted content exclusions cannot authorize maintenance deletion`() =
+        runTest {
+            val dataStore =
+                PreferenceDataStoreFactory.create {
+                    File(tempFolder.root, "invalid-content-exclusions.preferences_pb")
+                }
+            dataStore.edit { preferences ->
+                preferences[stringSetPreferencesKey("content_excluded_packages")] = setOf("")
+            }
+            val repository = SettingsRepositoryImpl(dataStore, NotificationContentAccessGuard())
+
+            assertTrue(
+                runCatching { repository.maintenanceSnapshot() }.exceptionOrNull() is
+                    IllegalStateException,
+            )
         }
 
     @Test

@@ -76,7 +76,11 @@ class ProfilesViewModel
                         },
                     userMessage = message,
                 )
-            }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), ProfilesUiState())
+            }.stateIn(
+                viewModelScope,
+                SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+                ProfilesUiState(editor = editor.value),
+            )
 
         fun onAddProfile() {
             setEditor(ProfileEditorState())

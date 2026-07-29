@@ -13,20 +13,25 @@ import com.alarmcontrol.core.insights.InsightsSummaryRepository
 import com.alarmcontrol.core.privacy.ClearedDataCounts
 import com.alarmcontrol.core.privacy.LocalDataRepository
 import com.alarmcontrol.core.result.DataResult
+import com.alarmcontrol.core.settings.MaintenanceSettingsSnapshot
 import com.alarmcontrol.core.settings.SettingsRepository
 import com.alarmcontrol.core.settings.SettingsSnapshot
+import com.alarmcontrol.data.security.MaintenancePolicyAccessGuard
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.IOException
 import java.time.Instant
 
 private const val DAY = 24L * 60 * 60 * 1000
@@ -73,29 +78,47 @@ class InsightsHousekeeperTest {
         }
 
     @Test
-    fun `retries full encrypted content cleanup while content history is disabled`() =
+    fun `reconciles encrypted content policy before retention work`() =
         runTest {
             val localData = RecordingLocalDataRepository()
 
-            housekeeper(localData = localData, contentEnabled = false).run(now)
+            housekeeper(localData = localData).run(now)
 
-            assertEquals(1, localData.clearAllContentCalls)
-            assertTrue(localData.clearedPackages.isEmpty())
+            assertEquals(1, localData.reconcileContentPolicyCalls)
         }
 
     @Test
-    fun `retries cleanup only for excluded packages while content history is enabled`() =
+    fun `DataStore failure aborts every destructive maintenance operation`() =
         runTest {
+            val events = RecordingEventRepository()
+            val daily = RecordingDailyInsightRepository()
             val localData = RecordingLocalDataRepository()
+            val summary = RecordingSummaryRepository()
+            val failingSettings =
+                object : SettingsRepository by RetentionSettings(30, 365, false, emptySet()) {
+                    override suspend fun maintenanceSnapshot(): MaintenanceSettingsSnapshot =
+                        throw IOException("unreadable")
+                }
+            val target =
+                InsightsHousekeeper(
+                    events,
+                    summary,
+                    daily,
+                    failingSettings,
+                    localData,
+                )
 
-            housekeeper(
-                localData = localData,
-                contentEnabled = true,
-                excludedPackages = setOf("com.private", "com.bank"),
-            ).run(now)
+            val result = target.run(now)
 
-            assertEquals(0, localData.clearAllContentCalls)
-            assertEquals(setOf("com.private", "com.bank"), localData.clearedPackages)
+            assertTrue(result is DataResult.Failure)
+            assertEquals(0, localData.reconcileContentPolicyCalls)
+            assertEquals(null, events.encryptedContentPurgeCutoff)
+            assertEquals(null, events.purgeCutoff)
+            assertEquals(null, events.trimMax)
+            assertEquals(null, events.traceTrimMax)
+            assertTrue(daily.calls.isEmpty())
+            assertEquals(null, daily.purgeCutoff)
+            assertEquals(null, summary.saved)
         }
 
     @Test
@@ -208,6 +231,101 @@ class InsightsHousekeeperTest {
             assertEquals(completedDay - 89, daily.purgeCutoff)
         }
 
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `completed retention update cannot be followed by cleanup using the older policy`() =
+        runTest {
+            val operations = mutableListOf<String>()
+            val events = RecordingEventRepository(operations = operations)
+            val policyGuard = MaintenancePolicyAccessGuard()
+            val snapshotStarted = CompletableDeferred<Unit>()
+            val releaseSnapshot = CompletableDeferred<Unit>()
+            var eventDays = 30
+            val settings =
+                object : SettingsRepository by RetentionSettings(30, 365, false, emptySet()) {
+                    override suspend fun maintenanceSnapshot(): MaintenanceSettingsSnapshot {
+                        snapshotStarted.complete(Unit)
+                        releaseSnapshot.await()
+                        return MaintenanceSettingsSnapshot(eventRetentionDays = eventDays)
+                    }
+
+                    override suspend fun setEventRetentionDays(days: Int) {
+                        policyGuard.withLock {
+                            eventDays = days
+                            operations += "set-retention:$days"
+                        }
+                    }
+                }
+            val target =
+                InsightsHousekeeper(
+                    events,
+                    RecordingSummaryRepository(),
+                    RecordingDailyInsightRepository(),
+                    settings,
+                    RecordingLocalDataRepository(),
+                    policyGuard,
+                )
+
+            val maintenance = async { target.run(now) }
+            snapshotStarted.await()
+            val update = async { settings.setEventRetentionDays(365) }
+            runCurrent()
+
+            assertFalse(update.isCompleted)
+            releaseSnapshot.complete(Unit)
+            advanceUntilIdle()
+
+            assertTrue(maintenance.await() is DataResult.Success)
+            update.await()
+            assertTrue(operations.indexOf("purge") < operations.indexOf("set-retention:365"))
+        }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `maintenance waits for an earlier retention update and uses the new cutoff`() =
+        runTest {
+            val events = RecordingEventRepository()
+            val policyGuard = MaintenancePolicyAccessGuard()
+            val updateStarted = CompletableDeferred<Unit>()
+            val releaseUpdate = CompletableDeferred<Unit>()
+            var eventDays = 30
+            val settings =
+                object : SettingsRepository by RetentionSettings(30, 365, false, emptySet()) {
+                    override suspend fun maintenanceSnapshot(): MaintenanceSettingsSnapshot =
+                        MaintenanceSettingsSnapshot(eventRetentionDays = eventDays)
+
+                    override suspend fun setEventRetentionDays(days: Int) {
+                        policyGuard.withLock {
+                            updateStarted.complete(Unit)
+                            releaseUpdate.await()
+                            eventDays = days
+                        }
+                    }
+                }
+            val target =
+                InsightsHousekeeper(
+                    events,
+                    RecordingSummaryRepository(),
+                    RecordingDailyInsightRepository(),
+                    settings,
+                    RecordingLocalDataRepository(),
+                    policyGuard,
+                )
+
+            val update = async { settings.setEventRetentionDays(365) }
+            updateStarted.await()
+            val maintenance = async { target.run(now) }
+            runCurrent()
+
+            assertEquals(null, events.purgeCutoff)
+            releaseUpdate.complete(Unit)
+            advanceUntilIdle()
+
+            update.await()
+            assertTrue(maintenance.await() is DataResult.Success)
+            assertEquals(now - 365 * DAY, events.purgeCutoff)
+        }
+
     @Test
     fun `aggregates completed days before raw retention can truncate them`() =
         runTest {
@@ -271,11 +389,15 @@ class InsightsHousekeeperTest {
             var cleanupCalls = 0
             val blockingLocalData =
                 object : LocalDataRepository by RecordingLocalDataRepository() {
-                    override suspend fun clearStoredNotificationContent(): ClearedDataCounts {
+                    override suspend fun reconcileStoredNotificationContentPolicy(): ClearedDataCounts {
                         cleanupCalls += 1
                         if (cleanupCalls == 1) releaseFirstRun.await()
                         return ClearedDataCounts()
                     }
+
+                    override suspend fun reconcileStoredNotificationContentPolicy(
+                        policy: MaintenanceSettingsSnapshot,
+                    ): ClearedDataCounts = reconcileStoredNotificationContentPolicy()
                 }
             val target = housekeeper(localData = blockingLocalData)
 
@@ -482,8 +604,21 @@ private class RetentionSettings(
 
     override suspend fun setContentExcludedPackages(packageNames: Set<String>) = Unit
 
+    override suspend fun setContentPackageExcluded(
+        packageName: String,
+        excluded: Boolean,
+    ) = Unit
+
     override suspend fun snapshot(): SettingsSnapshot =
         SettingsSnapshot(eventRetentionDays = eventDays, dailyInsightRetentionDays = insightDays)
+
+    override suspend fun maintenanceSnapshot(): MaintenanceSettingsSnapshot =
+        MaintenanceSettingsSnapshot(
+            eventRetentionDays = eventDays,
+            dailyInsightRetentionDays = insightDays,
+            notificationContentStorageEnabled = notificationContentStorageEnabled.first(),
+            contentExcludedPackages = contentExcludedPackages.first(),
+        )
 
     override suspend fun restore(snapshot: SettingsSnapshot) = Unit
 
@@ -491,9 +626,8 @@ private class RetentionSettings(
 }
 
 private class RecordingLocalDataRepository : LocalDataRepository {
-    var clearAllContentCalls = 0
+    var reconcileContentPolicyCalls = 0
         private set
-    val clearedPackages = mutableSetOf<String>()
 
     override suspend fun clearActivityHistory(): ClearedDataCounts = ClearedDataCounts()
 
@@ -501,15 +635,19 @@ private class RecordingLocalDataRepository : LocalDataRepository {
 
     override suspend fun clearDailyInsights(): ClearedDataCounts = ClearedDataCounts()
 
-    override suspend fun clearStoredNotificationContent(): ClearedDataCounts {
-        clearAllContentCalls += 1
+    override suspend fun clearStoredNotificationContent(): ClearedDataCounts = ClearedDataCounts()
+
+    override suspend fun clearStoredNotificationContentForPackage(packageName: String): ClearedDataCounts =
+        ClearedDataCounts()
+
+    override suspend fun reconcileStoredNotificationContentPolicy(): ClearedDataCounts {
+        reconcileContentPolicyCalls += 1
         return ClearedDataCounts()
     }
 
-    override suspend fun clearStoredNotificationContentForPackage(packageName: String): ClearedDataCounts {
-        clearedPackages += packageName
-        return ClearedDataCounts()
-    }
+    override suspend fun reconcileStoredNotificationContentPolicy(
+        policy: MaintenanceSettingsSnapshot,
+    ): ClearedDataCounts = reconcileStoredNotificationContentPolicy()
 
     override suspend fun clearAllDatabaseData(): ClearedDataCounts = ClearedDataCounts()
 }

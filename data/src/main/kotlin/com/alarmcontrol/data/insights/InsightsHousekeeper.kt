@@ -11,7 +11,7 @@ import com.alarmcontrol.core.result.DataResult
 import com.alarmcontrol.core.result.runCatchingPreservingCancellation
 import com.alarmcontrol.core.settings.RetentionDefaults
 import com.alarmcontrol.core.settings.SettingsRepository
-import kotlinx.coroutines.flow.first
+import com.alarmcontrol.data.security.MaintenancePolicyAccessGuard
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.time.Instant
@@ -34,12 +34,14 @@ import javax.inject.Singleton
 @Singleton
 class InsightsHousekeeper
     @Inject
-    constructor(
+    internal constructor(
         private val eventRepository: NotificationEventRepository,
         private val summaryRepository: InsightsSummaryRepository,
         private val dailyInsightRepository: DailyInsightRepository,
         private val settingsRepository: SettingsRepository,
         private val localDataRepository: LocalDataRepository,
+        private val maintenancePolicyAccessGuard: MaintenancePolicyAccessGuard =
+            MaintenancePolicyAccessGuard(),
     ) {
         private val runMutex = Mutex()
 
@@ -50,29 +52,26 @@ class InsightsHousekeeper
         ): DataResult<InsightsReport> =
             runMutex.withLock {
                 runCatchingPreservingCancellation {
-                    val eventRetentionDays = settingsRepository.eventRetentionDays.first().toLong()
-                    val dailyRetentionDays = settingsRepository.dailyInsightRetentionDays.first().toLong()
-                    val contentStorageEnabled = settingsRepository.notificationContentStorageEnabled.first()
-                    val contentExcludedPackages = settingsRepository.contentExcludedPackages.first()
-                    if (contentStorageEnabled) {
-                        contentExcludedPackages.forEach { packageName ->
-                            localDataRepository.clearStoredNotificationContentForPackage(packageName)
+                    val purged =
+                        maintenancePolicyAccessGuard.withLock {
+                            val settings = settingsRepository.maintenanceSnapshot()
+                            val eventRetentionDays = settings.eventRetentionDays.toLong()
+                            val dailyRetentionDays = settings.dailyInsightRetentionDays.toLong()
+                            // Retry privacy cleanup after an earlier UI-triggered deletion failure.
+                            localDataRepository.reconcileStoredNotificationContentPolicy(settings)
+                            eventRepository.purgeEncryptedContentOlderThan(
+                                nowMillis - RetentionDefaults.ENCRYPTED_CONTENT_DAYS * DAY_MILLIS,
+                            )
+                            aggregateDailyHistory(
+                                nowMillis = nowMillis,
+                                zoneId = zoneId,
+                                eventRetentionDays = eventRetentionDays,
+                                dailyRetentionDays = dailyRetentionDays,
+                            )
+                            eventRepository.purgeEventsOlderThan(
+                                nowMillis - eventRetentionDays * DAY_MILLIS,
+                            )
                         }
-                    } else {
-                        // Retry privacy cleanup after an earlier UI-triggered deletion failure. Reads
-                        // are already fail-closed in NotificationEventRepositoryImpl.
-                        localDataRepository.clearStoredNotificationContent()
-                    }
-                    eventRepository.purgeEncryptedContentOlderThan(
-                        nowMillis - RetentionDefaults.ENCRYPTED_CONTENT_DAYS * DAY_MILLIS,
-                    )
-                    aggregateDailyHistory(
-                        nowMillis = nowMillis,
-                        zoneId = zoneId,
-                        eventRetentionDays = eventRetentionDays,
-                        dailyRetentionDays = dailyRetentionDays,
-                    )
-                    val purged = eventRepository.purgeEventsOlderThan(nowMillis - eventRetentionDays * DAY_MILLIS)
 
                     val windowMillis = WINDOW_DAYS * DAY_MILLIS
                     val recent = eventRepository.mutedCountsByPackageBetween(nowMillis - windowMillis, nowMillis)

@@ -121,9 +121,10 @@ fun RulesRoute(
     }
     LaunchedEffect(quickRuleDraft) {
         quickRuleDraft?.let {
-            viewModel.onCreateRuleFromActivity(it)
-            onQuickRuleConsumed()
-            onOpenEditor()
+            if (viewModel.onCreateRuleFromActivity(it).await()) {
+                onQuickRuleConsumed()
+                onOpenEditor()
+            }
         }
     }
 
@@ -160,9 +161,11 @@ fun RuleEditorRoute(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val editor = state.editor
-    LaunchedEffect(editor) {
-        if (editor == null) onClose()
-    }
+    RuleEditorRouteCloseEffect(
+        isLoading = state.isLoading,
+        editorMissing = editor == null,
+        onClose = onClose,
+    )
     editor?.let {
         RuleEditorScreen(
             state = it,
@@ -174,6 +177,17 @@ fun RuleEditorRoute(
             onConfirmDiscard = viewModel::onConfirmDiscardEditor,
             onCancelDiscard = viewModel::onCancelDiscardEditor,
         )
+    }
+}
+
+@Composable
+internal fun RuleEditorRouteCloseEffect(
+    isLoading: Boolean,
+    editorMissing: Boolean,
+    onClose: () -> Unit,
+) {
+    LaunchedEffect(isLoading, editorMissing) {
+        if (!isLoading && editorMissing) onClose()
     }
 }
 

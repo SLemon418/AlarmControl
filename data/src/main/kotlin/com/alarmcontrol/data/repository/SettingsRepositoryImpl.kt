@@ -8,10 +8,12 @@ import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
+import com.alarmcontrol.core.settings.MaintenanceSettingsSnapshot
 import com.alarmcontrol.core.settings.RetentionDefaults
 import com.alarmcontrol.core.settings.SemanticAnalysisScope
 import com.alarmcontrol.core.settings.SettingsRepository
 import com.alarmcontrol.core.settings.SettingsSnapshot
+import com.alarmcontrol.data.security.MaintenancePolicyAccessGuard
 import com.alarmcontrol.data.security.NotificationContentAccessGuard
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
@@ -23,12 +25,18 @@ import java.security.SecureRandom
 import java.util.Base64
 import javax.inject.Inject
 
-/** DataStore (Preferences)-backed [SettingsRepository]; reads degrade to defaults on I/O error. */
+/**
+ * DataStore-backed settings. UI flows degrade to privacy-safe defaults on I/O errors; authoritative
+ * backup and maintenance snapshots propagate failures so callers cannot persist or delete from
+ * substituted values.
+ */
 class SettingsRepositoryImpl
     @Inject
     internal constructor(
         private val dataStore: DataStore<Preferences>,
         private val contentAccessGuard: NotificationContentAccessGuard,
+        private val maintenancePolicyAccessGuard: MaintenancePolicyAccessGuard =
+            MaintenancePolicyAccessGuard(),
     ) : SettingsRepository {
         override val filteringEnabled: Flow<Boolean> =
             dataStore.data
@@ -147,12 +155,16 @@ class SettingsRepositoryImpl
 
         override suspend fun setEventRetentionDays(days: Int) {
             require(days in RETENTION_RANGE) { "Event retention is out of range" }
-            dataStore.edit { prefs -> prefs[EVENT_RETENTION_DAYS] = days }
+            maintenancePolicyAccessGuard.withLock {
+                dataStore.edit { prefs -> prefs[EVENT_RETENTION_DAYS] = days }
+            }
         }
 
         override suspend fun setDailyInsightRetentionDays(days: Int) {
             require(days in RETENTION_RANGE) { "Insight retention is out of range" }
-            dataStore.edit { prefs -> prefs[DAILY_INSIGHT_RETENTION_DAYS] = days }
+            maintenancePolicyAccessGuard.withLock {
+                dataStore.edit { prefs -> prefs[DAILY_INSIGHT_RETENTION_DAYS] = days }
+            }
         }
 
         override suspend fun setDynamicColorEnabled(enabled: Boolean) {
@@ -160,8 +172,10 @@ class SettingsRepositoryImpl
         }
 
         override suspend fun setNotificationContentStorageEnabled(enabled: Boolean) {
-            contentAccessGuard.withLock {
-                dataStore.edit { prefs -> prefs[NOTIFICATION_CONTENT_STORAGE_ENABLED] = enabled }
+            maintenancePolicyAccessGuard.withLock {
+                contentAccessGuard.withLock {
+                    dataStore.edit { prefs -> prefs[NOTIFICATION_CONTENT_STORAGE_ENABLED] = enabled }
+                }
             }
         }
 
@@ -170,18 +184,36 @@ class SettingsRepositoryImpl
             require(packageNames.all { it.isNotBlank() && it.length <= MAX_PACKAGE_NAME_CHARS }) {
                 "Invalid excluded package"
             }
-            contentAccessGuard.withLock {
-                dataStore.edit { prefs -> prefs[CONTENT_EXCLUDED_PACKAGES] = packageNames }
+            maintenancePolicyAccessGuard.withLock {
+                contentAccessGuard.withLock {
+                    dataStore.edit { prefs -> prefs[CONTENT_EXCLUDED_PACKAGES] = packageNames }
+                }
+            }
+        }
+
+        override suspend fun setContentPackageExcluded(
+            packageName: String,
+            excluded: Boolean,
+        ) {
+            require(packageName.isNotBlank() && packageName.length <= MAX_PACKAGE_NAME_CHARS) {
+                "Invalid excluded package"
+            }
+            maintenancePolicyAccessGuard.withLock {
+                contentAccessGuard.withLock {
+                    dataStore.edit { prefs ->
+                        val current = prefs[CONTENT_EXCLUDED_PACKAGES].orEmpty()
+                        val updated = if (excluded) current + packageName else current - packageName
+                        require(updated.size <= MAX_EXCLUDED_PACKAGES) {
+                            "Too many excluded packages"
+                        }
+                        prefs[CONTENT_EXCLUDED_PACKAGES] = updated
+                    }
+                }
             }
         }
 
         override suspend fun snapshot(): SettingsSnapshot {
-            val prefs =
-                try {
-                    dataStore.data.first()
-                } catch (_: IOException) {
-                    return SettingsSnapshot(filteringEnabled = false)
-                }
+            val prefs = dataStore.data.first()
             return SettingsSnapshot(
                 filteringEnabled = prefs[FILTERING_ENABLED] ?: true,
                 externalAutomationEnabled = prefs[EXTERNAL_AUTOMATION_ENABLED] ?: false,
@@ -200,37 +232,70 @@ class SettingsRepositoryImpl
             )
         }
 
+        override suspend fun maintenanceSnapshot(): MaintenanceSettingsSnapshot {
+            val prefs = dataStore.data.first()
+            val eventRetentionDays = prefs[EVENT_RETENTION_DAYS] ?: RetentionDefaults.EVENT_DAYS
+            val dailyInsightRetentionDays =
+                prefs[DAILY_INSIGHT_RETENTION_DAYS] ?: RetentionDefaults.DAILY_INSIGHT_DAYS
+            check(eventRetentionDays in RETENTION_RANGE) { "Stored event retention is invalid" }
+            check(dailyInsightRetentionDays in RETENTION_RANGE) {
+                "Stored insight retention is invalid"
+            }
+            val excludedPackages = prefs[CONTENT_EXCLUDED_PACKAGES].orEmpty()
+            check(excludedPackages.size <= MAX_EXCLUDED_PACKAGES) {
+                "Stored content exclusions are invalid"
+            }
+            check(
+                excludedPackages.all {
+                    it.isNotBlank() && it.length <= MAX_PACKAGE_NAME_CHARS
+                },
+            ) {
+                "Stored content exclusions are invalid"
+            }
+            return MaintenanceSettingsSnapshot(
+                eventRetentionDays = eventRetentionDays,
+                dailyInsightRetentionDays = dailyInsightRetentionDays,
+                notificationContentStorageEnabled =
+                    prefs[NOTIFICATION_CONTENT_STORAGE_ENABLED] ?: false,
+                contentExcludedPackages = excludedPackages,
+            )
+        }
+
         override suspend fun restore(snapshot: SettingsSnapshot) {
             require(snapshot.eventRetentionDays in RETENTION_RANGE) { "Event retention is out of range" }
             require(snapshot.dailyInsightRetentionDays in RETENTION_RANGE) { "Insight retention is out of range" }
-            dataStore.edit { prefs ->
-                prefs[FILTERING_ENABLED] = snapshot.filteringEnabled
-                prefs[EXTERNAL_AUTOMATION_ENABLED] = snapshot.externalAutomationEnabled
-                if (
-                    snapshot.externalAutomationEnabled &&
-                    prefs[EXTERNAL_AUTOMATION_TOKEN]?.isValidAutomationToken() != true
-                ) {
-                    // The per-install secret is deliberately absent from portable backups. A fresh
-                    // restore still needs a valid local token or the UI would claim automation is
-                    // enabled while every authenticated broadcast is rejected.
-                    prefs[EXTERNAL_AUTOMATION_TOKEN] = newAutomationToken()
+            maintenancePolicyAccessGuard.withLock {
+                dataStore.edit { prefs ->
+                    prefs[FILTERING_ENABLED] = snapshot.filteringEnabled
+                    prefs[EXTERNAL_AUTOMATION_ENABLED] = snapshot.externalAutomationEnabled
+                    if (
+                        snapshot.externalAutomationEnabled &&
+                        prefs[EXTERNAL_AUTOMATION_TOKEN]?.isValidAutomationToken() != true
+                    ) {
+                        // The per-install secret is deliberately absent from portable backups. A
+                        // fresh restore still needs a valid local token or the UI would claim
+                        // automation is enabled while every authenticated broadcast is rejected.
+                        prefs[EXTERNAL_AUTOMATION_TOKEN] = newAutomationToken()
+                    }
+                    prefs[LLM_ANALYSIS_ENABLED] = snapshot.llmAnalysisEnabled
+                    prefs.remove(LLM_AUTO_ACTIONS_ENABLED)
+                    prefs[SEMANTIC_ANALYSIS_SCOPE] = snapshot.semanticAnalysisScope.name
+                    prefs[EVENT_RETENTION_DAYS] = snapshot.eventRetentionDays
+                    prefs[DAILY_INSIGHT_RETENTION_DAYS] = snapshot.dailyInsightRetentionDays
                 }
-                prefs[LLM_ANALYSIS_ENABLED] = snapshot.llmAnalysisEnabled
-                prefs.remove(LLM_AUTO_ACTIONS_ENABLED)
-                prefs[SEMANTIC_ANALYSIS_SCOPE] = snapshot.semanticAnalysisScope.name
-                prefs[EVENT_RETENTION_DAYS] = snapshot.eventRetentionDays
-                prefs[DAILY_INSIGHT_RETENTION_DAYS] = snapshot.dailyInsightRetentionDays
             }
         }
 
         override suspend fun reset() {
-            contentAccessGuard.withLock {
-                dataStore.edit { preferences ->
-                    preferences.clear()
-                    // A destructive local-data reset must never reactivate surviving rules when a
-                    // separate database deletion failed. Keep the master gate fail-safe and require
-                    // the user to resume filtering explicitly after a reset.
-                    preferences[FILTERING_ENABLED] = false
+            maintenancePolicyAccessGuard.withLock {
+                contentAccessGuard.withLock {
+                    dataStore.edit { preferences ->
+                        preferences.clear()
+                        // A destructive local-data reset must never reactivate surviving rules when
+                        // a separate database deletion failed. Keep the master gate fail-safe and
+                        // require the user to resume filtering explicitly after a reset.
+                        preferences[FILTERING_ENABLED] = false
+                    }
                 }
             }
         }

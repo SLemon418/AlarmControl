@@ -36,9 +36,9 @@ import javax.inject.Inject
 
 /**
  * [BackupRepository] backed by the existing repositories/DAO (CLAUDE.md §3). Export reads the current
- * rules, named profiles, and daily history. Restore replaces rules/profiles wholesale, re-points
- * profile memberships and historical rule references at freshly-assigned ids, then upserts each
- * day's rollup.
+ * rules, named profiles, and daily history. Restore re-points profile memberships and historical
+ * rule references at freshly-assigned ids. REPLACE overwrites selected daily history; MERGE keeps
+ * an existing local day and imports only missing days.
  */
 class BackupRepositoryImpl
     @Inject
@@ -131,12 +131,18 @@ class BackupRepositoryImpl
                 val (data, encrypted) = decodeAndValidate(serialized, passphrase)
                 require(!options.learningFeedback || encrypted) { "Learning feedback requires encryption" }
                 val priorSettings = settingsRepository.snapshot()
-                val pauseSideEffects = options.rulesAndProfiles
+                val databaseSectionsSelected =
+                    options.rulesAndProfiles ||
+                        options.dailyInsights ||
+                        options.learningFeedback
+                val pauseSideEffects = databaseSectionsSelected
                 val desiredSettings = data.settings
                 var databaseCommitted = false
+                var databaseResult = DatabaseRestoreResult()
+                var settingsReviewRequired = false
                 try {
-                    if (pauseSideEffects) disableSideEffectingSettings()
-                    transactionRunner.run { restoreDatabase(data, options) }
+                    if (pauseSideEffects) disableSideEffectingSettings(priorSettings)
+                    databaseResult = transactionRunner.run { restoreDatabase(data, options) }
                     databaseCommitted = true
                     when {
                         options.settings && desiredSettings != null -> settingsRepository.restore(desiredSettings)
@@ -146,25 +152,34 @@ class BackupRepositoryImpl
                     withContext(NonCancellable) {
                         recoverSettingsAndThrow(
                             priorSettings = priorSettings,
-                            databaseCommitted = databaseCommitted,
-                            sideEffectsWerePaused = pauseSideEffects,
+                            databaseChangesCommitted = databaseCommitted && databaseSectionsSelected,
                             error = error,
                         )
                     }
                 } catch (error: Exception) {
-                    recoverSettingsAndThrow(
-                        priorSettings = priorSettings,
-                        databaseCommitted = databaseCommitted,
-                        sideEffectsWerePaused = pauseSideEffects,
-                        error = error,
-                    )
+                    if (databaseCommitted && databaseSectionsSelected) {
+                        recoverSettingsAfterFailure(
+                            priorSettings = priorSettings,
+                            keepSideEffectsDisabled = true,
+                        )
+                        settingsReviewRequired = true
+                    } else {
+                        recoverSettingsAndThrow(
+                            priorSettings = priorSettings,
+                            databaseChangesCommitted = false,
+                            error = error,
+                        )
+                    }
                 }
 
                 BackupSummary(
                     rulesRestored = if (options.rulesAndProfiles) data.rules.size else 0,
-                    insightsRestored = if (options.dailyInsights) data.dailyInsights.size else 0,
+                    insightsRestored = databaseResult.restoredInsightCount,
                     profilesRestored = if (options.rulesAndProfiles) data.profiles.size else 0,
-                    settingsRestored = options.settings && data.settings != null,
+                    settingsRestored =
+                        options.settings &&
+                            data.settings != null &&
+                            !settingsReviewRequired,
                     feedbackRestored =
                         if (options.learningFeedback) {
                             (
@@ -174,6 +189,8 @@ class BackupRepositoryImpl
                         } else {
                             0
                         },
+                    settingsReviewRequired = settingsReviewRequired,
+                    insightConflictsSkipped = databaseResult.skippedInsightCount,
                 )
             }.fold(
                 onSuccess = { DataResult.Success(it) },
@@ -185,35 +202,45 @@ class BackupRepositoryImpl
                 .coerceAtMost(Int.MAX_VALUE.toLong())
                 .toInt()
 
-        private suspend fun disableSideEffectingSettings() {
-            settingsRepository.setFilteringEnabled(false)
-            settingsRepository.setExternalAutomationEnabled(false)
-            settingsRepository.setLlmAutoActionsEnabled(false)
-        }
+        private suspend fun disableSideEffectingSettings(priorSettings: SettingsSnapshot) =
+            settingsRepository.restore(
+                priorSettings.copy(
+                    filteringEnabled = false,
+                    externalAutomationEnabled = false,
+                    llmAutoActionsEnabled = false,
+                ),
+            )
 
         private suspend fun recoverSettingsAndThrow(
             priorSettings: SettingsSnapshot,
-            databaseCommitted: Boolean,
-            sideEffectsWerePaused: Boolean,
+            databaseChangesCommitted: Boolean,
             error: Throwable,
         ): Nothing {
-            if (!databaseCommitted || !sideEffectsWerePaused) {
-                runCatchingPreservingCancellation { settingsRepository.restore(priorSettings) }
-            } else {
-                // The Room restore cannot be rolled back after commit. Keep destructive entry
-                // points off rather than applying either old settings or a partially restored set
-                // to the new rules.
-                runCatchingPreservingCancellation { settingsRepository.setFilteringEnabled(false) }
-                runCatchingPreservingCancellation { settingsRepository.setExternalAutomationEnabled(false) }
-                runCatchingPreservingCancellation { settingsRepository.setLlmAutoActionsEnabled(false) }
-            }
+            recoverSettingsAfterFailure(priorSettings, databaseChangesCommitted)
             throw error
+        }
+
+        private suspend fun recoverSettingsAfterFailure(
+            priorSettings: SettingsSnapshot,
+            keepSideEffectsDisabled: Boolean,
+        ) {
+            val safeSettings =
+                if (keepSideEffectsDisabled) {
+                    priorSettings.copy(
+                        filteringEnabled = false,
+                        externalAutomationEnabled = false,
+                        llmAutoActionsEnabled = false,
+                    )
+                } else {
+                    priorSettings
+                }
+            runCatchingPreservingCancellation { settingsRepository.restore(safeSettings) }
         }
 
         private suspend fun restoreDatabase(
             data: BackupData,
             options: RestoreOptions,
-        ) {
+        ): DatabaseRestoreResult {
             val now = System.currentTimeMillis()
             val idRemap =
                 if (options.rulesAndProfiles) {
@@ -222,9 +249,27 @@ class BackupRepositoryImpl
                     emptyMap()
                 }
 
+            var restoredInsightCount = 0
+            var skippedInsightCount = 0
             if (options.dailyInsights) {
                 if (options.mode == RestoreMode.REPLACE) dailyInsightDao.deleteAll()
+                val existingDays =
+                    if (options.mode == RestoreMode.MERGE && data.dailyInsights.isNotEmpty()) {
+                        dailyInsightDao
+                            .getEpochDaysBetween(
+                                data.dailyInsights.minOf { it.epochDay },
+                                data.dailyInsights.maxOf { it.epochDay },
+                            ).toSet()
+                    } else {
+                        emptySet()
+                    }
                 data.dailyInsights.forEach { insight ->
+                    // Rollups have no source-event identity across backups. Preserving the local
+                    // day avoids both destructive overwrite and unverifiable double counting.
+                    if (insight.epochDay in existingDays) {
+                        skippedInsightCount += 1
+                        return@forEach
+                    }
                     val remapped =
                         insight.copy(
                             topRules =
@@ -237,10 +282,12 @@ class BackupRepositoryImpl
                                 },
                         )
                     dailyInsightDao.store(remapped.toWrite())
+                    restoredInsightCount += 1
                 }
             }
 
             if (options.learningFeedback) restoreFeedback(data, options.mode)
+            return DatabaseRestoreResult(restoredInsightCount, skippedInsightCount)
         }
 
         private suspend fun restoreRulesAndProfiles(
@@ -350,6 +397,11 @@ class BackupRepositoryImpl
             const val DELETED_RULE_PREFIX = "deleted:"
             const val MIN_NEW_PASSPHRASE_CHARS = 8
         }
+
+        private data class DatabaseRestoreResult(
+            val restoredInsightCount: Int = 0,
+            val skippedInsightCount: Int = 0,
+        )
 
         private fun String.remapOrMarkDeleted(idRemap: Map<String, String>): String =
             idRemap[this] ?: if (startsWith(DELETED_RULE_PREFIX)) this else "${DELETED_RULE_PREFIX}$this"

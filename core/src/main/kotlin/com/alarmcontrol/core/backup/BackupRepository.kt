@@ -25,10 +25,15 @@ interface BackupRepository {
     ): DataResult<BackupPreview>
 
     /**
-     * Parses [serialized] and restores Room-backed sections in one transaction: rules are replaced
-     * wholesale with fresh local ids, historical references are remapped, and each day's rollup is
-     * upserted. Side-effecting settings stay disabled during a rule restore and are activated only
-     * after commit. Malformed input fails as [DataResult.Failure] rather than throwing.
+     * Parses [serialized] and restores selected Room-backed sections in one transaction: rules are
+     * assigned fresh local ids, historical references are remapped, and MERGE preserves an existing
+     * local daily rollup when the backup contains the same day. Settings are finalized separately
+     * after the Room commit because Room and DataStore cannot share a transaction.
+     *
+     * A pre-commit or settings-only failure returns [DataResult.Failure]. If Room commits but
+     * settings finalization fails, the committed data is preserved and [DataResult.Success] reports
+     * [BackupSummary.settingsReviewRequired] while side-effecting settings remain disabled.
+     * Malformed input also fails as [DataResult.Failure] rather than throwing.
      */
     suspend fun restore(
         serialized: String,
