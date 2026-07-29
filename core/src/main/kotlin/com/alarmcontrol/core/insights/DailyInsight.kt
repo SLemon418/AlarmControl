@@ -1,5 +1,8 @@
 package com.alarmcontrol.core.insights
 
+/** Current persisted breakdown shape; older rows cannot prove complete modern analytics. */
+const val CURRENT_DAILY_INSIGHT_BREAKDOWN_VERSION = 2
+
 /**
  * A persisted per-day rollup of the local decision log (CLAUDE.md §5) — a pure SQL aggregation, no
  * ML and no network. Stored so the UI and trend views can read history without rescanning the whole
@@ -36,6 +39,8 @@ data class DailyInsight(
     val categoryCorrectionCount: Int = 0,
     val semanticCorrectionCount: Int = 0,
     val breakdownVersion: Int = 0,
+    /** Snapshot captured at write time; false when this rollup was built from incomplete raw rows. */
+    val sourceComplete: Boolean = true,
     /** False means the corresponding list is a bounded top-N view, not an exhaustive breakdown. */
     val ruleBreakdownComplete: Boolean = false,
     val monitorRuleBreakdownComplete: Boolean = false,

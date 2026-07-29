@@ -79,6 +79,10 @@ interface SettingsRepository {
     /** Persists this device's appearance preference; it is intentionally excluded from backups. */
     suspend fun setDynamicColorEnabled(enabled: Boolean)
 
+    /**
+     * Changes encrypted notification-content retention. Disabling must delete every ciphertext row
+     * and the local encryption key before the disabled preference is committed.
+     */
     suspend fun setNotificationContentStorageEnabled(enabled: Boolean)
 
     suspend fun setContentExcludedPackages(packageNames: Set<String>)
@@ -104,7 +108,10 @@ interface SettingsRepository {
     /** Restores all preferences in one local DataStore edit after validation. */
     suspend fun restore(snapshot: SettingsSnapshot)
 
-    /** Restores every preference to its privacy-safe default. */
+    /**
+     * Restores every preference to its privacy-safe default. Any stored notification content and
+     * its key must be deleted before content storage becomes disabled.
+     */
     suspend fun reset()
 }
 

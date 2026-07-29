@@ -10,9 +10,11 @@ import com.alarmcontrol.data.db.dao.CategoryFeedbackDao
 import com.alarmcontrol.data.db.dao.DailyInsightDao
 import com.alarmcontrol.data.db.dao.LlmObservationDao
 import com.alarmcontrol.data.db.dao.NotificationEventDao
+import com.alarmcontrol.data.db.dao.NotificationRateStateDao
 import com.alarmcontrol.data.db.dao.ProfileDao
 import com.alarmcontrol.data.db.dao.RuleDao
 import com.alarmcontrol.data.db.dao.RuleSuggestionDao
+import com.alarmcontrol.data.db.entity.ActiveNotificationRateOccurrenceEntity
 import com.alarmcontrol.data.db.entity.AdFeedbackPriorEntity
 import com.alarmcontrol.data.db.entity.AutomationAuditEntity
 import com.alarmcontrol.data.db.entity.CategoryFeedbackEntity
@@ -24,11 +26,15 @@ import com.alarmcontrol.data.db.entity.DailyInsightHourCountEntity
 import com.alarmcontrol.data.db.entity.DailyInsightMonitorRuleCountEntity
 import com.alarmcontrol.data.db.entity.DailyInsightRuleCountEntity
 import com.alarmcontrol.data.db.entity.DailyInsightSemanticCountEntity
+import com.alarmcontrol.data.db.entity.DailyInsightSourceGapEntity
 import com.alarmcontrol.data.db.entity.EncryptedNotificationContentEntity
 import com.alarmcontrol.data.db.entity.FilteringProfileEntity
 import com.alarmcontrol.data.db.entity.LlmObservationEntity
+import com.alarmcontrol.data.db.entity.LocalSemanticFeedbackEntity
 import com.alarmcontrol.data.db.entity.NotificationDecisionTraceEntity
 import com.alarmcontrol.data.db.entity.NotificationEventEntity
+import com.alarmcontrol.data.db.entity.NotificationRateOccurrenceHistoryEntity
+import com.alarmcontrol.data.db.entity.NotificationRateStateEntity
 import com.alarmcontrol.data.db.entity.ProfileRuleEntity
 import com.alarmcontrol.data.db.entity.RuleConditionEntity
 import com.alarmcontrol.data.db.entity.RuleEntity
@@ -62,8 +68,13 @@ import com.alarmcontrol.data.db.entity.SemanticFeedbackPriorEntity
         DailyInsightHourCountEntity::class,
         DailyInsightSemanticCountEntity::class,
         DailyInsightMonitorRuleCountEntity::class,
+        ActiveNotificationRateOccurrenceEntity::class,
+        NotificationRateOccurrenceHistoryEntity::class,
+        NotificationRateStateEntity::class,
+        LocalSemanticFeedbackEntity::class,
+        DailyInsightSourceGapEntity::class,
     ],
-    version = 13,
+    version = 15,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -71,6 +82,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun ruleDao(): RuleDao
 
     abstract fun notificationEventDao(): NotificationEventDao
+
+    abstract fun notificationRateStateDao(): NotificationRateStateDao
 
     abstract fun categoryFeedbackDao(): CategoryFeedbackDao
 
@@ -396,6 +409,97 @@ abstract class AppDatabase : RoomDatabase() {
                 }
             }
 
+        /** Adds dedicated, completeness-aware occurrence storage for restart-safe frequency rules. */
+        val MIGRATION_13_14 =
+            object : Migration(13, 14) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    db.execSQL(
+                        "CREATE TABLE IF NOT EXISTS active_notification_rate_occurrences (" +
+                            "listener_key_hmac TEXT NOT NULL, occurrence_id TEXT NOT NULL, " +
+                            "package_name TEXT NOT NULL, channel_id TEXT, " +
+                            "last_posted_at_millis INTEGER NOT NULL, " +
+                            "PRIMARY KEY(listener_key_hmac))",
+                    )
+                    db.execSQL(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS " +
+                            "index_active_notification_rate_occurrences_occurrence_id " +
+                            "ON active_notification_rate_occurrences (occurrence_id)",
+                    )
+                    db.execSQL(
+                        "CREATE INDEX IF NOT EXISTS " +
+                            "index_active_notification_rate_occurrences_last_posted_at_millis_occurrence_id " +
+                            "ON active_notification_rate_occurrences " +
+                            "(last_posted_at_millis, occurrence_id)",
+                    )
+                    db.execSQL(
+                        "CREATE TABLE IF NOT EXISTS notification_rate_occurrence_history (" +
+                            "occurrence_id TEXT NOT NULL, package_name TEXT NOT NULL, " +
+                            "channel_id TEXT, latest_posted_at_millis INTEGER NOT NULL, " +
+                            "PRIMARY KEY(occurrence_id))",
+                    )
+                    db.execSQL(
+                        "CREATE INDEX IF NOT EXISTS " +
+                            "index_notification_rate_occurrence_history_latest_posted_at_millis_occurrence_id " +
+                            "ON notification_rate_occurrence_history " +
+                            "(latest_posted_at_millis, occurrence_id)",
+                    )
+                    db.execSQL(
+                        "CREATE TABLE IF NOT EXISTS notification_rate_state (" +
+                            "singleton_id INTEGER NOT NULL, incomplete_until_millis INTEGER NOT NULL, " +
+                            "PRIMARY KEY(singleton_id))",
+                    )
+                    db.execSQL(
+                        "INSERT INTO notification_rate_state " +
+                            "(singleton_id, incomplete_until_millis) VALUES (0, ?)",
+                        arrayOf(legacyRateIncompleteUntilMillis(db)),
+                    )
+                }
+            }
+
+        /**
+         * Preserves bounded local semantic learning independently of raw history, snapshots each
+         * rollup's completeness, and records durable provenance for later source loss. Legacy
+         * rollups default to incomplete because their original source coverage cannot be proven.
+         */
+        val MIGRATION_14_15 =
+            object : Migration(14, 15) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    db.execSQL(
+                        "CREATE TABLE IF NOT EXISTS local_semantic_feedback (" +
+                            "source_event_id INTEGER NOT NULL, package_name TEXT NOT NULL, " +
+                            "corrected_intent TEXT NOT NULL, recorded_at_millis INTEGER NOT NULL, " +
+                            "PRIMARY KEY(source_event_id))",
+                    )
+                    db.execSQL(
+                        "CREATE INDEX IF NOT EXISTS " +
+                            "index_local_semantic_feedback_package_name_corrected_intent " +
+                            "ON local_semantic_feedback (package_name, corrected_intent)",
+                    )
+                    db.execSQL(
+                        "CREATE INDEX IF NOT EXISTS " +
+                            "index_local_semantic_feedback_recorded_at_millis_source_event_id " +
+                            "ON local_semantic_feedback (recorded_at_millis, source_event_id)",
+                    )
+                    db.execSQL(
+                        "INSERT INTO local_semantic_feedback " +
+                            "(source_event_id, package_name, corrected_intent, recorded_at_millis) " +
+                            "SELECT notification_event_id, package_name, corrected_intent, analyzed_at_millis " +
+                            "FROM llm_observations WHERE corrected_intent IN " +
+                            "('MARKETING', 'TRANSACTIONAL', 'SECURITY', 'DELIVERY', " +
+                            "'SOCIAL', 'OTHER', 'AMBIGUOUS') " +
+                            "ORDER BY analyzed_at_millis DESC, notification_event_id DESC LIMIT 25000",
+                    )
+                    db.execSQL(
+                        "CREATE TABLE IF NOT EXISTS daily_insight_source_gaps (" +
+                            "epoch_day INTEGER NOT NULL, PRIMARY KEY(epoch_day))",
+                    )
+                    db.execSQL(
+                        "ALTER TABLE daily_insights ADD COLUMN source_complete " +
+                            "INTEGER NOT NULL DEFAULT 0",
+                    )
+                }
+            }
+
         private fun migrateEventHistoryToV12(db: SupportSQLiteDatabase) {
             db.execSQL("ALTER TABLE notification_events ADD COLUMN channel_name TEXT")
             db.execSQL("ALTER TABLE notification_events ADD COLUMN posted_epoch_day INTEGER")
@@ -431,6 +535,24 @@ abstract class AppDatabase : RoomDatabase() {
                 "CREATE INDEX IF NOT EXISTS index_encrypted_notification_contents_created_at_millis " +
                     "ON encrypted_notification_contents (created_at_millis)",
             )
+        }
+
+        private fun legacyRateIncompleteUntilMillis(db: SupportSQLiteDatabase): Long {
+            val maxPostedAtMillis =
+                db.query("SELECT MAX(posted_at_millis) FROM notification_events").use { cursor ->
+                    if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getLong(0) else null
+                }
+            val anchorMillis =
+                maxOf(
+                    System.currentTimeMillis(),
+                    maxPostedAtMillis ?: Long.MIN_VALUE,
+                )
+            val incompleteWindow = com.alarmcontrol.core.filtering.MAX_RATE_WINDOW_MILLIS + 1L
+            return if (anchorMillis > Long.MAX_VALUE - incompleteWindow) {
+                Long.MAX_VALUE
+            } else {
+                anchorMillis + incompleteWindow
+            }
         }
 
         private fun migrateDailyInsightsToV12(db: SupportSQLiteDatabase) {

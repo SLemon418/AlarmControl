@@ -377,6 +377,22 @@ class DailyInsightRepositoryImplTest {
         }
 
     @Test
+    fun `known source gap survives aggregation and rollup retention`() =
+        runTest {
+            dao.seedSourceGap(5)
+            dao.seedSourceGap(9)
+            dao.seedEvents(event("com.a", "alarm", StoredRuleAction.KEEP, ruleId = null, recordedAtMillis = 1_100))
+
+            val insight = repository.aggregateAndStore(5, start, end, 1_500, topRules = 5)
+            val persisted = repository.observeRecent(10).first().single()
+            repository.purgeOlderThan(7)
+
+            assertEquals(false, insight.sourceComplete)
+            assertEquals(false, persisted.sourceComplete)
+            assertEquals(listOf(5L, 9L), dao.observeSourceGapDaysBetween(0, 20).first())
+        }
+
+    @Test
     fun `rejects invalid aggregation and read bounds before querying Room`() =
         runTest {
             assertThrows(IllegalArgumentException::class.java) {

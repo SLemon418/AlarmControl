@@ -95,6 +95,22 @@ class Matcher {
         )
 
     /**
+     * Reports whether a missing frequency signal blocks a lane before its first definite match.
+     *
+     * Unlike category and semantic signals there is no inference step that can repair incomplete
+     * rate history. Lane evaluation therefore stops fail-open at the same unresolved rule instead
+     * of allowing a lower-priority destructive match to bypass it.
+     */
+    fun rateResolutionRequirements(
+        snapshot: NotificationSnapshot,
+        compiled: CompiledRuleSet,
+    ): RateResolutionRequirements =
+        RateResolutionRequirements(
+            activeNeedsRate = laneNeedsRate(snapshot, compiled.activeRules),
+            monitorNeedsRate = laneNeedsRate(snapshot, compiled.monitorRules),
+        )
+
+    /**
      * Evaluates both lanes while building the selected rules' traces from the same short-circuiting
      * condition traversal. Use this on the notification hot path when a persisted explanation is
      * required; it avoids evaluating the matched conditions a second time.
@@ -151,10 +167,14 @@ class Matcher {
         for (rule in active) {
             val trace = rule.condition.trace(snapshot)
             traces += RuleTrace(rule, trace.result, trace)
-            if (trace.result == ConditionResult.MATCH) {
+            val matched = trace.result == ConditionResult.MATCH
+            val unresolvedRate =
+                trace.result == ConditionResult.UNKNOWN &&
+                    rule.condition.hasMissingRateSignal(snapshot)
+            if (matched) {
                 decision = MatchDecision.Matched(rule, rule.action)
-                break
             }
+            if (matched || unresolvedRate) break
         }
         return MatchExplanation(decision, traces)
     }
@@ -209,6 +229,12 @@ class Matcher {
             if (tree.result == ConditionResult.MATCH) {
                 return EvaluatedRuleDecision(MatchDecision.Matched(rule, rule.action), tree)
             }
+            if (
+                tree.result == ConditionResult.UNKNOWN &&
+                rule.condition.hasMissingRateSignal(snapshot)
+            ) {
+                return EvaluatedRuleDecision(MatchDecision.NoMatch, null)
+            }
         }
         return EvaluatedRuleDecision(MatchDecision.NoMatch, null)
     }
@@ -217,8 +243,17 @@ class Matcher {
         snapshot: NotificationSnapshot,
         rules: List<Rule>,
     ): MatchDecision {
-        val matched = rules.firstOrNull { it.condition.evaluate(snapshot) == ConditionResult.MATCH }
-        return matched?.let { MatchDecision.Matched(it, it.action) } ?: MatchDecision.NoMatch
+        for (rule in rules) {
+            when (rule.condition.evaluate(snapshot)) {
+                ConditionResult.MATCH -> return MatchDecision.Matched(rule, rule.action)
+                ConditionResult.UNKNOWN ->
+                    if (rule.condition.hasMissingRateSignal(snapshot)) {
+                        return MatchDecision.NoMatch
+                    }
+                ConditionResult.NO_MATCH -> Unit
+            }
+        }
+        return MatchDecision.NoMatch
     }
 
     private fun laneNeedsSemantic(
@@ -248,7 +283,27 @@ class Matcher {
         }
         return false
     }
+
+    private fun laneNeedsRate(
+        snapshot: NotificationSnapshot,
+        rules: List<Rule>,
+    ): Boolean {
+        for (rule in rules) {
+            when (rule.condition.evaluate(snapshot)) {
+                ConditionResult.MATCH -> return false
+                ConditionResult.UNKNOWN ->
+                    if (rule.condition.hasMissingRateSignal(snapshot)) {
+                        return true
+                    }
+                ConditionResult.NO_MATCH -> Unit
+            }
+        }
+        return false
+    }
 }
+
+private fun Condition.hasMissingRateSignal(snapshot: NotificationSnapshot): Boolean =
+    requiredSignals().rateSignals.any { signal -> signal !in snapshot.rateCounts }
 
 private fun Condition.canMatchWithTrustedSemantic(snapshot: NotificationSnapshot): Boolean =
     SemanticIntent.entries

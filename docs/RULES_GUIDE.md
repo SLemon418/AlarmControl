@@ -45,8 +45,14 @@ short-circuit sooner. Invalid or empty nodes are highlighted and cannot be saved
 - Scope is either **package** or **package + channel**.
 - The window is 1–1,440 minutes; the threshold is 2–1,000 posts.
 - The post currently being evaluated is included in the count.
-- On listener connection, AlarmControl reads at most 24 hours of content-free event metadata once.
-  Subsequent counting uses in-memory deques; it does not query Room for every post.
+- On listener connection, AlarmControl reads at most 24 hours of content-free occurrence metadata
+  once. Each accepted post is then committed to the bounded local occurrence store before its
+  count is exposed; rule evaluation reads the in-memory index rather than querying Room.
+- A listener disconnect, process restart, queue overflow, or persistence failure can leave an
+  unobservable interval. Each frequency signal then remains `UNKNOWN` until its own complete window
+  has been rebuilt: a one-minute rule can recover after about one minute of continuous observation,
+  while the longest rule can take up to 24 hours. Other conditions continue to work and frequency
+  conditions fail open during this warm-up.
 - If initialization fails, or a channel-scoped rule sees a notification without a channel id, the
   result is `UNKNOWN`.
 

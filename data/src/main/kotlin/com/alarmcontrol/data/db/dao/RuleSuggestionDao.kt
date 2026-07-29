@@ -33,8 +33,8 @@ interface RuleSuggestionDao {
             "SELECT package_name, CASE WHEN LOWER(corrected_label) = 'promotion' THEN 1 ELSE 0 END " +
             "AS is_marketing FROM category_feedback WHERE recorded_at_millis >= :sinceMillis " +
             "UNION ALL SELECT package_name, CASE WHEN corrected_intent = 'MARKETING' THEN 1 ELSE 0 END " +
-            "AS is_marketing FROM llm_observations WHERE analyzed_at_millis >= :sinceMillis " +
-            "AND corrected_intent IS NOT NULL) GROUP BY package_name " +
+            "AS is_marketing FROM local_semantic_feedback WHERE recorded_at_millis >= :sinceMillis) " +
+            "GROUP BY package_name " +
             "HAVING SUM(is_marketing) >= :minimumCorrections " +
             "AND SUM(is_marketing) * 100 >= COUNT(*) * :minimumPercent",
     )

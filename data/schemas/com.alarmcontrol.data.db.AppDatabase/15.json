@@ -1,0 +1,1751 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 15,
+    "identityHash": "18a4c683aafb890143c397de807e6d3d",
+    "entities": [
+      {
+        "tableName": "rules",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `name` TEXT NOT NULL, `enabled` INTEGER NOT NULL, `priority` INTEGER NOT NULL, `action` TEXT NOT NULL, `execution_mode` TEXT NOT NULL DEFAULT 'ACTIVE', `snooze_duration_millis` INTEGER, `created_at_millis` INTEGER NOT NULL, `updated_at_millis` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "name",
+            "columnName": "name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "enabled",
+            "columnName": "enabled",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "priority",
+            "columnName": "priority",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "action",
+            "columnName": "action",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "executionMode",
+            "columnName": "execution_mode",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "'ACTIVE'"
+          },
+          {
+            "fieldPath": "snoozeDurationMillis",
+            "columnName": "snooze_duration_millis",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "createdAtMillis",
+            "columnName": "created_at_millis",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAtMillis",
+            "columnName": "updated_at_millis",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "rule_conditions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `rule_id` INTEGER NOT NULL, `parent_id` INTEGER, `position` INTEGER NOT NULL DEFAULT 0, `type` TEXT NOT NULL, `value` TEXT NOT NULL, `ignore_case` INTEGER NOT NULL, `negate` INTEGER NOT NULL, FOREIGN KEY(`rule_id`) REFERENCES `rules`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ruleId",
+            "columnName": "rule_id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "parentId",
+            "columnName": "parent_id",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "position",
+            "columnName": "position",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "type",
+            "columnName": "type",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "value",
+            "columnName": "value",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ignoreCase",
+            "columnName": "ignore_case",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "negate",
+            "columnName": "negate",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_rule_conditions_rule_id",
+            "unique": false,
+            "columnNames": [
+              "rule_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_rule_conditions_rule_id` ON `${TABLE_NAME}` (`rule_id`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "rules",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "rule_id"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "notification_events",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `package_name` TEXT NOT NULL, `channel_id` TEXT, `channel_name` TEXT, `ml_category` TEXT, `ml_confidence` REAL, `category` TEXT, `posted_at_millis` INTEGER NOT NULL, `posted_epoch_day` INTEGER, `posted_minute_of_day` INTEGER, `importance` TEXT, `is_conversation` INTEGER, `is_foreground_service` INTEGER, `action` TEXT NOT NULL, `matched_rule_id` INTEGER, `monitored_rule_id` INTEGER, `monitored_action` TEXT, `recorded_at_millis` INTEGER NOT NULL, `undone` INTEGER NOT NULL, `had_encrypted_content` INTEGER NOT NULL DEFAULT 0)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "packageName",
+            "columnName": "package_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "channelId",
+            "columnName": "channel_id",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "channelName",
+            "columnName": "channel_name",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "mlCategory",
+            "columnName": "ml_category",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "mlConfidence",
+            "columnName": "ml_confidence",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "category",
+            "columnName": "category",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "postedAtMillis",
+            "columnName": "posted_at_millis",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "postedEpochDay",
+            "columnName": "posted_epoch_day",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "postedMinuteOfDay",
+            "columnName": "posted_minute_of_day",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "importance",
+            "columnName": "importance",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "isConversation",
+            "columnName": "is_conversation",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "isForegroundService",
+            "columnName": "is_foreground_service",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "action",
+            "columnName": "action",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "matchedRuleId",
+            "columnName": "matched_rule_id",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "monitoredRuleId",
+            "columnName": "monitored_rule_id",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "monitoredAction",
+            "columnName": "monitored_action",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "recordedAtMillis",
+            "columnName": "recorded_at_millis",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "undone",
+            "columnName": "undone",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "hadEncryptedContent",
+            "columnName": "had_encrypted_content",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_notification_events_recorded_at_millis",
+            "unique": false,
+            "columnNames": [
+              "recorded_at_millis"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_notification_events_recorded_at_millis` ON `${TABLE_NAME}` (`recorded_at_millis`)"
+          },
+          {
+            "name": "index_notification_events_posted_at_millis",
+            "unique": false,
+            "columnNames": [
+              "posted_at_millis"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_notification_events_posted_at_millis` ON `${TABLE_NAME}` (`posted_at_millis`)"
+          },
+          {
+            "name": "index_notification_events_package_name",
+            "unique": false,
+            "columnNames": [
+              "package_name"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_notification_events_package_name` ON `${TABLE_NAME}` (`package_name`)"
+          },
+          {
+            "name": "index_notification_events_channel_id",
+            "unique": false,
+            "columnNames": [
+              "channel_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_notification_events_channel_id` ON `${TABLE_NAME}` (`channel_id`)"
+          },
+          {
+            "name": "index_notification_events_matched_rule_id",
+            "unique": false,
+            "columnNames": [
+              "matched_rule_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_notification_events_matched_rule_id` ON `${TABLE_NAME}` (`matched_rule_id`)"
+          },
+          {
+            "name": "index_notification_events_recorded_at_millis_undone",
+            "unique": false,
+            "columnNames": [
+              "recorded_at_millis",
+              "undone"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_notification_events_recorded_at_millis_undone` ON `${TABLE_NAME}` (`recorded_at_millis`, `undone`)"
+          },
+          {
+            "name": "index_notification_events_posted_epoch_day_undone",
+            "unique": false,
+            "columnNames": [
+              "posted_epoch_day",
+              "undone"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_notification_events_posted_epoch_day_undone` ON `${TABLE_NAME}` (`posted_epoch_day`, `undone`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "category_feedback",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `package_name` TEXT NOT NULL, `notification_event_id` INTEGER, `predicted_label` TEXT, `corrected_label` TEXT NOT NULL, `recorded_at_millis` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "packageName",
+            "columnName": "package_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "notificationEventId",
+            "columnName": "notification_event_id",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "predictedLabel",
+            "columnName": "predicted_label",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "correctedLabel",
+            "columnName": "corrected_label",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recordedAtMillis",
+            "columnName": "recorded_at_millis",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_category_feedback_package_name",
+            "unique": false,
+            "columnNames": [
+              "package_name"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_category_feedback_package_name` ON `${TABLE_NAME}` (`package_name`)"
+          },
+          {
+            "name": "index_category_feedback_notification_event_id",
+            "unique": false,
+            "columnNames": [
+              "notification_event_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_category_feedback_notification_event_id` ON `${TABLE_NAME}` (`notification_event_id`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "daily_insights",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`epoch_day` INTEGER NOT NULL, `window_start_millis` INTEGER NOT NULL, `window_end_millis` INTEGER NOT NULL, `total_notifications` INTEGER NOT NULL, `muted_count` INTEGER NOT NULL, `cancelled_count` INTEGER NOT NULL DEFAULT 0, `snoozed_count` INTEGER NOT NULL DEFAULT 0, `logged_count` INTEGER NOT NULL DEFAULT 0, `kept_count` INTEGER NOT NULL DEFAULT 0, `monitored_cancelled_count` INTEGER NOT NULL DEFAULT 0, `monitored_snoozed_count` INTEGER NOT NULL DEFAULT 0, `monitored_logged_count` INTEGER NOT NULL DEFAULT 0, `monitored_kept_count` INTEGER NOT NULL DEFAULT 0, `generated_at_millis` INTEGER NOT NULL, `ml_classified_count` INTEGER NOT NULL DEFAULT 0, `category_correction_count` INTEGER NOT NULL DEFAULT 0, `semantic_correction_count` INTEGER NOT NULL DEFAULT 0, `breakdown_version` INTEGER NOT NULL DEFAULT 0, `source_complete` INTEGER NOT NULL DEFAULT 0, `rule_breakdown_complete` INTEGER NOT NULL DEFAULT 0, `monitor_rule_breakdown_complete` INTEGER NOT NULL DEFAULT 0, `app_breakdown_complete` INTEGER NOT NULL DEFAULT 0, `channel_breakdown_complete` INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(`epoch_day`))",
+        "fields": [
+          {
+            "fieldPath": "epochDay",
+            "columnName": "epoch_day",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "windowStartMillis",
+            "columnName": "window_start_millis",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "windowEndMillis",
+            "columnName": "window_end_millis",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "totalNotifications",
+            "columnName": "total_notifications",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mutedCount",
+            "columnName": "muted_count",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "cancelledCount",
+            "columnName": "cancelled_count",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "snoozedCount",
+            "columnName": "snoozed_count",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "loggedCount",
+            "columnName": "logged_count",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "keptCount",
+            "columnName": "kept_count",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "monitoredCancelledCount",
+            "columnName": "monitored_cancelled_count",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "monitoredSnoozedCount",
+            "columnName": "monitored_snoozed_count",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "monitoredLoggedCount",
+            "columnName": "monitored_logged_count",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "monitoredKeptCount",
+            "columnName": "monitored_kept_count",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "generatedAtMillis",
+            "columnName": "generated_at_millis",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mlClassifiedCount",
+            "columnName": "ml_classified_count",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "categoryCorrectionCount",
+            "columnName": "category_correction_count",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "semanticCorrectionCount",
+            "columnName": "semantic_correction_count",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "breakdownVersion",
+            "columnName": "breakdown_version",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "sourceComplete",
+            "columnName": "source_complete",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "ruleBreakdownComplete",
+            "columnName": "rule_breakdown_complete",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "monitorRuleBreakdownComplete",
+            "columnName": "monitor_rule_breakdown_complete",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "appBreakdownComplete",
+            "columnName": "app_breakdown_complete",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "channelBreakdownComplete",
+            "columnName": "channel_breakdown_complete",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "epoch_day"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "daily_insight_rule_counts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `epoch_day` INTEGER NOT NULL, `rule_id` TEXT NOT NULL, `count` INTEGER NOT NULL, FOREIGN KEY(`epoch_day`) REFERENCES `daily_insights`(`epoch_day`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "epochDay",
+            "columnName": "epoch_day",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ruleId",
+            "columnName": "rule_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "count",
+            "columnName": "count",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_daily_insight_rule_counts_epoch_day",
+            "unique": false,
+            "columnNames": [
+              "epoch_day"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_daily_insight_rule_counts_epoch_day` ON `${TABLE_NAME}` (`epoch_day`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "daily_insights",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "epoch_day"
+            ],
+            "referencedColumns": [
+              "epoch_day"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "daily_insight_category_counts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `epoch_day` INTEGER NOT NULL, `category` TEXT, `count` INTEGER NOT NULL, FOREIGN KEY(`epoch_day`) REFERENCES `daily_insights`(`epoch_day`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "epochDay",
+            "columnName": "epoch_day",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "category",
+            "columnName": "category",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "count",
+            "columnName": "count",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_daily_insight_category_counts_epoch_day",
+            "unique": false,
+            "columnNames": [
+              "epoch_day"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_daily_insight_category_counts_epoch_day` ON `${TABLE_NAME}` (`epoch_day`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "daily_insights",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "epoch_day"
+            ],
+            "referencedColumns": [
+              "epoch_day"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "filtering_profiles",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `name` TEXT NOT NULL, `created_at_millis` INTEGER NOT NULL, `updated_at_millis` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "name",
+            "columnName": "name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAtMillis",
+            "columnName": "created_at_millis",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAtMillis",
+            "columnName": "updated_at_millis",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "profile_rules",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`profile_id` INTEGER NOT NULL, `rule_id` INTEGER NOT NULL, PRIMARY KEY(`profile_id`, `rule_id`), FOREIGN KEY(`profile_id`) REFERENCES `filtering_profiles`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE , FOREIGN KEY(`rule_id`) REFERENCES `rules`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "profileId",
+            "columnName": "profile_id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ruleId",
+            "columnName": "rule_id",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "profile_id",
+            "rule_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_profile_rules_rule_id",
+            "unique": false,
+            "columnNames": [
+              "rule_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_profile_rules_rule_id` ON `${TABLE_NAME}` (`rule_id`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "filtering_profiles",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "profile_id"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          },
+          {
+            "table": "rules",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "rule_id"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "llm_observations",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `notification_event_id` INTEGER NOT NULL, `package_name` TEXT NOT NULL, `predicted_is_ad` INTEGER NOT NULL, `predicted_intent` TEXT NOT NULL DEFAULT 'AMBIGUOUS', `confidence_score` REAL NOT NULL, `corrected_is_ad` INTEGER, `corrected_intent` TEXT, `analyzed_at_millis` INTEGER NOT NULL, FOREIGN KEY(`notification_event_id`) REFERENCES `notification_events`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "notificationEventId",
+            "columnName": "notification_event_id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "packageName",
+            "columnName": "package_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "predictedIsAdvertisement",
+            "columnName": "predicted_is_ad",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "predictedIntent",
+            "columnName": "predicted_intent",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "'AMBIGUOUS'"
+          },
+          {
+            "fieldPath": "confidenceScore",
+            "columnName": "confidence_score",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "correctedIsAdvertisement",
+            "columnName": "corrected_is_ad",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "correctedIntent",
+            "columnName": "corrected_intent",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "analyzedAtMillis",
+            "columnName": "analyzed_at_millis",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_llm_observations_notification_event_id",
+            "unique": true,
+            "columnNames": [
+              "notification_event_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_llm_observations_notification_event_id` ON `${TABLE_NAME}` (`notification_event_id`)"
+          },
+          {
+            "name": "index_llm_observations_package_name",
+            "unique": false,
+            "columnNames": [
+              "package_name"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_llm_observations_package_name` ON `${TABLE_NAME}` (`package_name`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "notification_events",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "notification_event_id"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "ad_feedback_priors",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`package_name` TEXT NOT NULL, `is_ad` INTEGER NOT NULL, `count` INTEGER NOT NULL, PRIMARY KEY(`package_name`, `is_ad`))",
+        "fields": [
+          {
+            "fieldPath": "packageName",
+            "columnName": "package_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isAdvertisement",
+            "columnName": "is_ad",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "count",
+            "columnName": "count",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "package_name",
+            "is_ad"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "automation_audit",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `requested_at_millis` INTEGER NOT NULL, `source` TEXT NOT NULL, `operation` TEXT NOT NULL, `target_type` TEXT NOT NULL, `outcome` TEXT NOT NULL, `changed_count` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "requestedAtMillis",
+            "columnName": "requested_at_millis",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "source",
+            "columnName": "source",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "operation",
+            "columnName": "operation",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "targetType",
+            "columnName": "target_type",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "outcome",
+            "columnName": "outcome",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "changedCount",
+            "columnName": "changed_count",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_automation_audit_requested_at_millis",
+            "unique": false,
+            "columnNames": [
+              "requested_at_millis"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_automation_audit_requested_at_millis` ON `${TABLE_NAME}` (`requested_at_millis`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "notification_decision_traces",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `event_id` INTEGER NOT NULL, `lane` TEXT NOT NULL, `position` INTEGER NOT NULL, `depth` INTEGER NOT NULL, `condition_kind` TEXT NOT NULL, `result` TEXT NOT NULL, FOREIGN KEY(`event_id`) REFERENCES `notification_events`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "eventId",
+            "columnName": "event_id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lane",
+            "columnName": "lane",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "position",
+            "columnName": "position",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "depth",
+            "columnName": "depth",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "conditionKind",
+            "columnName": "condition_kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "result",
+            "columnName": "result",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_notification_decision_traces_event_id",
+            "unique": false,
+            "columnNames": [
+              "event_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_notification_decision_traces_event_id` ON `${TABLE_NAME}` (`event_id`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "notification_events",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "event_id"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "daily_insight_channel_counts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`epoch_day` INTEGER NOT NULL, `package_name` TEXT NOT NULL, `channel_id` TEXT NOT NULL, `channel_name` TEXT, `count` INTEGER NOT NULL, PRIMARY KEY(`epoch_day`, `package_name`, `channel_id`), FOREIGN KEY(`epoch_day`) REFERENCES `daily_insights`(`epoch_day`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "epochDay",
+            "columnName": "epoch_day",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "packageName",
+            "columnName": "package_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "channelId",
+            "columnName": "channel_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "channelName",
+            "columnName": "channel_name",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "count",
+            "columnName": "count",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "epoch_day",
+            "package_name",
+            "channel_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_daily_insight_channel_counts_epoch_day",
+            "unique": false,
+            "columnNames": [
+              "epoch_day"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_daily_insight_channel_counts_epoch_day` ON `${TABLE_NAME}` (`epoch_day`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "daily_insights",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "epoch_day"
+            ],
+            "referencedColumns": [
+              "epoch_day"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "rule_suggestion_dismissals",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`suggestion_key` TEXT NOT NULL, `dismissed_at_millis` INTEGER NOT NULL, PRIMARY KEY(`suggestion_key`))",
+        "fields": [
+          {
+            "fieldPath": "suggestionKey",
+            "columnName": "suggestion_key",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "dismissedAtMillis",
+            "columnName": "dismissed_at_millis",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "suggestion_key"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "semantic_feedback_priors",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`package_name` TEXT NOT NULL, `intent` TEXT NOT NULL, `count` INTEGER NOT NULL, PRIMARY KEY(`package_name`, `intent`))",
+        "fields": [
+          {
+            "fieldPath": "packageName",
+            "columnName": "package_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "intent",
+            "columnName": "intent",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "count",
+            "columnName": "count",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "package_name",
+            "intent"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "encrypted_notification_contents",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`event_id` INTEGER NOT NULL, `format_version` INTEGER NOT NULL, `aad_id` TEXT NOT NULL, `nonce` BLOB NOT NULL, `ciphertext` BLOB NOT NULL, `created_at_millis` INTEGER NOT NULL, PRIMARY KEY(`event_id`), FOREIGN KEY(`event_id`) REFERENCES `notification_events`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "eventId",
+            "columnName": "event_id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "formatVersion",
+            "columnName": "format_version",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "aadId",
+            "columnName": "aad_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "nonce",
+            "columnName": "nonce",
+            "affinity": "BLOB",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ciphertext",
+            "columnName": "ciphertext",
+            "affinity": "BLOB",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAtMillis",
+            "columnName": "created_at_millis",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "event_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_encrypted_notification_contents_created_at_millis",
+            "unique": false,
+            "columnNames": [
+              "created_at_millis"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_encrypted_notification_contents_created_at_millis` ON `${TABLE_NAME}` (`created_at_millis`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "notification_events",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "event_id"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "daily_insight_app_counts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`epoch_day` INTEGER NOT NULL, `package_name` TEXT NOT NULL, `total_count` INTEGER NOT NULL, `silenced_count` INTEGER NOT NULL, PRIMARY KEY(`epoch_day`, `package_name`), FOREIGN KEY(`epoch_day`) REFERENCES `daily_insights`(`epoch_day`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "epochDay",
+            "columnName": "epoch_day",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "packageName",
+            "columnName": "package_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "totalCount",
+            "columnName": "total_count",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "silencedCount",
+            "columnName": "silenced_count",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "epoch_day",
+            "package_name"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_daily_insight_app_counts_epoch_day",
+            "unique": false,
+            "columnNames": [
+              "epoch_day"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_daily_insight_app_counts_epoch_day` ON `${TABLE_NAME}` (`epoch_day`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "daily_insights",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "epoch_day"
+            ],
+            "referencedColumns": [
+              "epoch_day"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "daily_insight_hour_counts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`epoch_day` INTEGER NOT NULL, `hour` INTEGER NOT NULL, `total_count` INTEGER NOT NULL, `silenced_count` INTEGER NOT NULL, PRIMARY KEY(`epoch_day`, `hour`), FOREIGN KEY(`epoch_day`) REFERENCES `daily_insights`(`epoch_day`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "epochDay",
+            "columnName": "epoch_day",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "hour",
+            "columnName": "hour",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "totalCount",
+            "columnName": "total_count",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "silencedCount",
+            "columnName": "silenced_count",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "epoch_day",
+            "hour"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_daily_insight_hour_counts_epoch_day",
+            "unique": false,
+            "columnNames": [
+              "epoch_day"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_daily_insight_hour_counts_epoch_day` ON `${TABLE_NAME}` (`epoch_day`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "daily_insights",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "epoch_day"
+            ],
+            "referencedColumns": [
+              "epoch_day"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "daily_insight_semantic_counts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`epoch_day` INTEGER NOT NULL, `intent` TEXT NOT NULL, `count` INTEGER NOT NULL, PRIMARY KEY(`epoch_day`, `intent`), FOREIGN KEY(`epoch_day`) REFERENCES `daily_insights`(`epoch_day`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "epochDay",
+            "columnName": "epoch_day",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "intent",
+            "columnName": "intent",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "count",
+            "columnName": "count",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "epoch_day",
+            "intent"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_daily_insight_semantic_counts_epoch_day",
+            "unique": false,
+            "columnNames": [
+              "epoch_day"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_daily_insight_semantic_counts_epoch_day` ON `${TABLE_NAME}` (`epoch_day`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "daily_insights",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "epoch_day"
+            ],
+            "referencedColumns": [
+              "epoch_day"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "daily_insight_monitor_rule_counts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`epoch_day` INTEGER NOT NULL, `rule_id` TEXT NOT NULL, `count` INTEGER NOT NULL, PRIMARY KEY(`epoch_day`, `rule_id`), FOREIGN KEY(`epoch_day`) REFERENCES `daily_insights`(`epoch_day`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "epochDay",
+            "columnName": "epoch_day",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ruleId",
+            "columnName": "rule_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "count",
+            "columnName": "count",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "epoch_day",
+            "rule_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_daily_insight_monitor_rule_counts_epoch_day",
+            "unique": false,
+            "columnNames": [
+              "epoch_day"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_daily_insight_monitor_rule_counts_epoch_day` ON `${TABLE_NAME}` (`epoch_day`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "daily_insights",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "epoch_day"
+            ],
+            "referencedColumns": [
+              "epoch_day"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "active_notification_rate_occurrences",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`listener_key_hmac` TEXT NOT NULL, `occurrence_id` TEXT NOT NULL, `package_name` TEXT NOT NULL, `channel_id` TEXT, `last_posted_at_millis` INTEGER NOT NULL, PRIMARY KEY(`listener_key_hmac`))",
+        "fields": [
+          {
+            "fieldPath": "listenerKeyHmac",
+            "columnName": "listener_key_hmac",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "occurrenceId",
+            "columnName": "occurrence_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "packageName",
+            "columnName": "package_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "channelId",
+            "columnName": "channel_id",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "lastPostedAtMillis",
+            "columnName": "last_posted_at_millis",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "listener_key_hmac"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_active_notification_rate_occurrences_occurrence_id",
+            "unique": true,
+            "columnNames": [
+              "occurrence_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_active_notification_rate_occurrences_occurrence_id` ON `${TABLE_NAME}` (`occurrence_id`)"
+          },
+          {
+            "name": "index_active_notification_rate_occurrences_last_posted_at_millis_occurrence_id",
+            "unique": false,
+            "columnNames": [
+              "last_posted_at_millis",
+              "occurrence_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_active_notification_rate_occurrences_last_posted_at_millis_occurrence_id` ON `${TABLE_NAME}` (`last_posted_at_millis`, `occurrence_id`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "notification_rate_occurrence_history",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`occurrence_id` TEXT NOT NULL, `package_name` TEXT NOT NULL, `channel_id` TEXT, `latest_posted_at_millis` INTEGER NOT NULL, PRIMARY KEY(`occurrence_id`))",
+        "fields": [
+          {
+            "fieldPath": "occurrenceId",
+            "columnName": "occurrence_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "packageName",
+            "columnName": "package_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "channelId",
+            "columnName": "channel_id",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "latestPostedAtMillis",
+            "columnName": "latest_posted_at_millis",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "occurrence_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_notification_rate_occurrence_history_latest_posted_at_millis_occurrence_id",
+            "unique": false,
+            "columnNames": [
+              "latest_posted_at_millis",
+              "occurrence_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_notification_rate_occurrence_history_latest_posted_at_millis_occurrence_id` ON `${TABLE_NAME}` (`latest_posted_at_millis`, `occurrence_id`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "notification_rate_state",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`singleton_id` INTEGER NOT NULL, `incomplete_until_millis` INTEGER NOT NULL, PRIMARY KEY(`singleton_id`))",
+        "fields": [
+          {
+            "fieldPath": "singletonId",
+            "columnName": "singleton_id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "incompleteUntilMillis",
+            "columnName": "incomplete_until_millis",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "singleton_id"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "local_semantic_feedback",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`source_event_id` INTEGER NOT NULL, `package_name` TEXT NOT NULL, `corrected_intent` TEXT NOT NULL, `recorded_at_millis` INTEGER NOT NULL, PRIMARY KEY(`source_event_id`))",
+        "fields": [
+          {
+            "fieldPath": "sourceEventId",
+            "columnName": "source_event_id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "packageName",
+            "columnName": "package_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "correctedIntent",
+            "columnName": "corrected_intent",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recordedAtMillis",
+            "columnName": "recorded_at_millis",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "source_event_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_local_semantic_feedback_package_name_corrected_intent",
+            "unique": false,
+            "columnNames": [
+              "package_name",
+              "corrected_intent"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_local_semantic_feedback_package_name_corrected_intent` ON `${TABLE_NAME}` (`package_name`, `corrected_intent`)"
+          },
+          {
+            "name": "index_local_semantic_feedback_recorded_at_millis_source_event_id",
+            "unique": false,
+            "columnNames": [
+              "recorded_at_millis",
+              "source_event_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_local_semantic_feedback_recorded_at_millis_source_event_id` ON `${TABLE_NAME}` (`recorded_at_millis`, `source_event_id`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "daily_insight_source_gaps",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`epoch_day` INTEGER NOT NULL, PRIMARY KEY(`epoch_day`))",
+        "fields": [
+          {
+            "fieldPath": "epochDay",
+            "columnName": "epoch_day",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "epoch_day"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      }
+    ],
+    "views": [],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '18a4c683aafb890143c397de807e6d3d')"
+    ]
+  }
+}

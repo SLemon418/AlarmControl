@@ -17,6 +17,7 @@ import com.alarmcontrol.data.db.entity.DailyInsightHourCountEntity
 import com.alarmcontrol.data.db.entity.DailyInsightMonitorRuleCountEntity
 import com.alarmcontrol.data.db.entity.DailyInsightRuleCountEntity
 import com.alarmcontrol.data.db.entity.DailyInsightSemanticCountEntity
+import com.alarmcontrol.data.db.entity.DailyInsightSourceGapEntity
 import com.alarmcontrol.data.db.entity.NotificationEventEntity
 import com.alarmcontrol.data.db.model.StoredRuleAction
 import com.alarmcontrol.data.db.relation.DailyInsightWithBreakdown
@@ -39,11 +40,14 @@ class FakeDailyInsightDao : DailyInsightDao {
     private val appCounts = mutableListOf<DailyInsightAppCountEntity>()
     private val hourCounts = mutableListOf<DailyInsightHourCountEntity>()
     private val semanticCounts = mutableListOf<DailyInsightSemanticCountEntity>()
+    private val sourceGaps = mutableSetOf<Long>()
     private val eventCorrections = mutableMapOf<Long, String>()
     private val semanticByEvent = mutableMapOf<Long, SemanticFixture>()
     private var nextChildId = 1L
     private val revision = MutableStateFlow(0)
     val invalidatedEventIds = mutableListOf<Long>()
+    var linkedFeedbackInvalidationCalls = 0
+        private set
 
     override suspend fun countAll(): Int = insights.size
 
@@ -65,6 +69,11 @@ class FakeDailyInsightDao : DailyInsightDao {
         corrected: String? = null,
     ) {
         semanticByEvent[eventId] = SemanticFixture(predicted, corrected)
+    }
+
+    fun seedSourceGap(epochDay: Long) {
+        sourceGaps += epochDay
+        revision.value++
     }
 
     private fun NotificationEventEntity.inWindow(
@@ -353,6 +362,11 @@ class FakeDailyInsightDao : DailyInsightDao {
         revision.value++
     }
 
+    override suspend fun insertSourceGaps(rows: List<DailyInsightSourceGapEntity>) {
+        sourceGaps += rows.map(DailyInsightSourceGapEntity::epochDay)
+        revision.value++
+    }
+
     override suspend fun deleteRuleCounts(epochDay: Long) {
         ruleCounts.removeAll { it.epochDay == epochDay }
         revision.value++
@@ -416,6 +430,22 @@ class FakeDailyInsightDao : DailyInsightDao {
         return count
     }
 
+    override suspend fun deleteAllSourceGaps(): Int =
+        sourceGaps.size.also {
+            sourceGaps.clear()
+            revision.value++
+        }
+
+    override suspend fun hasSourceGap(epochDay: Long): Boolean = epochDay in sourceGaps
+
+    override fun observeSourceGapDaysBetween(
+        startEpochDay: Long,
+        endEpochDay: Long,
+    ): Flow<List<Long>> =
+        revision.map {
+            sourceGaps.filter { it in startEpochDay..endEpochDay }.sorted()
+        }
+
     override suspend fun deleteContainingEvent(eventId: Long): Int {
         invalidatedEventIds += eventId
         val event = events.firstOrNull { it.id == eventId } ?: return 0
@@ -429,6 +459,33 @@ class FakeDailyInsightDao : DailyInsightDao {
                         )
                 }.map(DailyInsightEntity::epochDay)
                 .toSet()
+        return deleteInsightDays(matchingDays)
+    }
+
+    override suspend fun deleteRollupsAffectedByLinkedFeedback(): Int {
+        linkedFeedbackInvalidationCalls += 1
+        val correctedEventIds =
+            eventCorrections.keys +
+                semanticByEvent.filterValues { it.corrected != null }.keys
+        val matchingDays =
+            events
+                .asSequence()
+                .filter { it.id in correctedEventIds }
+                .flatMap { event ->
+                    insights.values
+                        .asSequence()
+                        .filter { insight ->
+                            event.postedEpochDay?.let { it == insight.epochDay }
+                                ?: (
+                                    event.postedAtMillis >= insight.windowStartMillis &&
+                                        event.postedAtMillis < insight.windowEndMillis
+                                )
+                        }.map(DailyInsightEntity::epochDay)
+                }.toSet()
+        return deleteInsightDays(matchingDays)
+    }
+
+    private fun deleteInsightDays(matchingDays: Set<Long>): Int {
         insights.keys.removeAll(matchingDays)
         ruleCounts.removeAll { it.epochDay in matchingDays }
         monitorRuleCounts.removeAll { it.epochDay in matchingDays }

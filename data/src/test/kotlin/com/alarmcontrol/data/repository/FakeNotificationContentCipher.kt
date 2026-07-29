@@ -6,6 +6,7 @@ import com.alarmcontrol.data.security.NotificationContentCipher
 internal class FakeNotificationContentCipher(
     var failEncryption: Boolean = false,
     var failDecryption: Boolean = false,
+    var failKeyDeletion: Boolean = false,
 ) : NotificationContentCipher {
     var keyDeleted: Boolean = false
         private set
@@ -29,6 +30,7 @@ internal class FakeNotificationContentCipher(
     }
 
     override fun deleteKey() {
+        check(!failKeyDeletion) { "Key deletion failed" }
         keyDeleted = true
     }
 

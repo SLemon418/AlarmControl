@@ -1,12 +1,13 @@
 package com.alarmcontrol.data.repository
 
 import com.alarmcontrol.data.db.dao.ActionCountRow
+import com.alarmcontrol.data.db.dao.EventDeletionCandidateRow
 import com.alarmcontrol.data.db.dao.EventTimeBoundsRow
 import com.alarmcontrol.data.db.dao.HistoryCoverageRow
 import com.alarmcontrol.data.db.dao.NotificationEventDao
 import com.alarmcontrol.data.db.dao.NotificationSourceRow
 import com.alarmcontrol.data.db.dao.PackageCount
-import com.alarmcontrol.data.db.dao.RateHistoryRow
+import com.alarmcontrol.data.db.entity.DailyInsightSourceGapEntity
 import com.alarmcontrol.data.db.entity.EncryptedNotificationContentEntity
 import com.alarmcontrol.data.db.entity.NotificationDecisionTraceEntity
 import com.alarmcontrol.data.db.entity.NotificationEventEntity
@@ -25,7 +26,11 @@ class FakeNotificationEventDao : NotificationEventDao {
     private val events = mutableListOf<NotificationEventEntity>()
     private val traces = mutableListOf<NotificationDecisionTraceEntity>()
     private val encryptedContents = mutableListOf<EncryptedNotificationContentEntity>()
+    private val insightSourceGaps = mutableSetOf<Long>()
     val inserted: List<NotificationEventEntity> get() = events
+    val sourceGapDays: Set<Long> get() = insightSourceGaps
+    val invalidatedRollupPosts = mutableListOf<Pair<Long?, Long>>()
+    val invalidatedRollupEventIds = mutableListOf<Long>()
     private var nextId = 1L
     private val revision = MutableStateFlow(0)
 
@@ -47,6 +52,19 @@ class FakeNotificationEventDao : NotificationEventDao {
         encryptedContents.removeAll { it.eventId == content.eventId }
         encryptedContents += content
         revision.value++
+    }
+
+    override suspend fun deleteRollupContainingPost(
+        postedEpochDay: Long?,
+        postedAtMillis: Long,
+    ): Int {
+        invalidatedRollupPosts += postedEpochDay to postedAtMillis
+        return 0
+    }
+
+    override suspend fun deleteRollupContainingEvent(eventId: Long): Int {
+        invalidatedRollupEventIds += eventId
+        return 0
     }
 
     override suspend fun updatePostCommitEnrichment(
@@ -218,13 +236,53 @@ class FakeNotificationEventDao : NotificationEventDao {
         revision.value++
     }
 
-    override suspend fun deleteOlderThan(cutoffMillis: Long): Int {
+    override suspend fun getRetentionDeletionCandidates(
+        cutoffMillis: Long,
+        limit: Int,
+    ): List<EventDeletionCandidateRow> =
+        events
+            .filter { it.postedAtMillis < cutoffMillis }
+            .sortedWith(compareBy<NotificationEventEntity> { it.postedAtMillis }.thenBy { it.id })
+            .take(limit)
+            .map(NotificationEventEntity::toDeletionCandidate)
+
+    override suspend fun getOverflowDeletionCandidates(
+        max: Int,
+        limit: Int,
+    ): List<EventDeletionCandidateRow> {
+        val retainedIds =
+            events
+                .sortedWith(
+                    compareByDescending<NotificationEventEntity> { it.postedAtMillis }
+                        .thenByDescending { it.id },
+                ).take(max)
+                .mapTo(mutableSetOf(), NotificationEventEntity::id)
+        return events
+            .filterNot { it.id in retainedIds }
+            .sortedWith(compareBy<NotificationEventEntity> { it.postedAtMillis }.thenBy { it.id })
+            .take(limit)
+            .map(NotificationEventEntity::toDeletionCandidate)
+    }
+
+    override suspend fun getAllDeletionCandidates(limit: Int): List<EventDeletionCandidateRow> =
+        events
+            .sortedWith(compareBy<NotificationEventEntity> { it.postedAtMillis }.thenBy { it.id })
+            .take(limit)
+            .map(NotificationEventEntity::toDeletionCandidate)
+
+    override suspend fun deleteByIds(ids: List<Long>): Int {
+        val targetIds = ids.toSet()
         val before = events.size
-        events.removeAll { it.postedAtMillis < cutoffMillis }
-        traces.removeAll { row -> events.none { it.id == row.eventId } }
-        encryptedContents.removeAll { row -> events.none { it.id == row.eventId } }
+        events.removeAll { it.id in targetIds }
+        traces.removeAll { it.eventId in targetIds }
+        encryptedContents.removeAll { it.eventId in targetIds }
         revision.value++
         return before - events.size
+    }
+
+    override suspend fun insertInsightSourceGaps(rows: List<DailyInsightSourceGapEntity>) {
+        insightSourceGaps += rows.map(DailyInsightSourceGapEntity::epochDay)
+        revision.value++
     }
 
     override suspend fun deleteAll(): Int {
@@ -280,22 +338,6 @@ class FakeNotificationEventDao : NotificationEventDao {
         return count
     }
 
-    override suspend fun deleteOverLimit(max: Int): Int {
-        val keep =
-            events
-                .sortedWith(
-                    compareByDescending<NotificationEventEntity> { it.postedAtMillis }
-                        .thenByDescending { it.id },
-                ).take(max)
-                .toSet()
-        val before = events.size
-        events.retainAll(keep)
-        traces.removeAll { row -> events.none { it.id == row.eventId } }
-        encryptedContents.removeAll { row -> events.none { it.id == row.eventId } }
-        revision.value++
-        return before - events.size
-    }
-
     override suspend fun deleteTracesOutsideMostRecent(max: Int): Int {
         val retainedIds =
             events
@@ -333,13 +375,6 @@ class FakeNotificationEventDao : NotificationEventDao {
             }.groupingBy { it.packageName }
             .eachCount()
             .map { (packageName, count) -> PackageCount(packageName, count) }
-
-    override suspend fun rateHistorySince(sinceMillis: Long): List<RateHistoryRow> =
-        events
-            .filter { it.postedAtMillis >= sinceMillis }
-            .sortedWith(compareByDescending<NotificationEventEntity> { it.postedAtMillis }.thenByDescending { it.id })
-            .take(10_000)
-            .map { RateHistoryRow(it.packageName, it.channelId, it.postedAtMillis) }
 
     private fun filteredHistory(
         startMillis: Long,
@@ -380,6 +415,14 @@ class FakeNotificationEventDao : NotificationEventDao {
             encryptedContent = encryptedContents.firstOrNull { it.eventId == event.id },
         )
 }
+
+private fun NotificationEventEntity.toDeletionCandidate(): EventDeletionCandidateRow =
+    EventDeletionCandidateRow(
+        id = id,
+        postedAtMillis = postedAtMillis,
+        postedEpochDay = postedEpochDay,
+        undone = undone,
+    )
 
 private fun String.unescapeLike(): String =
     buildString {

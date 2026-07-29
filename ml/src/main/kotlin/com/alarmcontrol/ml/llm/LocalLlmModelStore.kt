@@ -70,6 +70,16 @@ internal class LocalLlmModelStore(
     }
 
     /**
+     * Best-effort cleanup for staging files left by a terminated process. Production calls this once
+     * before exposing the singleton store, so an import owned by the current process cannot be removed.
+     * Live and rollback pairs are deliberately preserved for [verifyInstalledModel] recovery.
+     */
+    fun recoverStaleStagingAtStartup() {
+        relatedFile(INSTALLING_SUFFIX).delete()
+        relatedFile("$METADATA_SUFFIX$INSTALLING_SUFFIX").delete()
+    }
+
+    /**
      * Hashes the installed file and compares it with the import-time sidecar before native loading.
      * A model without a sidecar predates integrity support and must be re-imported.
      */
@@ -306,8 +316,7 @@ internal class LocalLlmModelStore(
                 }
             }
         }
-        relatedFile(INSTALLING_SUFFIX).delete()
-        relatedFile("$METADATA_SUFFIX$INSTALLING_SUFFIX").delete()
+        recoverStaleStagingAtStartup()
     }
 
     private fun relatedFile(suffix: String): File =

@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
+import com.alarmcontrol.core.settings.FilteringActionGate
 import com.alarmcontrol.core.settings.MaintenanceSettingsSnapshot
 import com.alarmcontrol.core.settings.RetentionDefaults
 import com.alarmcontrol.core.settings.SemanticAnalysisScope
@@ -15,11 +16,16 @@ import com.alarmcontrol.core.settings.SettingsRepository
 import com.alarmcontrol.core.settings.SettingsSnapshot
 import com.alarmcontrol.data.security.MaintenancePolicyAccessGuard
 import com.alarmcontrol.data.security.NotificationContentAccessGuard
+import com.alarmcontrol.data.security.StoredNotificationContentCleaner
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.security.SecureRandom
 import java.util.Base64
@@ -35,9 +41,13 @@ class SettingsRepositoryImpl
     internal constructor(
         private val dataStore: DataStore<Preferences>,
         private val contentAccessGuard: NotificationContentAccessGuard,
+        private val storedNotificationContentCleaner: StoredNotificationContentCleaner,
         private val maintenancePolicyAccessGuard: MaintenancePolicyAccessGuard =
             MaintenancePolicyAccessGuard(),
+        private val filteringActionGate: FilteringActionGate = FilteringActionGate(),
     ) : SettingsRepository {
+        private val filteringMutationMutex = Mutex()
+
         override val filteringEnabled: Flow<Boolean> =
             dataStore.data
                 .map { prefs -> prefs[FILTERING_ENABLED] ?: true }
@@ -135,7 +145,9 @@ class SettingsRepositoryImpl
         }
 
         override suspend fun setFilteringEnabled(enabled: Boolean) {
-            dataStore.edit { prefs -> prefs[FILTERING_ENABLED] = enabled }
+            withFilteringGateReconciliation {
+                dataStore.edit { prefs -> prefs[FILTERING_ENABLED] = enabled }
+            }
         }
 
         override suspend fun setLlmAnalysisEnabled(enabled: Boolean) {
@@ -174,6 +186,7 @@ class SettingsRepositoryImpl
         override suspend fun setNotificationContentStorageEnabled(enabled: Boolean) {
             maintenancePolicyAccessGuard.withLock {
                 contentAccessGuard.withLock {
+                    if (!enabled) storedNotificationContentCleaner.clear()
                     dataStore.edit { prefs -> prefs[NOTIFICATION_CONTENT_STORAGE_ENABLED] = enabled }
                 }
             }
@@ -264,39 +277,69 @@ class SettingsRepositoryImpl
         override suspend fun restore(snapshot: SettingsSnapshot) {
             require(snapshot.eventRetentionDays in RETENTION_RANGE) { "Event retention is out of range" }
             require(snapshot.dailyInsightRetentionDays in RETENTION_RANGE) { "Insight retention is out of range" }
-            maintenancePolicyAccessGuard.withLock {
-                dataStore.edit { prefs ->
-                    prefs[FILTERING_ENABLED] = snapshot.filteringEnabled
-                    prefs[EXTERNAL_AUTOMATION_ENABLED] = snapshot.externalAutomationEnabled
-                    if (
-                        snapshot.externalAutomationEnabled &&
-                        prefs[EXTERNAL_AUTOMATION_TOKEN]?.isValidAutomationToken() != true
-                    ) {
-                        // The per-install secret is deliberately absent from portable backups. A
-                        // fresh restore still needs a valid local token or the UI would claim
-                        // automation is enabled while every authenticated broadcast is rejected.
-                        prefs[EXTERNAL_AUTOMATION_TOKEN] = newAutomationToken()
+            withFilteringGateReconciliation {
+                maintenancePolicyAccessGuard.withLock {
+                    dataStore.edit { prefs ->
+                        prefs[FILTERING_ENABLED] = snapshot.filteringEnabled
+                        prefs[EXTERNAL_AUTOMATION_ENABLED] = snapshot.externalAutomationEnabled
+                        if (
+                            snapshot.externalAutomationEnabled &&
+                            prefs[EXTERNAL_AUTOMATION_TOKEN]?.isValidAutomationToken() != true
+                        ) {
+                            // The per-install secret is deliberately absent from portable backups.
+                            // A fresh restore still needs a valid local token or the UI would claim
+                            // automation is enabled while every authenticated broadcast is rejected.
+                            prefs[EXTERNAL_AUTOMATION_TOKEN] = newAutomationToken()
+                        }
+                        prefs[LLM_ANALYSIS_ENABLED] = snapshot.llmAnalysisEnabled
+                        prefs.remove(LLM_AUTO_ACTIONS_ENABLED)
+                        prefs[SEMANTIC_ANALYSIS_SCOPE] = snapshot.semanticAnalysisScope.name
+                        prefs[EVENT_RETENTION_DAYS] = snapshot.eventRetentionDays
+                        prefs[DAILY_INSIGHT_RETENTION_DAYS] = snapshot.dailyInsightRetentionDays
                     }
-                    prefs[LLM_ANALYSIS_ENABLED] = snapshot.llmAnalysisEnabled
-                    prefs.remove(LLM_AUTO_ACTIONS_ENABLED)
-                    prefs[SEMANTIC_ANALYSIS_SCOPE] = snapshot.semanticAnalysisScope.name
-                    prefs[EVENT_RETENTION_DAYS] = snapshot.eventRetentionDays
-                    prefs[DAILY_INSIGHT_RETENTION_DAYS] = snapshot.dailyInsightRetentionDays
                 }
             }
         }
 
         override suspend fun reset() {
-            maintenancePolicyAccessGuard.withLock {
-                contentAccessGuard.withLock {
-                    dataStore.edit { preferences ->
-                        preferences.clear()
-                        // A destructive local-data reset must never reactivate surviving rules when
-                        // a separate database deletion failed. Keep the master gate fail-safe and
-                        // require the user to resume filtering explicitly after a reset.
-                        preferences[FILTERING_ENABLED] = false
+            withFilteringGateReconciliation {
+                maintenancePolicyAccessGuard.withLock {
+                    contentAccessGuard.withLock {
+                        storedNotificationContentCleaner.clear()
+                        dataStore.edit { preferences ->
+                            preferences.clear()
+                            // A destructive local-data reset must never reactivate surviving rules
+                            // when a separate database deletion failed. Keep the master gate
+                            // fail-safe and require the user to resume filtering explicitly.
+                            preferences[FILTERING_ENABLED] = false
+                        }
                     }
                 }
+            }
+        }
+
+        private suspend fun <T> withFilteringGateReconciliation(mutation: suspend () -> T): T =
+            filteringMutationMutex.withLock {
+                try {
+                    filteringActionGate.blockActions()
+                    mutation()
+                } finally {
+                    withContext(NonCancellable) {
+                        reconcileFilteringGateWithPersistedState()
+                    }
+                }
+            }
+
+        private suspend fun reconcileFilteringGateWithPersistedState() {
+            val persistedEnabled =
+                runCatching {
+                    dataStore.data.first()[FILTERING_ENABLED] ?: true
+                }.getOrNull()
+            if (persistedEnabled == true) {
+                filteringActionGate.requestRuleRefresh()
+                filteringActionGate.allowActions()
+            } else {
+                filteringActionGate.blockActions()
             }
         }
 

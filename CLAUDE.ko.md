@@ -112,7 +112,7 @@
 ```text
 :app             Compose UI, 탐색, DI 연결, NotificationListenerService 진입점
 :core            프레임워크 독립 도메인, 저장소 계약, 디스패처, 결과 타입
-:data            Room v13, DataStore, 저장소 구현, 백업, 매퍼
+:data            Room v15, DataStore, 저장소 구현, 백업, 매퍼
 :ml              번들 분류기, 선택형 로컬 LLM, 특징 추출, 피드백 학습
 :notifications   순수 Kotlin 알림 매칭 엔진
 :automation      공개 Intent, Tasker/Locale, QS 타일, App Shortcuts
@@ -243,11 +243,11 @@
   `pixel2Api34` `aosp-atd` Managed Device에서 `:data`, `:ml`, `:app` 테스트를 실행합니다.
 - Release 산출물이 컴파일됐다고 바로 배포 가능한 것은 아닙니다. CI의 `bundleRelease`는
   App Bundle 호환성 회귀 확인용이며 의도적으로 무서명일 수 있습니다. GitHub에 배포하는
-  APK는 반드시 `:app:releaseCandidate`를 통과해야 하며, 이 작업은 네 서명 환경 변수,
-  기기 독립 게이트, 빌드에 정의된 APK payload 제한과 APK의 암호학적 서명을 검증합니다.
-  이 키는 Play upload key가 아니라 설치 앱의 실제 업데이트 서명키입니다. 키 저장소와
-  자격 증명은 커밋하지 않고, 이후 Release가 기존 설치를 업데이트할 수 있도록 암호화한
-  오프라인 백업을 보관합니다.
+  APK는 반드시 `:app:releaseCandidate`를 통과해야 하며, 이 작업은 네 서명 환경 변수와
+  커밋된 공개 인증서 SHA-256 지문, 기기 독립 게이트, 빌드에 정의된 APK payload 제한을
+  검사하고 그 정확한 APK 서명자를 암호학적으로 검증합니다. 이 키는 Play upload key가
+  아니라 설치 앱의 실제 업데이트 서명키입니다. 키 저장소와 자격 증명은 커밋하지 않고,
+  이후 Release가 기존 설치를 업데이트할 수 있도록 암호화한 오프라인 백업을 보관합니다.
 - CI는 Gradle wrapper를 검증하고 `gradle/verification-metadata.xml`의 SHA-256을 strict
   모드로 확인합니다. `verifyCiActionPins`는 워크플로·재사용 워크플로·composite action
   YAML을 모두 검사하며 원격 Action은 40자 커밋 SHA, 컨테이너 Action은 SHA-256 digest로

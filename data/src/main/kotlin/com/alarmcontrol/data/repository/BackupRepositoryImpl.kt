@@ -11,11 +11,13 @@ import com.alarmcontrol.core.backup.RestoreOptions
 import com.alarmcontrol.core.filtering.Rule
 import com.alarmcontrol.core.result.DataResult
 import com.alarmcontrol.core.result.runCatchingPreservingCancellation
+import com.alarmcontrol.core.settings.FilteringActionGate
 import com.alarmcontrol.core.settings.SettingsRepository
 import com.alarmcontrol.core.settings.SettingsSnapshot
 import com.alarmcontrol.data.backup.BackupCodec
 import com.alarmcontrol.data.backup.BackupCryptor
 import com.alarmcontrol.data.backup.BackupValidator
+import com.alarmcontrol.data.backup.requireBackupFileSize
 import com.alarmcontrol.data.db.TransactionRunner
 import com.alarmcontrol.data.db.dao.CategoryFeedbackDao
 import com.alarmcontrol.data.db.dao.DailyInsightDao
@@ -23,6 +25,7 @@ import com.alarmcontrol.data.db.dao.LlmObservationDao
 import com.alarmcontrol.data.db.dao.ProfileDao
 import com.alarmcontrol.data.db.dao.RuleDao
 import com.alarmcontrol.data.db.entity.CategoryFeedbackEntity
+import com.alarmcontrol.data.db.entity.DailyInsightSourceGapEntity
 import com.alarmcontrol.data.db.entity.SemanticFeedbackPriorEntity
 import com.alarmcontrol.data.mapper.toDomain
 import com.alarmcontrol.data.mapper.toEntity
@@ -50,6 +53,7 @@ class BackupRepositoryImpl
         private val categoryFeedbackDao: CategoryFeedbackDao,
         private val llmObservationDao: LlmObservationDao,
         private val settingsRepository: SettingsRepository,
+        private val filteringActionGate: FilteringActionGate = FilteringActionGate(),
     ) : BackupRepository {
         override suspend fun export(
             passphrase: CharArray?,
@@ -93,7 +97,7 @@ class BackupRepositoryImpl
                     },
                 )
             return if (passphrase == null || passphrase.isEmpty()) {
-                plaintext
+                plaintext.requireBackupFileSize()
             } else {
                 BackupCryptor.encrypt(plaintext, passphrase)
             }
@@ -142,7 +146,7 @@ class BackupRepositoryImpl
                 var settingsReviewRequired = false
                 try {
                     if (pauseSideEffects) disableSideEffectingSettings(priorSettings)
-                    databaseResult = transactionRunner.run { restoreDatabase(data, options) }
+                    databaseResult = runDatabaseRestore(data, options)
                     databaseCommitted = true
                     when {
                         options.settings && desiredSettings != null -> settingsRepository.restore(desiredSettings)
@@ -237,11 +241,28 @@ class BackupRepositoryImpl
             runCatchingPreservingCancellation { settingsRepository.restore(safeSettings) }
         }
 
+        private suspend fun runDatabaseRestore(
+            data: BackupData,
+            options: RestoreOptions,
+        ): DatabaseRestoreResult =
+            if (options.rulesAndProfiles) {
+                filteringActionGate.withRuleMutation {
+                    transactionRunner.run { restoreDatabase(data, options) }
+                }
+            } else {
+                transactionRunner.run { restoreDatabase(data, options) }
+            }
+
         private suspend fun restoreDatabase(
             data: BackupData,
             options: RestoreOptions,
         ): DatabaseRestoreResult {
             val now = System.currentTimeMillis()
+            if (options.mode == RestoreMode.REPLACE && options.learningFeedback) {
+                // Invalidate while linked local corrections still exist. Imported rollups written
+                // below have no portable event identity and must not be deleted afterward.
+                dailyInsightDao.deleteRollupsAffectedByLinkedFeedback()
+            }
             val idRemap =
                 if (options.rulesAndProfiles) {
                     restoreRulesAndProfiles(data, options.mode, now)
@@ -252,7 +273,9 @@ class BackupRepositoryImpl
             var restoredInsightCount = 0
             var skippedInsightCount = 0
             if (options.dailyInsights) {
-                if (options.mode == RestoreMode.REPLACE) dailyInsightDao.deleteAll()
+                if (options.mode == RestoreMode.REPLACE) {
+                    dailyInsightDao.deleteAll()
+                }
                 val existingDays =
                     if (options.mode == RestoreMode.MERGE && data.dailyInsights.isNotEmpty()) {
                         dailyInsightDao
@@ -282,6 +305,9 @@ class BackupRepositoryImpl
                                 },
                         )
                     dailyInsightDao.store(remapped.toWrite())
+                    dailyInsightDao.insertSourceGaps(
+                        listOf(DailyInsightSourceGapEntity(remapped.epochDay)),
+                    )
                     restoredInsightCount += 1
                 }
             }
@@ -337,11 +363,15 @@ class BackupRepositoryImpl
         ) {
             if (mode == RestoreMode.REPLACE) {
                 categoryFeedbackDao.deleteAll()
+                llmObservationDao.deleteLocalSemanticFeedback()
                 llmObservationDao.deleteImportedPriors()
                 llmObservationDao.clearSemanticCorrections()
                 llmObservationDao.deleteSemanticImportedPriors()
             }
             categoryFeedbackDao.insertAll(data.categoryFeedback.map { it.toEntity() })
+            categoryFeedbackDao
+                .getLinkedTrimVictimEventIds(CategoryFeedbackDao.MAX_RETAINED_ROWS)
+                .forEach { eventId -> dailyInsightDao.deleteContainingEvent(eventId) }
             categoryFeedbackDao.trimToMostRecent(CategoryFeedbackDao.MAX_RETAINED_ROWS)
 
             val existing =

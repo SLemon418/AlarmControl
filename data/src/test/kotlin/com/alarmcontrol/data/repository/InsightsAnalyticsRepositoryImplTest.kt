@@ -46,6 +46,40 @@ class InsightsAnalyticsRepositoryImplTest {
             assertEquals(10L, analytics.breakdownCoverageStartEpochDay)
             assertEquals(InsightsBucket.DAY, analytics.bucket)
             assertEquals(listOf(10L, 11L), analytics.trend.map { it.startEpochDay })
+            assertEquals(true, analytics.sourceComplete)
+        }
+
+    @Test
+    fun `gap-only day makes a selected analytics range incomplete`() =
+        runTest {
+            store(day(10, total = 10, cancelled = 3, kept = 7))
+            dao.seedSourceGap(11)
+
+            val analytics = repository.observe(InsightsDateRange(10, 11)).first()
+
+            assertEquals(10, analytics.totalNotifications)
+            assertEquals(false, analytics.sourceComplete)
+        }
+
+    @Test
+    fun `source loss after a complete rollup does not rewrite its completeness snapshot`() =
+        runTest {
+            store(day(10, total = 10, cancelled = 3, kept = 7))
+            dao.seedSourceGap(10)
+
+            val analytics = repository.observe(InsightsDateRange(10, 10)).first()
+
+            assertEquals(true, analytics.sourceComplete)
+        }
+
+    @Test
+    fun `an incomplete rollup snapshot remains incomplete after storage`() =
+        runTest {
+            store(day(10, total = 10, cancelled = 3, kept = 7).copy(sourceComplete = false))
+
+            val analytics = repository.observe(InsightsDateRange(10, 10)).first()
+
+            assertEquals(false, analytics.sourceComplete)
         }
 
     @Test

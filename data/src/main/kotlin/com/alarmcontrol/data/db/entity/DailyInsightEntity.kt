@@ -36,6 +36,8 @@ data class DailyInsightEntity(
     @ColumnInfo(name = "semantic_correction_count", defaultValue = "0")
     val semanticCorrectionCount: Int = 0,
     @ColumnInfo(name = "breakdown_version", defaultValue = "0") val breakdownVersion: Int = 0,
+    /** Room writes this value explicitly; the SQL default is conservative for legacy/raw rows. */
+    @ColumnInfo(name = "source_complete", defaultValue = "0") val sourceComplete: Boolean = true,
     @ColumnInfo(name = "rule_breakdown_complete", defaultValue = "0")
     val ruleBreakdownComplete: Boolean = false,
     @ColumnInfo(name = "monitor_rule_breakdown_complete", defaultValue = "0")

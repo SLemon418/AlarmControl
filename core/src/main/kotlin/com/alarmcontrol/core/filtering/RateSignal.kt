@@ -16,10 +16,3 @@ data class RateSignal(
     val scope: RateScope,
     val windowMillis: Long,
 )
-
-/** Content-free historical event used once to warm the in-memory frequency tracker. */
-data class NotificationRateEvent(
-    val packageName: String,
-    val channelId: String?,
-    val postedAtMillis: Long,
-)

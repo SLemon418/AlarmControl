@@ -21,7 +21,6 @@ internal object BackupCryptor {
     private const val IV_BYTES = 12
     private const val GCM_TAG_BITS = 128
     private const val MAX_PASSPHRASE_CHARS = 1_024
-    private const val MAX_ENVELOPE_CHARS = 32 * 1_024 * 1_024
 
     fun isEncrypted(serialized: String): Boolean =
         runCatching {
@@ -57,11 +56,7 @@ internal object BackupCryptor {
                     .put("iv", iv.base64())
                     .put("ciphertext", encrypted.base64())
                     .toString(2)
-                    .also {
-                        require(it.length <= MAX_ENVELOPE_CHARS) {
-                            "Encrypted backup is too large"
-                        }
-                    }
+                    .requireBackupFileSize(tooLargeMessage = "Encrypted backup is too large")
             } finally {
                 encrypted.fill(0)
             }
@@ -77,7 +72,7 @@ internal object BackupCryptor {
     ): String {
         require(passphrase.isNotEmpty()) { "Backup passphrase is required" }
         require(passphrase.size <= MAX_PASSPHRASE_CHARS) { "Backup passphrase is too long" }
-        require(serialized.length <= MAX_ENVELOPE_CHARS) { "Encrypted backup is too large" }
+        serialized.requireBackupFileSize(tooLargeMessage = "Encrypted backup is too large")
         serialized.requireSafeJsonNesting()
         val envelope = JSONObject(serialized)
         require(envelope.getInt("version") == ENVELOPE_VERSION) { "Unsupported backup encryption version" }

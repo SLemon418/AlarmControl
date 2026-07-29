@@ -2,6 +2,13 @@ package com.alarmcontrol.core.filtering
 
 import com.alarmcontrol.core.insights.ActionBreakdown
 import kotlinx.coroutines.flow.Flow
+import java.time.ZoneId
+
+/** Maximum number of raw, content-free notification decisions retained on-device. */
+const val MAX_RETAINED_NOTIFICATION_EVENTS = 10_000
+
+/** Maximum number of newest notification decisions allowed to retain condition traces. */
+const val MAX_RETAINED_NOTIFICATION_TRACE_EVENTS = 1_000
 
 /**
  * Read/write access to the local decision log used for insights and statistics exclusion
@@ -57,11 +64,29 @@ interface NotificationEventRepository {
     suspend fun purgeEventsOlderThan(cutoffMillis: Long): Int
 
     /**
+     * Retention variant that can map legacy rows without a stored local day before recording source
+     * completeness gaps. Implementations without persisted analytics may use the one-argument path.
+     */
+    suspend fun purgeEventsOlderThan(
+        cutoffMillis: Long,
+        legacyZoneId: ZoneId,
+    ): Int = purgeEventsOlderThan(cutoffMillis)
+
+    /**
      * Caps the log at the [max] most recent events, deleting older overflow — a size guard so a
      * high-volume device can't grow the table without bound within the retention window. Returns rows
      * removed.
      */
     suspend fun trimToMostRecent(max: Int): Int
+
+    /**
+     * Size-cap variant that can map legacy rows without a stored local day before recording source
+     * completeness gaps. Implementations without persisted analytics may use the one-argument path.
+     */
+    suspend fun trimToMostRecent(
+        max: Int,
+        legacyZoneId: ZoneId,
+    ): Int = trimToMostRecent(max)
 
     /** Removes diagnostic child rows outside the newest [max] events while retaining event metadata. */
     suspend fun trimDecisionTracesToMostRecent(max: Int): Int = 0
@@ -80,9 +105,6 @@ interface NotificationEventRepository {
         startMillis: Long,
         endMillis: Long,
     ): Map<String, Int>
-
-    /** Loads a bounded, content-free history once to warm stateful frequency conditions. */
-    suspend fun rateHistorySince(sinceMillis: Long): List<NotificationRateEvent>
 
     /** Deletes encrypted title/body payloads older than [cutoffMillis], retaining event metadata. */
     suspend fun purgeEncryptedContentOlderThan(cutoffMillis: Long): Int

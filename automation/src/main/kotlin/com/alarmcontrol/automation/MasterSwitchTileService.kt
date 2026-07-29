@@ -42,6 +42,14 @@ class MasterSwitchTileService : TileService() {
 
     override fun onClick() {
         super.onClick()
+        if (isLocked) {
+            unlockAndRun { toggleFiltering() }
+        } else {
+            toggleFiltering()
+        }
+    }
+
+    private fun toggleFiltering() {
         launchSafely {
             profileController.toggle(
                 profileId = null,

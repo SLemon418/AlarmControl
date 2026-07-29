@@ -2,9 +2,11 @@ package com.alarmcontrol.data.repository
 
 import com.alarmcontrol.data.db.dao.AdVerdictCount
 import com.alarmcontrol.data.db.dao.LlmObservationDao
+import com.alarmcontrol.data.db.dao.SemanticCorrectionTarget
 import com.alarmcontrol.data.db.dao.SemanticVerdictCount
 import com.alarmcontrol.data.db.entity.AdFeedbackPriorEntity
 import com.alarmcontrol.data.db.entity.LlmObservationEntity
+import com.alarmcontrol.data.db.entity.LocalSemanticFeedbackEntity
 import com.alarmcontrol.data.db.entity.SemanticFeedbackPriorEntity
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -14,6 +16,8 @@ class FakeLlmObservationDao : LlmObservationDao {
     private val rows = MutableStateFlow<List<LlmObservationEntity>>(emptyList())
     private val importedPriors = MutableStateFlow<List<AdFeedbackPriorEntity>>(emptyList())
     private val semanticPriors = MutableStateFlow<List<SemanticFeedbackPriorEntity>>(emptyList())
+    private val localFeedback = MutableStateFlow<List<LocalSemanticFeedbackEntity>>(emptyList())
+    private val missingNotificationEventIds = mutableSetOf<Long>()
     private var nextId = 1L
 
     override suspend fun insertIfAbsent(observation: LlmObservationEntity): Long {
@@ -43,6 +47,14 @@ class FakeLlmObservationDao : LlmObservationDao {
                 analyzedAtMillis = analyzedAtMillis,
             )
         return 1
+    }
+
+    override suspend fun notificationEventExists(notificationEventId: Long): Boolean =
+        notificationEventId !in missingNotificationEventIds
+
+    fun deleteNotificationEvent(notificationEventId: Long) {
+        missingNotificationEventIds += notificationEventId
+        rows.value = rows.value.filterNot { it.notificationEventId == notificationEventId }
     }
 
     override suspend fun setCorrection(
@@ -80,19 +92,56 @@ class FakeLlmObservationDao : LlmObservationDao {
         return if (exists) 1 else 0
     }
 
+    override suspend fun getCorrectionTarget(eventId: Long): SemanticCorrectionTarget? =
+        rows.value
+            .firstOrNull { it.notificationEventId == eventId }
+            ?.let { SemanticCorrectionTarget(it.notificationEventId, it.packageName) }
+
+    override suspend fun upsertLocalSemanticFeedback(feedback: LocalSemanticFeedbackEntity) {
+        localFeedback.value =
+            localFeedback.value.filterNot { it.sourceEventId == feedback.sourceEventId } + feedback
+    }
+
+    override suspend fun trimLocalSemanticFeedback(max: Int): Int {
+        val retained =
+            localFeedback.value
+                .sortedWith(
+                    compareByDescending<LocalSemanticFeedbackEntity> { it.recordedAtMillis }
+                        .thenByDescending { it.sourceEventId },
+                ).take(max)
+        val deleted = localFeedback.value.size - retained.size
+        localFeedback.value = retained
+        return deleted
+    }
+
+    override suspend fun getLocalSemanticFeedback(): List<LocalSemanticFeedbackEntity> =
+        localFeedback.value.sortedWith(
+            compareByDescending<LocalSemanticFeedbackEntity> { it.recordedAtMillis }
+                .thenByDescending { it.sourceEventId },
+        )
+
+    override suspend fun countLocalSemanticFeedback(): Int = localFeedback.value.size
+
+    override suspend fun deleteLocalSemanticFeedback(): Int =
+        localFeedback.value.size.also { localFeedback.value = emptyList() }
+
+    fun seedLocalSemanticFeedback(rows: List<LocalSemanticFeedbackEntity>) {
+        localFeedback.value = rows.associateBy(LocalSemanticFeedbackEntity::sourceEventId).values.toList()
+    }
+
     override fun observeAll(): Flow<List<LlmObservationEntity>> =
         rows.map { values -> values.sortedByDescending { it.analyzedAtMillis } }
 
     override fun observeFeedbackCounts(): Flow<List<AdVerdictCount>> =
-        kotlinx.coroutines.flow.combine(rows, importedPriors) { values, priors -> counts(values, priors) }
+        kotlinx.coroutines.flow.combine(localFeedback, importedPriors, ::counts)
 
-    override suspend fun getFeedbackCounts(): List<AdVerdictCount> = counts(rows.value, importedPriors.value)
+    override suspend fun getFeedbackCounts(): List<AdVerdictCount> = counts(localFeedback.value, importedPriors.value)
 
     override fun observeSemanticFeedbackCounts(): Flow<List<SemanticVerdictCount>> =
-        kotlinx.coroutines.flow.combine(rows, semanticPriors, ::semanticCounts)
+        kotlinx.coroutines.flow.combine(localFeedback, semanticPriors, ::semanticCounts)
 
     override suspend fun getSemanticFeedbackCounts(): List<SemanticVerdictCount> =
-        semanticCounts(rows.value, semanticPriors.value)
+        semanticCounts(localFeedback.value, semanticPriors.value)
 
     override suspend fun getSemanticImportedPriors(): List<SemanticFeedbackPriorEntity> = semanticPriors.value
 
@@ -135,19 +184,18 @@ class FakeLlmObservationDao : LlmObservationDao {
 
     override suspend fun countAll(): Int = rows.value.size
 
-    override suspend fun countCorrections(): Int = rows.value.count { it.correctedIsAdvertisement != null }
+    override suspend fun countCorrections(): Int = localFeedback.value.size
 
     override suspend fun deleteAll(): Int = rows.value.size.also { rows.value = emptyList() }
 
     private fun counts(
-        observations: List<LlmObservationEntity>,
+        feedback: List<LocalSemanticFeedbackEntity>,
         priors: List<AdFeedbackPriorEntity>,
     ): List<AdVerdictCount> {
         val counts = mutableMapOf<Pair<String, Boolean>, Int>()
-        observations.forEach { row ->
-            row.correctedIsAdvertisement?.let { verdict ->
-                counts[row.packageName to verdict] = (counts[row.packageName to verdict] ?: 0) + 1
-            }
+        feedback.forEach { row ->
+            val verdict = row.correctedIntent == "MARKETING"
+            counts[row.packageName to verdict] = (counts[row.packageName to verdict] ?: 0) + 1
         }
         priors.forEach { row ->
             val key = row.packageName to row.isAdvertisement
@@ -157,15 +205,13 @@ class FakeLlmObservationDao : LlmObservationDao {
     }
 
     private fun semanticCounts(
-        observations: List<LlmObservationEntity>,
+        feedback: List<LocalSemanticFeedbackEntity>,
         priors: List<SemanticFeedbackPriorEntity>,
     ): List<SemanticVerdictCount> {
         val counts = mutableMapOf<Pair<String, String>, Int>()
-        observations.forEach { row ->
-            row.correctedIntent?.let { intent ->
-                val key = row.packageName to intent
-                counts[key] = (counts[key] ?: 0) + 1
-            }
+        feedback.forEach { row ->
+            val key = row.packageName to row.correctedIntent
+            counts[key] = (counts[key] ?: 0) + 1
         }
         priors.forEach { row ->
             val key = row.packageName to row.intent

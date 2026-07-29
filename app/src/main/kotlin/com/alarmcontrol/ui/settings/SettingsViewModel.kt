@@ -4,6 +4,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import androidx.annotation.StringRes
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.alarmcontrol.R
@@ -270,13 +271,15 @@ class SettingsViewModel
         }
 
         fun setNotificationContentStorageEnabled(enabled: Boolean) {
-            launchSettingUpdate {
-                if (enabled) {
-                    settingsRepository.setNotificationContentStorageEnabled(true)
-                } else {
-                    settingsRepository.setNotificationContentStorageEnabled(false)
-                    localDataRepository.reconcileStoredNotificationContentPolicy()
-                }
+            launchSettingUpdate(
+                failureMessage =
+                    if (enabled) {
+                        R.string.message_setting_update_failed
+                    } else {
+                        R.string.message_content_storage_disable_failed
+                    },
+            ) {
+                settingsRepository.setNotificationContentStorageEnabled(enabled)
             }
         }
 
@@ -610,11 +613,14 @@ class SettingsViewModel
                 backupRepository.preview(serialized, passphrase)
             }.getOrElse { error -> DataResult.Failure(error) }
 
-        private fun launchSettingUpdate(block: suspend () -> Unit) {
+        private fun launchSettingUpdate(
+            @StringRes failureMessage: Int = R.string.message_setting_update_failed,
+            block: suspend () -> Unit,
+        ) {
             viewModelScope.launch(ioDispatcher) {
                 settingsMutationMutex.withLock {
                     runCatchingPreservingCancellation { block() }
-                        .onFailure { messages.value = uiText(R.string.message_setting_update_failed) }
+                        .onFailure { messages.value = uiText(failureMessage) }
                 }
             }
         }

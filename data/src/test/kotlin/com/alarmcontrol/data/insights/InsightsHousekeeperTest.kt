@@ -1,10 +1,18 @@
 package com.alarmcontrol.data.insights
 
 import com.alarmcontrol.core.filtering.ActionKind
+import com.alarmcontrol.core.filtering.ActiveRateOccurrence
 import com.alarmcontrol.core.filtering.NotificationContent
 import com.alarmcontrol.core.filtering.NotificationEvent
 import com.alarmcontrol.core.filtering.NotificationEventRepository
 import com.alarmcontrol.core.filtering.NotificationEventTimeBounds
+import com.alarmcontrol.core.filtering.RateListenerKeyDigest
+import com.alarmcontrol.core.filtering.RateOccurrenceId
+import com.alarmcontrol.core.filtering.RateOccurrencePersistenceFailure
+import com.alarmcontrol.core.filtering.RateOccurrencePersistenceResult
+import com.alarmcontrol.core.filtering.RateOccurrenceRepository
+import com.alarmcontrol.core.filtering.RateOccurrenceSeed
+import com.alarmcontrol.core.filtering.RecordedRateOccurrence
 import com.alarmcontrol.core.insights.ActionBreakdown
 import com.alarmcontrol.core.insights.DailyInsight
 import com.alarmcontrol.core.insights.DailyInsightRepository
@@ -33,6 +41,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.IOException
 import java.time.Instant
+import java.time.ZoneId
 
 private const val DAY = 24L * 60 * 60 * 1000
 
@@ -44,6 +53,7 @@ class InsightsHousekeeperTest {
         summary: InsightsSummaryRepository = RecordingSummaryRepository(),
         daily: DailyInsightRepository = RecordingDailyInsightRepository(),
         localData: LocalDataRepository = RecordingLocalDataRepository(),
+        rateOccurrences: RateOccurrenceRepository = RecordingRateOccurrenceRepository(),
         eventDays: Int = 30,
         insightDays: Int = 365,
         contentEnabled: Boolean = false,
@@ -54,6 +64,7 @@ class InsightsHousekeeperTest {
         daily,
         RetentionSettings(eventDays, insightDays, contentEnabled, excludedPackages),
         localData,
+        rateOccurrences,
     )
 
     @Test
@@ -64,6 +75,40 @@ class InsightsHousekeeperTest {
             housekeeper(events = events).run(now)
 
             assertEquals(now - 30 * DAY, events.purgeCutoff)
+        }
+
+    @Test
+    fun `purges durable rate metadata outside the maximum window`() =
+        runTest {
+            val rateOccurrences = RecordingRateOccurrenceRepository()
+
+            val result = housekeeper(rateOccurrences = rateOccurrences).run(now)
+
+            assertTrue(result is DataResult.Success)
+            assertEquals(now, rateOccurrences.purgeNowMillis)
+        }
+
+    @Test
+    fun `rate metadata purge failure makes housekeeping retryable`() =
+        runTest {
+            val events = RecordingEventRepository()
+            val rateOccurrences =
+                RecordingRateOccurrenceRepository(
+                    purgeResult =
+                        RateOccurrencePersistenceResult.Unavailable(
+                            RateOccurrencePersistenceFailure.PERSISTENCE_UNAVAILABLE,
+                        ),
+                )
+
+            val result =
+                housekeeper(
+                    events = events,
+                    rateOccurrences = rateOccurrences,
+                ).run(now)
+
+            assertTrue(result is DataResult.Failure)
+            assertEquals(now, rateOccurrences.purgeNowMillis)
+            assertEquals(null, events.purgeCutoff)
         }
 
     @Test
@@ -94,6 +139,7 @@ class InsightsHousekeeperTest {
             val daily = RecordingDailyInsightRepository()
             val localData = RecordingLocalDataRepository()
             val summary = RecordingSummaryRepository()
+            val rateOccurrences = RecordingRateOccurrenceRepository()
             val failingSettings =
                 object : SettingsRepository by RetentionSettings(30, 365, false, emptySet()) {
                     override suspend fun maintenanceSnapshot(): MaintenanceSettingsSnapshot =
@@ -106,12 +152,14 @@ class InsightsHousekeeperTest {
                     daily,
                     failingSettings,
                     localData,
+                    rateOccurrences,
                 )
 
             val result = target.run(now)
 
             assertTrue(result is DataResult.Failure)
             assertEquals(0, localData.reconcileContentPolicyCalls)
+            assertEquals(null, rateOccurrences.purgeNowMillis)
             assertEquals(null, events.encryptedContentPurgeCutoff)
             assertEquals(null, events.purgeCutoff)
             assertEquals(null, events.trimMax)
@@ -162,6 +210,11 @@ class InsightsHousekeeperTest {
             val failing =
                 object : NotificationEventRepository by RecordingEventRepository() {
                     override suspend fun purgeEventsOlderThan(cutoffMillis: Long): Int = error("db down")
+
+                    override suspend fun purgeEventsOlderThan(
+                        cutoffMillis: Long,
+                        legacyZoneId: ZoneId,
+                    ): Int = error("db down")
                 }
 
             val result =
@@ -263,6 +316,7 @@ class InsightsHousekeeperTest {
                     RecordingDailyInsightRepository(),
                     settings,
                     RecordingLocalDataRepository(),
+                    RecordingRateOccurrenceRepository(),
                     policyGuard,
                 )
 
@@ -309,6 +363,7 @@ class InsightsHousekeeperTest {
                     RecordingDailyInsightRepository(),
                     settings,
                     RecordingLocalDataRepository(),
+                    RecordingRateOccurrenceRepository(),
                     policyGuard,
                 )
 
@@ -417,6 +472,48 @@ class InsightsHousekeeperTest {
         }
 }
 
+private class RecordingRateOccurrenceRepository(
+    private val purgeResult: RateOccurrencePersistenceResult<Int> =
+        RateOccurrencePersistenceResult.Success(0),
+) : RateOccurrenceRepository {
+    var purgeNowMillis: Long? = null
+        private set
+
+    override suspend fun purgeExpiredHistory(nowMillis: Long): RateOccurrencePersistenceResult<Int> {
+        purgeNowMillis = nowMillis
+        return purgeResult
+    }
+
+    override suspend fun loadSeed(
+        sinceMillis: Long,
+        nowMillis: Long,
+    ): RateOccurrenceSeed = error("unused")
+
+    override suspend fun activeOccurrences(): RateOccurrencePersistenceResult<List<ActiveRateOccurrence>> =
+        error("unused")
+
+    override suspend fun activeOccurrence(
+        listenerKeyDigest: RateListenerKeyDigest,
+    ): RateOccurrencePersistenceResult<ActiveRateOccurrence?> = error("unused")
+
+    override suspend fun recordPost(
+        listenerKeyDigest: RateListenerKeyDigest,
+        candidateOccurrenceId: RateOccurrenceId,
+        packageName: String,
+        channelId: String?,
+        postedAtMillis: Long,
+    ): RateOccurrencePersistenceResult<RecordedRateOccurrence> = error("unused")
+
+    override suspend fun deleteActiveOccurrence(
+        listenerKeyDigest: RateListenerKeyDigest,
+        occurrenceId: RateOccurrenceId,
+        removedPostTimeMillis: Long,
+    ): RateOccurrencePersistenceResult<Boolean> = error("unused")
+
+    override suspend fun extendIncompleteWindowFrom(anchorMillis: Long): RateOccurrencePersistenceResult<Long> =
+        error("unused")
+}
+
 /** Fake [NotificationEventRepository] that records the purge cutoff and returns canned window counts. */
 private class RecordingEventRepository(
     private val purgeCount: Int = 0,
@@ -494,9 +591,6 @@ private class RecordingEventRepository(
     ): Flow<ActionBreakdown> = flowOf(ActionBreakdown())
 
     override suspend fun undo(eventId: String) = Unit
-
-    override suspend fun rateHistorySince(sinceMillis: Long) =
-        emptyList<com.alarmcontrol.core.filtering.NotificationRateEvent>()
 
     override suspend fun postedAtBounds(): NotificationEventTimeBounds? =
         oldestPostedAtMillis?.let {

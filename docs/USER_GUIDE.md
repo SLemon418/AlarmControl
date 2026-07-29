@@ -297,9 +297,11 @@ This setting affects eligible future notifications only. Content is:
 - automatically removed after seven days;
 - never included in portable backup.
 
-Turning the feature off deletes all stored ciphertext and the non-exportable key immediately.
-Details may also be unavailable because storage was off when the notification arrived, the record
-expired, the app was excluded, Android marked it secret, or the local key was removed.
+When turning the feature off succeeds, AlarmControl deletes all stored ciphertext and the
+non-exportable key before showing the setting as off. If deletion fails, the setting remains on and
+the app asks you to retry. Details may also be unavailable because storage was off when the
+notification arrived, the record expired, the app was excluded, Android marked it secret, or the
+local key was removed.
 
 ## Retention and deletion
 

@@ -8,6 +8,7 @@ import androidx.room.Query
 import androidx.room.Transaction
 import com.alarmcontrol.data.db.entity.AdFeedbackPriorEntity
 import com.alarmcontrol.data.db.entity.LlmObservationEntity
+import com.alarmcontrol.data.db.entity.LocalSemanticFeedbackEntity
 import com.alarmcontrol.data.db.entity.SemanticFeedbackPriorEntity
 import kotlinx.coroutines.flow.Flow
 
@@ -32,12 +33,19 @@ interface LlmObservationDao {
         analyzedAtMillis: Long,
     ): Int
 
+    @Query(
+        "SELECT EXISTS(SELECT 1 FROM notification_events WHERE id = :notificationEventId)",
+    )
+    suspend fun notificationEventExists(notificationEventId: Long): Boolean
+
     /**
      * Replaces a model prediction without erasing an explicit correction that may have arrived
-     * before a delayed local analysis completed.
+     * before a delayed local analysis completed. A history row may be removed before deferred
+     * analysis finishes, so the parent check and write share one database transaction.
      */
     @Transaction
-    suspend fun upsert(observation: LlmObservationEntity) {
+    suspend fun upsertIfEventExists(observation: LlmObservationEntity): Boolean {
+        if (!notificationEventExists(observation.notificationEventId)) return false
         if (insertIfAbsent(observation) == -1L) {
             check(
                 updatePrediction(
@@ -50,6 +58,7 @@ interface LlmObservationDao {
                 ) == 1,
             )
         }
+        return true
     }
 
     @Query(
@@ -70,6 +79,31 @@ interface LlmObservationDao {
         intent: String,
         isAdvertisement: Boolean,
     ): Int
+
+    @Query(
+        "SELECT notification_event_id, package_name FROM llm_observations " +
+            "WHERE notification_event_id = :eventId LIMIT 1",
+    )
+    suspend fun getCorrectionTarget(eventId: Long): SemanticCorrectionTarget?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertLocalSemanticFeedback(feedback: LocalSemanticFeedbackEntity)
+
+    @Query(
+        "DELETE FROM local_semantic_feedback WHERE source_event_id NOT IN (" +
+            "SELECT source_event_id FROM local_semantic_feedback " +
+            "ORDER BY recorded_at_millis DESC, source_event_id DESC LIMIT :max)",
+    )
+    suspend fun trimLocalSemanticFeedback(max: Int): Int
+
+    @Query("SELECT * FROM local_semantic_feedback ORDER BY recorded_at_millis DESC, source_event_id DESC")
+    suspend fun getLocalSemanticFeedback(): List<LocalSemanticFeedbackEntity>
+
+    @Query("SELECT COUNT(*) FROM local_semantic_feedback")
+    suspend fun countLocalSemanticFeedback(): Int
+
+    @Query("DELETE FROM local_semantic_feedback")
+    suspend fun deleteLocalSemanticFeedback(): Int
 
     @Query("SELECT * FROM llm_observations ORDER BY analyzed_at_millis DESC")
     fun observeAll(): Flow<List<LlmObservationEntity>>
@@ -122,7 +156,7 @@ interface LlmObservationDao {
     @Query("SELECT COUNT(*) FROM llm_observations")
     suspend fun countAll(): Int
 
-    @Query("SELECT COUNT(*) FROM llm_observations WHERE corrected_is_ad IS NOT NULL")
+    @Query("SELECT COUNT(*) FROM local_semantic_feedback")
     suspend fun countCorrections(): Int
 
     @Query("DELETE FROM llm_observations")
@@ -131,20 +165,28 @@ interface LlmObservationDao {
     companion object {
         const val FEEDBACK_COUNTS_QUERY =
             "SELECT package_name, corrected_is_ad, SUM(count) AS count FROM (" +
-                "SELECT package_name, corrected_is_ad, COUNT(*) AS count FROM llm_observations " +
-                "WHERE corrected_is_ad IS NOT NULL GROUP BY package_name, corrected_is_ad " +
+                "SELECT package_name, CASE WHEN corrected_intent = 'MARKETING' THEN 1 ELSE 0 END " +
+                "AS corrected_is_ad, COUNT(*) AS count FROM local_semantic_feedback " +
+                "GROUP BY package_name, corrected_is_ad " +
                 "UNION ALL SELECT package_name, is_ad AS corrected_is_ad, count " +
                 "FROM ad_feedback_priors) GROUP BY package_name, corrected_is_ad"
 
         const val SEMANTIC_FEEDBACK_COUNTS_QUERY =
             "SELECT package_name, intent, SUM(count) AS count FROM (" +
                 "SELECT package_name, corrected_intent AS intent, COUNT(*) AS count " +
-                "FROM llm_observations WHERE corrected_intent IS NOT NULL " +
+                "FROM local_semantic_feedback " +
                 "GROUP BY package_name, corrected_intent UNION ALL " +
                 "SELECT package_name, intent, count FROM semantic_feedback_priors) " +
                 "GROUP BY package_name, intent"
+
+        const val MAX_LOCAL_SEMANTIC_FEEDBACK = 25_000
     }
 }
+
+data class SemanticCorrectionTarget(
+    @ColumnInfo(name = "notification_event_id") val notificationEventId: Long,
+    @ColumnInfo(name = "package_name") val packageName: String,
+)
 
 data class AdVerdictCount(
     @ColumnInfo(name = "package_name") val packageName: String,

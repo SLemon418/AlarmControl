@@ -59,6 +59,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.Clock
@@ -594,6 +595,7 @@ class InsightsViewModelTest {
                         categoryBreakdown = listOf(CategoryCount("alarm", 3), CategoryCount(null, 2)),
                         monitoredActionBreakdown = ActionBreakdown(cancelled = 2, snoozed = 1),
                         channelBreakdown = listOf(ChannelCount("com.example.shop", "offers", 5)),
+                        sourceComplete = false,
                         generatedAtMillis = 0L,
                     ),
                 )
@@ -613,6 +615,7 @@ class InsightsViewModelTest {
                 assertEquals(2, day.monitoredActions.cancelled)
                 assertEquals("offers", day.channels.single().channelId)
                 assertEquals("App: com.example.shop", day.channels.single().appName)
+                assertFalse(day.sourceComplete)
                 // null category -> "Uncategorized"; others capitalized.
                 assertEquals(
                     listOf(uiText(R.string.category_alarm), uiText(R.string.insights_uncategorized)),
@@ -661,6 +664,18 @@ class InsightsViewModelTest {
         }
 
     @Test
+    fun `overview surfaces a source gap before today's rollup exists`() =
+        runTest {
+            analyticsFlow.value = analyticsFlow.value.copy(sourceComplete = false)
+
+            viewModel().uiState.test {
+                val state = awaitUntil { !it.overviewSourceComplete }
+                assertTrue(state.dailyInsights.isEmpty())
+                cancelAndIgnoreRemainingEvents()
+            }
+        }
+
+    @Test
     fun `maps selected range analytics with resolved app and rule names`() =
         runTest {
             rulesFlow.value =
@@ -680,6 +695,7 @@ class InsightsViewModelTest {
                     apps = listOf(AppInsightCount("com.shop", 20, 6)),
                     rules = listOf(RuleInsightCount("4", actualCount = 5, monitoredCount = 2)),
                     trend = listOf(InsightsTrendPoint(20_620, 20_620, 20, 6)),
+                    sourceComplete = false,
                 )
             val vm = viewModel()
 
@@ -700,6 +716,7 @@ class InsightsViewModelTest {
                         .label,
                 )
                 assertEquals(30, state.analysis.silencedPercent)
+                assertFalse(state.analysis.sourceComplete)
                 assertEquals(InsightsDateRange(20_620, 20_626).toUiRange(), state.availableRange)
                 cancelAndIgnoreRemainingEvents()
             }

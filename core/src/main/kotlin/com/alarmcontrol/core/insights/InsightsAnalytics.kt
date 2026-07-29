@@ -55,6 +55,8 @@ data class InsightsAnalytics(
     val semanticCorrectionCount: Int,
     val bucket: InsightsBucket,
     val trend: List<InsightsTrendPoint>,
+    /** False when a rollup snapshot is incomplete or a source-gap day has no retained rollup. */
+    val sourceComplete: Boolean = true,
     /** Old migrations may lack newer breakdowns; these days must not be presented as zero. */
     val breakdownCoverageStartEpochDay: Long?,
 ) {

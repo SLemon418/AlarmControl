@@ -23,6 +23,15 @@ class FakeCategoryFeedbackDao : CategoryFeedbackDao {
 
     override suspend fun countAll(): Int = rows.size
 
+    fun seedRows(values: List<CategoryFeedbackEntity>) {
+        values.forEach { value ->
+            val id = value.id.takeIf { it > 0 } ?: nextId
+            rows += value.copy(id = id)
+            nextId = maxOf(nextId, id + 1)
+        }
+        revision.value++
+    }
+
     override suspend fun insert(feedback: CategoryFeedbackEntity): Long {
         val id = nextId++
         rows += feedback.copy(id = id)
@@ -65,6 +74,17 @@ class FakeCategoryFeedbackDao : CategoryFeedbackDao {
         val removed = before - rows.size
         if (removed > 0) revision.value++
         return removed
+    }
+
+    override suspend fun getLinkedTrimVictimEventIds(max: Int): List<Long> {
+        require(max >= 0)
+        val retainedIds = rows.sortedByDescending { it.id }.take(max).mapTo(mutableSetOf()) { it.id }
+        return rows
+            .asSequence()
+            .filter { it.id !in retainedIds }
+            .mapNotNull(CategoryFeedbackEntity::notificationEventId)
+            .distinct()
+            .toList()
     }
 
     override fun observeLabelCounts(packageName: String): Flow<List<LabelCount>> =

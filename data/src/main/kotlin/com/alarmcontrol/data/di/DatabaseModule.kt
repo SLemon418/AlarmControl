@@ -8,6 +8,7 @@ import com.alarmcontrol.data.db.dao.CategoryFeedbackDao
 import com.alarmcontrol.data.db.dao.DailyInsightDao
 import com.alarmcontrol.data.db.dao.LlmObservationDao
 import com.alarmcontrol.data.db.dao.NotificationEventDao
+import com.alarmcontrol.data.db.dao.NotificationRateStateDao
 import com.alarmcontrol.data.db.dao.ProfileDao
 import com.alarmcontrol.data.db.dao.RuleDao
 import com.alarmcontrol.data.db.dao.RuleSuggestionDao
@@ -41,6 +42,8 @@ object DatabaseModule {
                 AppDatabase.MIGRATION_10_11,
                 AppDatabase.MIGRATION_11_12,
                 AppDatabase.MIGRATION_12_13,
+                AppDatabase.MIGRATION_13_14,
+                AppDatabase.MIGRATION_14_15,
             ).build()
 
     @Provides
@@ -48,6 +51,10 @@ object DatabaseModule {
 
     @Provides
     fun provideNotificationEventDao(database: AppDatabase): NotificationEventDao = database.notificationEventDao()
+
+    @Provides
+    fun provideNotificationRateStateDao(database: AppDatabase): NotificationRateStateDao =
+        database.notificationRateStateDao()
 
     @Provides
     fun provideCategoryFeedbackDao(database: AppDatabase): CategoryFeedbackDao = database.categoryFeedbackDao()

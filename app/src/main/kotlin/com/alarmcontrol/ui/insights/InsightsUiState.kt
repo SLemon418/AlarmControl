@@ -22,6 +22,8 @@ data class InsightsUiState(
     val summary: InsightsSummaryUi? = null,
     /** Per-day rollups from the background worker, newest first; empty until the first run. */
     val dailyInsights: List<DailyInsightUi> = emptyList(),
+    /** Includes today's gap marker, which may exist before a daily rollup can be created. */
+    val overviewSourceComplete: Boolean = true,
     val suggestions: List<RuleSuggestionUi> = emptyList(),
     val errorMessage: UiText? = null,
     val userMessage: UiText? = null,
@@ -71,6 +73,8 @@ data class InsightsAnalysisUi(
     val mlClassifiedCount: Int = 0,
     val categoryCorrectionCount: Int = 0,
     val semanticCorrectionCount: Int = 0,
+    /** False when storage-bound cleanup removed source activity inside the selected range. */
+    val sourceComplete: Boolean = true,
     val coverageStartEpochDay: Long? = null,
 )
 
@@ -165,6 +169,8 @@ data class DailyInsightUi(
     val mlClassifiedCount: Int = 0,
     val categoryCorrectionCount: Int = 0,
     val semanticCorrectionCount: Int = 0,
+    /** False when source activity was removed before a complete daily rollup protected it. */
+    val sourceComplete: Boolean = true,
     val breakdownComplete: Boolean = false,
     /** Difference in silenced count from the immediately preceding stored day. */
     val mutedDelta: Int? = null,

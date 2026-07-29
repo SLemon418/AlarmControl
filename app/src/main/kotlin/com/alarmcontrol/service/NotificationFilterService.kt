@@ -13,17 +13,21 @@ import com.alarmcontrol.core.feedback.AdObservation
 import com.alarmcontrol.core.filtering.DecisionTraceLane
 import com.alarmcontrol.core.filtering.DecisionTraceNode
 import com.alarmcontrol.core.filtering.MAX_PERSISTED_TRACE_NODES
-import com.alarmcontrol.core.filtering.MAX_RATE_WINDOW_MILLIS
 import com.alarmcontrol.core.filtering.NotificationContent
 import com.alarmcontrol.core.filtering.NotificationContentVisibility
 import com.alarmcontrol.core.filtering.NotificationDecisionEnrichment
 import com.alarmcontrol.core.filtering.NotificationEvent
 import com.alarmcontrol.core.filtering.NotificationEventRepository
 import com.alarmcontrol.core.filtering.NotificationSnapshot
+import com.alarmcontrol.core.filtering.RateListenerKeyHasher
+import com.alarmcontrol.core.filtering.RateOccurrenceLifecycleGate
+import com.alarmcontrol.core.filtering.RateOccurrenceRepository
+import com.alarmcontrol.core.filtering.RateSignal
 import com.alarmcontrol.core.filtering.RuleAction
 import com.alarmcontrol.core.filtering.RuleRepository
 import com.alarmcontrol.core.filtering.SemanticIntent
 import com.alarmcontrol.core.result.runCatchingPreservingCancellation
+import com.alarmcontrol.core.settings.FilteringActionGate
 import com.alarmcontrol.core.settings.SemanticAnalysisScope
 import com.alarmcontrol.core.settings.SettingsRepository
 import com.alarmcontrol.ml.ClassificationResult
@@ -39,11 +43,13 @@ import com.alarmcontrol.notifications.MatchDecision
 import com.alarmcontrol.notifications.Matcher
 import com.alarmcontrol.notifications.NotificationRateTracker
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
@@ -87,6 +93,14 @@ class NotificationFilterService : NotificationListenerService() {
 
     @Inject lateinit var settingsRepository: SettingsRepository
 
+    @Inject lateinit var filteringActionGate: FilteringActionGate
+
+    @Inject lateinit var rateOccurrenceRepository: RateOccurrenceRepository
+
+    @Inject lateinit var rateListenerKeyHasher: RateListenerKeyHasher
+
+    @Inject lateinit var rateOccurrenceLifecycleGate: RateOccurrenceLifecycleGate
+
     @Inject lateinit var clock: Clock
 
     @Inject
@@ -108,6 +122,17 @@ class NotificationFilterService : NotificationListenerService() {
         RealtimeCategoryRuleResolver(matcher, classifier)
     }
     private val rateTracker = NotificationRateTracker()
+    private val rateLifecycleActor by lazy {
+        NotificationRateLifecycleActor(
+            scope = scope,
+            repository = rateOccurrenceRepository,
+            hasher = rateListenerKeyHasher,
+            lifecycleGate = rateOccurrenceLifecycleGate,
+            tracker = rateTracker,
+            clock = clock,
+            onFailure = { Log.w(TAG, "Rate occurrence processing failed") },
+        )
+    }
     private val semanticObservationQueue by lazy {
         SemanticObservationQueue(
             scope = scope,
@@ -138,97 +163,102 @@ class NotificationFilterService : NotificationListenerService() {
     private val contentExcludedPackages = MutableStateFlow<Set<String>?>(null)
     private var rulesJob: Job? = null
     private var settingsJob: Job? = null
-    private var rateSeedJob: Job? = null
     private val semanticGeneration = AtomicLong(0)
 
     override fun onListenerConnected() {
         super.onListenerConnected()
-        seedRateCacheIfNeeded()
+        rateLifecycleActor.connected()
         observeRulesIfNeeded()
         observeSettingsIfNeeded()
     }
 
-    private fun seedRateCacheIfNeeded() {
-        if (rateSeedJob == null || rateSeedJob?.isCompleted == true) {
-            rateTracker.markUnavailable()
-            rateSeedJob =
+    private fun observeRulesIfNeeded() {
+        // Every explicit refresh re-subscribes so its first Room query is ordered after the commit
+        // that requested it, even when that transaction's invalidation emission already raced past.
+        if (rulesJob?.isActive != true) {
+            rulesJob =
                 scope.launch {
-                    runCatchingPreservingCancellation {
-                        val now = clock.millis()
-                        rateTracker.seed(
-                            eventRepository.rateHistorySince(now - MAX_RATE_WINDOW_MILLIS),
-                            now,
-                        )
-                    }.onFailure {
-                        rateTracker.markUnavailable()
-                        Log.w(TAG, "Rate cache initialization failed")
-                    }
+                    collectCompiledRuleRefreshes(
+                        refreshRequests = filteringActionGate.ruleRefreshRequests,
+                        observeRules = ruleRepository::observeRules,
+                        matcher = matcher,
+                        publish = ::publishCompiledRules,
+                        onFailure = ::handleRuleRefreshFailure,
+                    )
                 }
         }
     }
 
-    private fun observeRulesIfNeeded() {
-        // Warm and keep the rule cache fresh for the listener's lifetime; recompile on every change.
-        if (rulesJob?.isActive != true) {
-            rulesJob =
-                scope.launch {
-                    runCatchingPreservingCancellation {
-                        ruleRepository.observeRules().collect { rules ->
-                            val compiled = matcher.compile(rules)
-                            if (compiledRules.value == null) {
-                                compiledRules.value = compiled
-                            } else {
-                                // A slow classifier result must never act on a deleted or disabled rule.
-                                processingCoordinator.invalidateAllAndUpdate {
-                                    semanticGeneration.incrementAndGet()
-                                    compiledRules.value = compiled
-                                }
-                                semanticObservationQueue.clearPending()
-                            }
-                        }
-                    }.onFailure {
-                        // Never keep evaluating a stale destructive cache after a persistence failure.
-                        processingCoordinator.invalidateAllAndUpdate {
-                            semanticGeneration.incrementAndGet()
-                            compiledRules.value = CompiledRuleSet.EMPTY
-                        }
-                        semanticObservationQueue.clearPending()
-                        Log.w(TAG, "Rule cache stopped")
-                    }
-                }
+    private fun handleRuleRefreshFailure(requestId: Long) {
+        // Keep the current id pending; emitting another id here would bypass retry backoff.
+        filteringActionGate.rejectRuleRefresh(requestId)
+        processingCoordinator.invalidateAllAndUpdate {
+            semanticGeneration.incrementAndGet()
+            compiledRules.value = CompiledRuleSet.EMPTY
         }
+        semanticObservationQueue.clearPending()
+        Log.w(TAG, "Rule cache refresh failed; retrying")
+    }
+
+    private fun publishCompiledRules(
+        requestId: Long,
+        compiled: CompiledRuleSet,
+    ) {
+        rateLifecycleActor.requestReseed()
+        publishRuleSnapshot(
+            coordinator = processingCoordinator,
+            filteringActionGate = filteringActionGate,
+            requestId = requestId,
+        ) {
+            semanticGeneration.incrementAndGet()
+            compiledRules.value = compiled
+        }
+        semanticObservationQueue.clearPending()
     }
 
     private fun observeSettingsIfNeeded() {
         if (settingsJob?.isActive != true) {
             settingsJob =
                 scope.launch {
-                    runCatchingPreservingCancellation {
-                        val llmSettings =
-                            combine(
-                                settingsRepository.llmAnalysisEnabled,
-                                settingsRepository.semanticAnalysisScope,
-                                ::ListenerLlmSettings,
-                            )
-                        combine(
-                            settingsRepository.filteringEnabled,
-                            llmSettings,
-                            settingsRepository.notificationContentStorageEnabled,
-                            settingsRepository.contentExcludedPackages,
-                        ) { filtering, llm, storeContent, excludedPackages ->
-                            ListenerSettings(
-                                filtering,
-                                llm.enabled,
-                                llm.scope,
-                                storeContent,
-                                excludedPackages,
-                            )
-                        }.collect { settings ->
-                            applySettings(settings)
-                        }
-                    }.onFailure {
-                        resetSettingsCache()
-                        Log.w(TAG, "Settings cache stopped")
+                    var retryAttempt = 0
+                    while (true) {
+                        val result =
+                            runCatchingPreservingCancellation {
+                                val llmSettings =
+                                    combine(
+                                        settingsRepository.llmAnalysisEnabled,
+                                        settingsRepository.semanticAnalysisScope,
+                                        ::ListenerLlmSettings,
+                                    )
+                                combine(
+                                    settingsRepository.filteringEnabled,
+                                    llmSettings,
+                                    settingsRepository.notificationContentStorageEnabled,
+                                    settingsRepository.contentExcludedPackages,
+                                ) { filtering, llm, storeContent, excludedPackages ->
+                                    ListenerSettings(
+                                        filtering,
+                                        llm.enabled,
+                                        llm.scope,
+                                        storeContent,
+                                        excludedPackages,
+                                    )
+                                }.collect { settings ->
+                                    retryAttempt = 0
+                                    applySettings(settings)
+                                }
+                            }
+                        runCatchingPreservingCancellation { resetSettingsCache() }
+                        Log.w(
+                            TAG,
+                            if (result.isFailure) {
+                                "Settings cache failed; retrying"
+                            } else {
+                                "Settings cache completed; retrying"
+                            },
+                        )
+                        delay(ruleRefreshRetryDelayMillis(retryAttempt))
+                        retryAttempt = (retryAttempt + 1).coerceAtMost(MAX_CACHE_RETRY_BACKOFF_STEP)
                     }
                 }
         }
@@ -237,9 +267,11 @@ class NotificationFilterService : NotificationListenerService() {
     private suspend fun applySettings(settings: ListenerSettings) {
         val previous = currentSettings()
         if (previous == null) {
+            updateFilteringGate(previousFiltering = null, filtering = settings.filtering)
             publishSettings(settings)
         } else if (previous != settings) {
             // Includes privacy reductions such as new content exclusions.
+            updateFilteringGate(previousFiltering = previous.filtering, filtering = settings.filtering)
             processingCoordinator.invalidateAllAndUpdate {
                 semanticGeneration.incrementAndGet()
                 publishSettings(settings)
@@ -249,6 +281,20 @@ class NotificationFilterService : NotificationListenerService() {
         if (!settings.llmEnabled && previous?.llmEnabled == true) {
             semanticObservationQueue.clearPending()
             llmLifecycle.close()
+        }
+    }
+
+    private suspend fun updateFilteringGate(
+        previousFiltering: Boolean?,
+        filtering: Boolean,
+    ) {
+        when {
+            !filtering -> filteringActionGate.blockActions()
+            previousFiltering == null -> filteringActionGate.initializeFromPersistedState(true)
+            !previousFiltering -> {
+                filteringActionGate.requestRuleRefresh()
+                filteringActionGate.allowActions()
+            }
         }
     }
 
@@ -273,6 +319,7 @@ class NotificationFilterService : NotificationListenerService() {
 
     private suspend fun resetSettingsCache() {
         // Fail closed: unknown settings must never activate destructive filtering.
+        filteringActionGate.blockActions()
         processingCoordinator.invalidateAllAndUpdate {
             semanticGeneration.incrementAndGet()
             publishSettings(
@@ -307,25 +354,42 @@ class NotificationFilterService : NotificationListenerService() {
     ) {
         val snapshot = sbn.toSnapshot(clock.zone, ranking)
         val key = sbn.key
-        // Frequency state must reflect post time, not completion time after optional inference.
-        rateTracker.record(snapshot, key)
+        val rateGeneration = rateLifecycleActor.currentLifecycleGeneration
+        val rateOutcome = CompletableDeferred<RatePostOutcome>(parent = null)
         processingCoordinator.submit(key, freshness = snapshot.postedAtMillis) { token ->
-            runCatchingPreservingCancellation { evaluateAndApply(key, snapshot, token) }
+            runCatchingPreservingCancellation {
+                when (rateOutcome.await()) {
+                    RatePostOutcome.Proceed -> evaluateAndApply(key, snapshot, token)
+                    RatePostOutcome.Stale -> Unit
+                }
+            }
                 // Fixed message only: notification content must never enter logs (§1/§3).
                 .onFailure { Log.w(TAG, "Notification processing failed") }
         }
+        // Submit first: a newer post invalidates older work even while this actor is in Room I/O.
+        rateLifecycleActor.tryPost(
+            generation = rateGeneration,
+            rawListenerKey = key,
+            packageName = snapshot.packageName,
+            channelId = snapshot.channelId,
+            postedAtMillis = snapshot.postedAtMillis,
+            outcome = rateOutcome,
+        )
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
-        rateTracker.markRemoved(sbn.key)
+        val rateGeneration = rateLifecycleActor.currentLifecycleGeneration
         processingCoordinator.invalidate(sbn.key)
+        rateLifecycleActor.tryRemove(
+            generation = rateGeneration,
+            rawListenerKey = sbn.key,
+            removedPostTimeMillis = sbn.postTime,
+        )
     }
 
     override fun onListenerDisconnected() {
         processingCoordinator.invalidateAll()
-        rateSeedJob?.cancel()
-        rateSeedJob = null
-        rateTracker.markUnavailable()
+        rateLifecycleActor.disconnected()
         semanticGeneration.incrementAndGet()
         releaseLlmAsync()
         super.onListenerDisconnected()
@@ -357,7 +421,24 @@ class NotificationFilterService : NotificationListenerService() {
                 runtime.semanticGeneration,
                 token,
             ) ?: return
-        if (!token.commit { applyAction(key, evaluated.action) }) return
+        if (
+            !commitFilteringAction(
+                token = token,
+                filteringActionGate = filteringActionGate,
+                tokenCommit = { action ->
+                    rateLifecycleActor.commitIfRateCountsCurrent(
+                        snapshot = evaluated.common,
+                        expectation = evaluated.rateCountExpectation,
+                    ) {
+                        token.commit(action)
+                    }
+                },
+            ) {
+                applyAction(key, evaluated.action)
+            }
+        ) {
+            return
+        }
         postCommitWorkDispatcher.submit(
             PostCommitEvaluationRequest(
                 evaluated = evaluated,
@@ -482,21 +563,21 @@ class NotificationFilterService : NotificationListenerService() {
     ): EvaluatedNotification? {
         if (!token.isCurrent()) return null
         val requirements = compiled.requiredSignals
-        val rateCounts =
-            rateTracker.counts(
+        val rateState =
+            rateLifecycleActor.captureCounts(
                 snapshot,
                 requirements.rateSignals,
             )
         val categoryEvaluation =
             categoryRuleResolver.resolveBeforeActiveCommit(
-                snapshot.copy(rateCounts = rateCounts),
+                snapshot.copy(rateCounts = rateState.counts),
                 compiled,
             )
         if (!token.isCurrent()) return null
         val common =
             snapshot.copy(
                 mlCategory = categoryEvaluation.classification?.category,
-                rateCounts = rateCounts,
+                rateCounts = rateState.counts,
             )
         if (categoryEvaluation.activeResolutionFailed) {
             val monitorDecision = matcher.evaluateMonitor(common, compiled)
@@ -523,6 +604,7 @@ class NotificationFilterService : NotificationListenerService() {
                         .semanticResolutionRequirements(common, compiled)
                         .monitorNeedsSemantic,
                 semanticGeneration = semanticGeneration,
+                rateCountExpectation = null,
             )
         }
         val semanticEvaluation = semanticRuleResolver.resolve(common, compiled)
@@ -541,6 +623,12 @@ class NotificationFilterService : NotificationListenerService() {
                 categoryEvaluation.monitorNeedsPostCommitClassification,
             monitorNeedsPostCommitSemantic = semanticEvaluation.monitorNeedsPostCommitSemantic,
             semanticGeneration = semanticGeneration,
+            rateCountExpectation =
+                destructiveRateCountExpectation(
+                    action = semanticEvaluation.action,
+                    activeRateSignals = compiled.activeRequiredSignals.rateSignals,
+                    capturedCounts = rateState.counts,
+                ),
         )
     }
 
@@ -767,6 +855,7 @@ class NotificationFilterService : NotificationListenerService() {
 
     override fun onDestroy() {
         processingCoordinator.invalidateAll()
+        rateLifecycleActor.close()
         semanticGeneration.incrementAndGet()
         releaseLlmAsync()
         postCommitWorkDispatcher.clearPending()
@@ -788,6 +877,7 @@ class NotificationFilterService : NotificationListenerService() {
         val monitorNeedsPostCommitMlCategory: Boolean,
         val monitorNeedsPostCommitSemantic: Boolean,
         val semanticGeneration: Long,
+        val rateCountExpectation: RateCountExpectation?,
     )
 
     private companion object {
@@ -796,6 +886,7 @@ class NotificationFilterService : NotificationListenerService() {
         const val LLM_ANALYSIS_TIMEOUT_MILLIS = 10_000L
         const val CACHE_READY_TIMEOUT_MILLIS = 2_000L
         const val ANALYTICS_CLASSIFICATION_TIMEOUT_MILLIS = 500L
+        const val MAX_CACHE_RETRY_BACKOFF_STEP = 6
     }
 
     private data class ListenerSettings(
@@ -837,6 +928,20 @@ class NotificationFilterService : NotificationListenerService() {
         val original: PostCommitEvaluationRequest,
         val eventId: String,
         val persistedSnapshot: NotificationSnapshot,
+    )
+}
+
+internal fun destructiveRateCountExpectation(
+    action: RuleAction,
+    activeRateSignals: Set<RateSignal>,
+    capturedCounts: Map<RateSignal, Int>,
+): RateCountExpectation? {
+    if (action != RuleAction.Cancel && action !is RuleAction.Snooze) return null
+    if (activeRateSignals.isEmpty()) return null
+    val requestedSignals = activeRateSignals.toSet()
+    return RateCountExpectation(
+        requestedSignals = requestedSignals,
+        expectedCounts = capturedCounts.filterKeys(requestedSignals::contains),
     )
 }
 

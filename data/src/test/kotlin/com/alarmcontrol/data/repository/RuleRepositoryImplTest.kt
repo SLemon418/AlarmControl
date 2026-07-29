@@ -5,9 +5,12 @@ import com.alarmcontrol.core.filtering.MAX_RULE_NAME_CHARS
 import com.alarmcontrol.core.filtering.MAX_SAVED_RULES
 import com.alarmcontrol.core.filtering.Rule
 import com.alarmcontrol.core.filtering.RuleAction
+import com.alarmcontrol.core.settings.FilteringActionGate
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -118,5 +121,43 @@ class RuleRepositoryImplTest {
             assertTrue(
                 runCatching { repository.saveRule(newRule()) }.exceptionOrNull() is IllegalArgumentException,
             )
+        }
+
+    @Test
+    fun `successful rule mutations request fresh listener snapshots`() =
+        runTest {
+            val gate = FilteringActionGate()
+            val repository = RuleRepositoryImpl(dao, gate)
+
+            val id = repository.saveRule(newRule())
+            assertEquals(1L, gate.ruleRefreshRequests.value)
+
+            assertEquals(1, repository.setRulesEnabled(setOf(id), enabled = false))
+            assertEquals(2L, gate.ruleRefreshRequests.value)
+
+            assertEquals(0, repository.setRulesEnabled(setOf(id), enabled = false))
+            assertEquals(3L, gate.ruleRefreshRequests.value)
+
+            repository.deleteRule(id)
+            assertEquals(4L, gate.ruleRefreshRequests.value)
+        }
+
+    @Test
+    fun `cancelled rule mutation still publishes a closed refresh request`() =
+        runTest {
+            val gate = FilteringActionGate()
+            gate.initializeFromPersistedState(true)
+            gate.acknowledgeRuleRefresh(gate.ruleRefreshRequests.value)
+            val repository = RuleRepositoryImpl(dao, gate)
+            val id = repository.saveRule(newRule())
+            gate.acknowledgeRuleRefresh(gate.ruleRefreshRequests.value)
+            dao.deleteFailureAfterMutation = CancellationException("cancelled after commit")
+
+            val failure = runCatching { repository.deleteRule(id) }.exceptionOrNull()
+
+            assertTrue(failure is CancellationException)
+            assertTrue(repository.observeRules().first().isEmpty())
+            assertEquals(2L, gate.ruleRefreshRequests.value)
+            assertFalse(gate.runIfAllowed {})
         }
 }

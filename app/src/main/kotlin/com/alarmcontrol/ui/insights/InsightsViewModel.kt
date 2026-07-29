@@ -205,6 +205,20 @@ class InsightsViewModel
                     }
                 }.flowOn(dispatcher)
 
+        private val overviewSourceComplete: Flow<Boolean> =
+            selectedTab
+                .flatMapLatest { tab ->
+                    if (tab != InsightsTab.OVERVIEW) {
+                        flowOf(true)
+                    } else {
+                        todayWindow.flatMapLatest { window ->
+                            insightsAnalyticsRepository
+                                .observe(InsightsDateRange(window.epochDay, window.epochDay))
+                                .map { it.sourceComplete }
+                        }
+                    }
+                }.flowOn(dispatcher)
+
         private val availableRange =
             selectedTab
                 .flatMapLatest { tab ->
@@ -341,7 +355,13 @@ class InsightsViewModel
             }
 
         private val history =
-            combine(summaryUi, dailyInsights, suggestions, ::HistoryContent)
+            combine(
+                summaryUi,
+                dailyInsights,
+                suggestions,
+                overviewSourceComplete,
+                ::HistoryContent,
+            )
 
         private val activityControls: Flow<ActivityControls> =
             combine(activityQuery, activityFilter, ::ActivityControls)
@@ -384,6 +404,7 @@ class InsightsViewModel
                             availableCategories = availableCategories,
                             summary = history.summary,
                             dailyInsights = history.daily,
+                            overviewSourceComplete = history.sourceComplete,
                             suggestions = history.suggestions,
                             activityQuery = controls.query,
                             activityFilter = controls.filter,
@@ -414,6 +435,7 @@ class InsightsViewModel
                             availableCategories = availableCategories,
                             summary = history.summary,
                             dailyInsights = history.daily,
+                            overviewSourceComplete = history.sourceComplete,
                             suggestions = history.suggestions,
                             userMessage = message,
                             selectedTab = advanced.tab,
@@ -438,6 +460,7 @@ class InsightsViewModel
                             availableCategories = availableCategories,
                             summary = history.summary,
                             dailyInsights = history.daily,
+                            overviewSourceComplete = history.sourceComplete,
                             suggestions = history.suggestions,
                             activityQuery = controls.query,
                             activityFilter = controls.filter,
@@ -743,6 +766,7 @@ private data class HistoryContent(
     val summary: InsightsSummaryUi?,
     val daily: List<DailyInsightUi>,
     val suggestions: List<RuleSuggestionUi>,
+    val sourceComplete: Boolean,
 )
 
 private data class HistoryRecords(

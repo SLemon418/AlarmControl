@@ -6,6 +6,8 @@ import com.alarmcontrol.core.filtering.ActionKind
 import com.alarmcontrol.core.filtering.HistoryActionFilter
 import com.alarmcontrol.core.filtering.MAX_NOTIFICATION_HISTORY_PAGE_SIZE
 import com.alarmcontrol.core.filtering.MAX_NOTIFICATION_HISTORY_SOURCE_COUNT
+import com.alarmcontrol.core.filtering.MAX_RETAINED_NOTIFICATION_EVENTS
+import com.alarmcontrol.core.filtering.MAX_RETAINED_NOTIFICATION_TRACE_EVENTS
 import com.alarmcontrol.core.filtering.NotificationContent
 import com.alarmcontrol.core.filtering.NotificationContentState
 import com.alarmcontrol.core.filtering.NotificationDecisionEnrichment
@@ -17,7 +19,6 @@ import com.alarmcontrol.core.filtering.NotificationHistoryCoverage
 import com.alarmcontrol.core.filtering.NotificationHistoryPage
 import com.alarmcontrol.core.filtering.NotificationHistoryQuery
 import com.alarmcontrol.core.filtering.NotificationHistoryRepository
-import com.alarmcontrol.core.filtering.NotificationRateEvent
 import com.alarmcontrol.core.filtering.NotificationSource
 import com.alarmcontrol.core.insights.ActionBreakdown
 import com.alarmcontrol.core.result.runCatchingPreservingCancellation
@@ -44,9 +45,11 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import java.time.Clock
+import java.time.ZoneId
 import javax.inject.Inject
 
 /** Room-backed [NotificationEventRepository]; maps entities to the domain at the boundary. */
+@Suppress("TooManyFunctions") // Implements the event-write and read-only history contracts at one Room boundary.
 class NotificationEventRepositoryImpl
     @Inject
     internal constructor(
@@ -85,10 +88,13 @@ class NotificationEventRepositoryImpl
                                 }.getOrNull()
                             }
                     eventDao
-                        .insertWithTrace(
+                        .insertWithTraceAndTrim(
                             event.copy(hadEncryptedContent = encrypted != null).toEntity(),
                             event.decisionTrace.map { it.toEntity() },
                             encrypted,
+                            MAX_RETAINED_NOTIFICATION_EVENTS,
+                            MAX_RETAINED_NOTIFICATION_TRACE_EVENTS,
+                            clock.zone,
                         ).toString()
                 }
             }
@@ -106,6 +112,7 @@ class NotificationEventRepositoryImpl
                     monitoredRuleId = enrichment.monitoredRuleId?.toLongOrNull(),
                     monitoredAction = enrichment.monitoredAction?.toStoredType(),
                     trace = enrichment.decisionTrace.map { it.toEntity() },
+                    maxTraceEvents = MAX_RETAINED_NOTIFICATION_TRACE_EVENTS,
                 )
             }
         }
@@ -246,11 +253,22 @@ class NotificationEventRepositoryImpl
             }
         }
 
-        override suspend fun purgeEventsOlderThan(cutoffMillis: Long): Int = eventDao.deleteOlderThan(cutoffMillis)
+        override suspend fun purgeEventsOlderThan(cutoffMillis: Long): Int =
+            purgeEventsOlderThan(cutoffMillis, clock.zone)
 
-        override suspend fun trimToMostRecent(max: Int): Int {
+        override suspend fun purgeEventsOlderThan(
+            cutoffMillis: Long,
+            legacyZoneId: ZoneId,
+        ): Int = eventDao.deleteOlderThanWithSourceGaps(cutoffMillis, legacyZoneId)
+
+        override suspend fun trimToMostRecent(max: Int): Int = trimToMostRecent(max, clock.zone)
+
+        override suspend fun trimToMostRecent(
+            max: Int,
+            legacyZoneId: ZoneId,
+        ): Int {
             require(max >= 0) { "Recent event maximum must not be negative" }
-            return eventDao.deleteOverLimit(max)
+            return eventDao.deleteOverLimitWithSourceGaps(max, legacyZoneId)
         }
 
         override suspend fun trimDecisionTracesToMostRecent(max: Int): Int {
@@ -284,11 +302,6 @@ class NotificationEventRepositoryImpl
                     StoredRuleAction.SNOOZE,
                 ).associate { it.packageName to it.count }
         }
-
-        override suspend fun rateHistorySince(sinceMillis: Long): List<NotificationRateEvent> =
-            eventDao.rateHistorySince(sinceMillis).map {
-                NotificationRateEvent(it.packageName, it.channelId, it.postedAtMillis)
-            }
 
         override suspend fun purgeEncryptedContentOlderThan(cutoffMillis: Long): Int =
             eventDao.deleteEncryptedContentsOlderThan(cutoffMillis)

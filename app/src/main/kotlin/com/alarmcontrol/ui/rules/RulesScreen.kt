@@ -333,6 +333,7 @@ private fun RulesList(
         }
         item {
             SetupHealthCard(
+                notificationAccessState = state.notificationAccessState,
                 filteringEnabled = state.filteringEnabled,
                 enabledRuleCount = state.enabledRuleCount,
                 onAddRule = onAddRule,
@@ -1971,6 +1972,7 @@ private const val MILLIS_PER_MINUTE = 60_000L
 private const val TRACE_INDENT_DP = 12
 internal const val RULE_ADD_FAB_TEST_TAG = "rule_add_fab"
 internal const val RULES_LIST_TEST_TAG = "rules_list"
+internal const val SETUP_HEALTH_CARD_TEST_TAG = "setup_health_card"
 internal const val CONDITION_MOVE_UP_TEST_TAG = "condition_move_up"
 internal const val CONDITION_MOVE_UP_ENABLED_TEST_TAG = "condition_move_up_enabled"
 private val RATE_WINDOW_PRESET_MINUTES = listOf(1, 5, 15, 60)
@@ -2022,15 +2024,19 @@ private fun NotificationAccessBanner(
 /** First-run guidance and a persistent, local health summary for the filtering path. */
 @Composable
 private fun SetupHealthCard(
+    notificationAccessState: NotificationAccessUiState,
     filteringEnabled: Boolean,
     enabledRuleCount: Int,
     onAddRule: () -> Unit,
     onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val ready = filteringEnabled && enabledRuleCount > 0
+    val ready =
+        notificationAccessState == NotificationAccessUiState.GRANTED &&
+            filteringEnabled &&
+            enabledRuleCount > 0
     ExpressiveHeroCard(
-        modifier = modifier,
+        modifier = modifier.testTag(SETUP_HEALTH_CARD_TEST_TAG),
         containerColor =
             if (ready) {
                 MaterialTheme.colorScheme.secondaryContainer
@@ -2057,22 +2063,31 @@ private fun SetupHealthCard(
             )
         }
         Text(
-            when {
-                !filteringEnabled -> stringResource(R.string.setup_filtering_paused)
-                enabledRuleCount == 0 -> stringResource(R.string.setup_no_active_rules)
-                else ->
-                    pluralStringResource(
-                        R.plurals.setup_ready,
-                        enabledRuleCount,
-                        enabledRuleCount,
-                    )
+            when (notificationAccessState) {
+                NotificationAccessUiState.CHECKING ->
+                    stringResource(R.string.notification_access_checking)
+                NotificationAccessUiState.DENIED ->
+                    stringResource(R.string.notification_access_summary)
+                NotificationAccessUiState.GRANTED ->
+                    when {
+                        !filteringEnabled -> stringResource(R.string.setup_filtering_paused)
+                        enabledRuleCount == 0 -> stringResource(R.string.setup_no_active_rules)
+                        else ->
+                            pluralStringResource(
+                                R.plurals.setup_ready,
+                                enabledRuleCount,
+                                enabledRuleCount,
+                            )
+                    }
             },
             style = MaterialTheme.typography.bodyLarge,
         )
-        if (!filteringEnabled) {
-            TextButton(onClick = onOpenSettings) { Text(stringResource(R.string.review_settings)) }
-        } else if (enabledRuleCount == 0) {
-            TextButton(onClick = onAddRule) { Text(stringResource(R.string.setup_create_rule)) }
+        if (notificationAccessState == NotificationAccessUiState.GRANTED) {
+            if (!filteringEnabled) {
+                TextButton(onClick = onOpenSettings) { Text(stringResource(R.string.review_settings)) }
+            } else if (enabledRuleCount == 0) {
+                TextButton(onClick = onAddRule) { Text(stringResource(R.string.setup_create_rule)) }
+            }
         }
     }
 }

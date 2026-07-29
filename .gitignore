@@ -27,4 +27,6 @@ __pycache__/
 # Release signing material is supplied through environment variables and never committed.
 *.jks
 *.keystore
+*.p12
+*.pfx
 keystore.properties

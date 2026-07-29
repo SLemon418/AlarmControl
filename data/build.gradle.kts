@@ -64,6 +64,8 @@ dependencies {
     testImplementation(libs.turbine)
     // Real org.json on the JVM test classpath (the Android stub throws "not mocked").
     testImplementation(libs.json)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core)
 
     // Instrumented Room migration tests (run on a device/emulator: `./gradlew :data:connectedCheck`).
     androidTestImplementation(libs.androidx.room.testing)

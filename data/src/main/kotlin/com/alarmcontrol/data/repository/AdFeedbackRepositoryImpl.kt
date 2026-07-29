@@ -7,10 +7,12 @@ import com.alarmcontrol.core.filtering.SemanticIntent
 import com.alarmcontrol.data.db.TransactionRunner
 import com.alarmcontrol.data.db.dao.DailyInsightDao
 import com.alarmcontrol.data.db.dao.LlmObservationDao
+import com.alarmcontrol.data.db.entity.LocalSemanticFeedbackEntity
 import com.alarmcontrol.data.mapper.toDomain
 import com.alarmcontrol.data.mapper.toEntity
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import java.time.Clock
 import javax.inject.Inject
 
 class AdFeedbackRepositoryImpl
@@ -19,9 +21,15 @@ class AdFeedbackRepositoryImpl
         private val dao: LlmObservationDao,
         private val dailyInsightDao: DailyInsightDao,
         private val transactionRunner: TransactionRunner,
+        private val clock: Clock = Clock.systemUTC(),
     ) : AdFeedbackRepository {
         override suspend fun recordObservation(observation: AdObservation) {
-            dao.upsert(observation.toEntity())
+            val entity = observation.toEntity()
+            transactionRunner.run {
+                if (dao.upsertIfEventExists(entity)) {
+                    dailyInsightDao.deleteContainingEvent(entity.notificationEventId)
+                }
+            }
         }
 
         override suspend fun recordCorrection(
@@ -30,8 +38,24 @@ class AdFeedbackRepositoryImpl
         ) {
             notificationEventId.toLongOrNull()?.let {
                 transactionRunner.run {
-                    val changed = dao.setIntentCorrection(it, correctedIntent.name, correctedIntent.isAdvertisement)
-                    if (changed > 0) dailyInsightDao.deleteContainingEvent(it)
+                    val target = dao.getCorrectionTarget(it) ?: return@run
+                    check(
+                        dao.setIntentCorrection(
+                            it,
+                            correctedIntent.name,
+                            correctedIntent.isAdvertisement,
+                        ) == 1,
+                    )
+                    dao.upsertLocalSemanticFeedback(
+                        LocalSemanticFeedbackEntity(
+                            sourceEventId = target.notificationEventId,
+                            packageName = target.packageName,
+                            correctedIntent = correctedIntent.name,
+                            recordedAtMillis = clock.millis(),
+                        ),
+                    )
+                    dao.trimLocalSemanticFeedback(LlmObservationDao.MAX_LOCAL_SEMANTIC_FEEDBACK)
+                    dailyInsightDao.deleteContainingEvent(it)
                 }
             }
         }

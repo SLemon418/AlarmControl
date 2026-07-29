@@ -1,7 +1,9 @@
 package com.alarmcontrol.notifications
 
-import com.alarmcontrol.core.filtering.NotificationRateEvent
+import com.alarmcontrol.core.filtering.MAX_RATE_WINDOW_MILLIS
 import com.alarmcontrol.core.filtering.NotificationSnapshot
+import com.alarmcontrol.core.filtering.PersistedRateOccurrence
+import com.alarmcontrol.core.filtering.RateOccurrenceId
 import com.alarmcontrol.core.filtering.RateScope
 import com.alarmcontrol.core.filtering.RateSignal
 import org.junit.Assert.assertEquals
@@ -14,17 +16,18 @@ class NotificationRateTrackerTest {
     private val channelFiveMinutes = RateSignal(RateScope.CHANNEL, 5 * 60_000)
 
     @Test
-    fun `current notification is included and old events are pruned`() {
+    fun `current occurrence is included and old occurrences are pruned`() {
         val tracker = NotificationRateTracker()
         tracker.seed(
             listOf(
-                NotificationRateEvent("pkg", "offers", 1_000),
-                NotificationRateEvent("pkg", "offers", 99_000),
+                occurrence(1, at = 1_000),
+                occurrence(2, at = 99_000),
             ),
             nowMillis = 100_000,
         )
+        tracker.record(occurrence(3, at = 100_000))
 
-        val counts = tracker.recordAndCount(snapshot(100_000), setOf(packageMinute, channelFiveMinutes))
+        val counts = tracker.counts(snapshot(100_000), setOf(packageMinute, channelFiveMinutes))
 
         assertEquals(2, counts[packageMinute])
         assertEquals(3, counts[channelFiveMinutes])
@@ -34,9 +37,10 @@ class NotificationRateTrackerTest {
     fun `missing channel omits channel count so condition remains unknown`() {
         val tracker = NotificationRateTracker()
         tracker.seed(emptyList(), nowMillis = 100_000)
+        tracker.record(occurrence(1, at = 100_000, channelId = null))
 
         val counts =
-            tracker.recordAndCount(
+            tracker.counts(
                 snapshot(100_000).copy(channelId = null),
                 setOf(channelFiveMinutes),
             )
@@ -45,87 +49,77 @@ class NotificationRateTrackerTest {
     }
 
     @Test
-    fun `failed initialization returns no counts`() {
+    fun `unavailable tracker returns no counts`() {
         val tracker = NotificationRateTracker()
+        tracker.seed(listOf(occurrence(1, at = 100_000)), nowMillis = 100_000)
         tracker.markUnavailable()
 
-        assertEquals(emptyMap<RateSignal, Int>(), tracker.recordAndCount(snapshot(100_000), setOf(packageMinute)))
+        assertEquals(emptyMap<RateSignal, Int>(), tracker.counts(snapshot(100_000), setOf(packageMinute)))
     }
 
     @Test
-    fun `out of order posts remain sorted and count only the requested window`() {
+    fun `distinct out of order occurrences remain sorted`() {
         val tracker = NotificationRateTracker()
         tracker.seed(emptyList(), nowMillis = 200_000)
-        tracker.record(snapshot(190_000), "newer")
-        tracker.record(snapshot(150_000), "older")
+        tracker.record(occurrence(1, at = 190_000))
+        tracker.record(occurrence(2, at = 150_000))
 
-        val counts = tracker.counts(snapshot(200_000), setOf(packageMinute))
-
-        assertEquals(2, counts[packageMinute])
+        assertEquals(2, tracker.counts(snapshot(200_000), setOf(packageMinute))[packageMinute])
     }
 
     @Test
-    fun `same listener key replaces its previous post instead of inflating the count`() {
+    fun `same occurrence update replaces its previous timestamp`() {
         val tracker = NotificationRateTracker()
         tracker.seed(emptyList(), nowMillis = 100_000)
-        tracker.record(snapshot(95_000), "same")
-        tracker.record(snapshot(100_000), "same")
+        tracker.record(occurrence(1, at = 95_000))
+        tracker.record(occurrence(1, at = 100_000))
 
-        val counts = tracker.counts(snapshot(100_000), setOf(packageMinute))
-
-        assertEquals(1, counts[packageMinute])
+        assertEquals(1, tracker.counts(snapshot(100_000), setOf(packageMinute))[packageMinute])
     }
 
     @Test
-    fun `late older callback cannot replace a newer post for the same key`() {
+    fun `same occurrence update moves package and channel buckets`() {
         val tracker = NotificationRateTracker()
-        val oneSecond = RateSignal(RateScope.PACKAGE, 1_000)
         tracker.seed(emptyList(), nowMillis = 100_000)
-        tracker.record(snapshot(100_000), "same")
-        tracker.record(snapshot(90_000), "same")
+        tracker.record(occurrence(1, at = 95_000, packageName = "old.pkg", channelId = "old"))
+        tracker.record(occurrence(1, at = 100_000, packageName = "new.pkg", channelId = "new"))
 
-        val counts = tracker.counts(snapshot(100_000), setOf(oneSecond))
-
-        assertEquals(1, counts[oneSecond])
-    }
-
-    @Test
-    fun `posts received while seed is loading are merged into history`() {
-        val tracker = NotificationRateTracker()
-        tracker.markUnavailable()
-        tracker.record(snapshot(100_000), "live")
-        tracker.seed(
-            listOf(NotificationRateEvent("pkg", "offers", 90_000)),
-            nowMillis = 100_000,
+        assertEquals(
+            0,
+            tracker
+                .counts(
+                    snapshot(100_000).copy(packageName = "old.pkg", channelId = "old"),
+                    setOf(packageMinute),
+                )[packageMinute],
         )
-
-        val counts = tracker.counts(snapshot(100_000), setOf(packageMinute))
-
-        assertEquals(2, counts[packageMinute])
-    }
-
-    @Test
-    fun `seed does not duplicate an identical post received while loading`() {
-        val tracker = NotificationRateTracker()
-        tracker.markUnavailable()
-        tracker.record(snapshot(100_000), "live")
-        tracker.seed(
-            listOf(NotificationRateEvent("pkg", "offers", 100_000)),
-            nowMillis = 100_000,
+        assertEquals(
+            1,
+            tracker
+                .counts(
+                    snapshot(100_000).copy(packageName = "new.pkg", channelId = "new"),
+                    setOf(packageMinute),
+                )[packageMinute],
         )
-
-        val counts = tracker.counts(snapshot(100_000), setOf(packageMinute))
-
-        assertEquals(1, counts[packageMinute])
     }
 
     @Test
-    fun `distinct database posts sharing one millisecond are preserved`() {
+    fun `older update for the same occurrence degrades to unknown`() {
+        val tracker = NotificationRateTracker()
+        tracker.seed(emptyList(), nowMillis = 100_000)
+        tracker.record(occurrence(1, at = 100_000))
+        val retained = tracker.record(occurrence(1, at = 90_000))
+
+        assertEquals(RateTrackerRecordResult.UNAVAILABLE, retained)
+        assertTrue(tracker.counts(snapshot(100_000), setOf(packageMinute)).isEmpty())
+    }
+
+    @Test
+    fun `distinct occurrences sharing one millisecond are preserved`() {
         val tracker = NotificationRateTracker()
         tracker.seed(
             listOf(
-                NotificationRateEvent("pkg", "offers", 100_000),
-                NotificationRateEvent("pkg", "offers", 100_000),
+                occurrence(1, at = 100_000),
+                occurrence(2, at = 100_000),
             ),
             nowMillis = 100_000,
         )
@@ -134,50 +128,182 @@ class NotificationRateTrackerTest {
     }
 
     @Test
-    fun `a repost after removal counts as a new notification`() {
+    fun `repost with a new occurrence id counts again`() {
         val tracker = NotificationRateTracker()
         tracker.seed(emptyList(), nowMillis = 100_000)
-        tracker.record(snapshot(99_000), "same")
-        tracker.markRemoved("same")
-        tracker.record(snapshot(100_000), "same")
+        tracker.record(occurrence(1, at = 99_000))
+        tracker.record(occurrence(2, at = 100_000))
 
         assertEquals(2, tracker.counts(snapshot(100_000), setOf(packageMinute))[packageMinute])
     }
 
     @Test
-    fun `scope history is capped at the maximum supported threshold`() {
+    fun `scope history retains every occurrence within the global bound`() {
         val tracker = NotificationRateTracker()
         tracker.seed(
-            (1L..1_500L).map { NotificationRateEvent("pkg", "offers", it) },
+            (1..1_500).map { index -> occurrence(index, at = index.toLong()) },
             nowMillis = 1_500,
         )
 
-        assertEquals(1_000, tracker.counts(snapshot(1_500), setOf(packageMinute))[packageMinute])
+        assertEquals(1_500, tracker.counts(snapshot(1_500), setOf(packageMinute))[packageMinute])
     }
 
     @Test
-    fun `live key overflow degrades rate signals to unknown`() {
+    fun `moving one of 1001 occurrences keeps the old channel exact`() {
         val tracker = NotificationRateTracker()
-        tracker.seed(emptyList(), nowMillis = 10_000)
-        repeat(4_097) { index ->
-            tracker.record(snapshot(index.toLong()), "key-$index")
-        }
+        tracker.seed(
+            (1..1_001).map { index -> occurrence(index, at = index.toLong()) },
+            nowMillis = 1_001,
+        )
 
+        tracker.record(occurrence(1_001, at = 1_002, channelId = "moved"))
+
+        assertEquals(
+            1_000,
+            tracker
+                .counts(
+                    snapshot(1_002),
+                    setOf(channelFiveMinutes),
+                )[channelFiveMinutes],
+        )
+        assertEquals(
+            1,
+            tracker
+                .counts(
+                    snapshot(1_002).copy(channelId = "moved"),
+                    setOf(channelFiveMinutes),
+                )[channelFiveMinutes],
+        )
+    }
+
+    @Test
+    fun `seed over total occurrence limit degrades to unknown`() {
+        val tracker = NotificationRateTracker()
+        val seeded =
+            tracker.seed(
+                (0..10_000).map { index -> occurrence(index, at = index.toLong()) },
+                nowMillis = 10_000,
+            )
+
+        assertFalse(seeded)
         assertTrue(tracker.counts(snapshot(10_000), setOf(packageMinute)).isEmpty())
     }
 
     @Test
-    fun `reseeding after live key overflow rebuilds only bounded history`() {
+    fun `runtime total occurrence overflow degrades to unknown`() {
         val tracker = NotificationRateTracker()
         tracker.seed(emptyList(), nowMillis = 10_000)
-        repeat(4_097) { index ->
-            tracker.record(snapshot(index.toLong()), "key-$index")
+        var retained = RateTrackerRecordResult.UNCHANGED
+        repeat(10_001) { index ->
+            retained = tracker.record(occurrence(index, at = index.toLong()))
         }
 
-        tracker.seed(emptyList(), nowMillis = 10_000)
-
-        assertEquals(1_000, tracker.counts(snapshot(10_000), setOf(packageMinute))[packageMinute])
+        assertEquals(RateTrackerRecordResult.UNAVAILABLE, retained)
+        assertTrue(tracker.counts(snapshot(10_000), setOf(packageMinute)).isEmpty())
     }
+
+    @Test
+    fun `late query omits only windows that predate known coverage`() {
+        val tracker = NotificationRateTracker()
+        val fullWindow = RateSignal(RateScope.PACKAGE, MAX_RATE_WINDOW_MILLIS)
+        tracker.seed(emptyList(), nowMillis = 100_000)
+        tracker.record(occurrence(1, at = 99_000))
+
+        val counts = tracker.counts(snapshot(99_000), setOf(packageMinute, fullWindow))
+
+        assertEquals(1, counts[packageMinute])
+        assertFalse(counts.containsKey(fullWindow))
+    }
+
+    @Test
+    fun `later post preserves a full-window count at the earlier snapshot boundary`() {
+        val tracker = NotificationRateTracker()
+        val fullWindow = RateSignal(RateScope.PACKAGE, MAX_RATE_WINDOW_MILLIS)
+        tracker.seed(
+            occurrences = listOf(occurrence(1, at = 0L)),
+            nowMillis = MAX_RATE_WINDOW_MILLIS,
+        )
+        val expected =
+            tracker.counts(
+                snapshot(MAX_RATE_WINDOW_MILLIS),
+                setOf(fullWindow),
+            )
+
+        tracker.record(occurrence(2, at = MAX_RATE_WINDOW_MILLIS + 1L))
+
+        assertEquals(
+            expected,
+            tracker.counts(
+                snapshot(MAX_RATE_WINDOW_MILLIS),
+                setOf(fullWindow),
+            ),
+        )
+    }
+
+    @Test
+    fun `partial seed exposes each window only at its exact coverage boundary`() {
+        val tracker = NotificationRateTracker()
+        val fullWindow = RateSignal(RateScope.PACKAGE, MAX_RATE_WINDOW_MILLIS)
+        val coverageStartMillis = 100_001L
+        tracker.seed(
+            occurrences = emptyList(),
+            nowMillis = 100_000L,
+            coverageStartMillis = coverageStartMillis,
+        )
+        tracker.record(occurrence(1, at = coverageStartMillis + packageMinute.windowMillis))
+
+        val beforeBoundary =
+            tracker.counts(
+                snapshot(coverageStartMillis + packageMinute.windowMillis - 1),
+                setOf(packageMinute, fullWindow),
+            )
+        val atBoundary =
+            tracker.counts(
+                snapshot(coverageStartMillis + packageMinute.windowMillis),
+                setOf(packageMinute, fullWindow),
+            )
+
+        assertFalse(beforeBoundary.containsKey(packageMinute))
+        assertEquals(1, atBoundary[packageMinute])
+        assertFalse(atBoundary.containsKey(fullWindow))
+    }
+
+    @Test
+    fun `stronger coverage barrier prunes earlier occurrences and reports a change`() {
+        val tracker = NotificationRateTracker()
+        tracker.seed(
+            occurrences = listOf(occurrence(1, at = 100_000L)),
+            nowMillis = 100_000L,
+        )
+
+        val result = tracker.restrictCoverage(100_001L)
+
+        assertEquals(RateTrackerRecordResult.CHANGED, result)
+        assertEquals(
+            0,
+            tracker.counts(
+                snapshot(160_001L),
+                setOf(packageMinute),
+            )[packageMinute],
+        )
+    }
+
+    private fun occurrence(
+        index: Int,
+        at: Long,
+        packageName: String = "pkg",
+        channelId: String? = "offers",
+    ) = PersistedRateOccurrence(
+        occurrenceId = occurrenceId(index),
+        packageName = packageName,
+        channelId = channelId,
+        postedAtMillis = at,
+    )
+
+    private fun occurrenceId(index: Int): RateOccurrenceId =
+        RateOccurrenceId(
+            "00000000-0000-4000-8000-${index.toString(radix = 16).padStart(length = 12, padChar = '0')}",
+        )
 
     private fun snapshot(at: Long) =
         NotificationSnapshot(

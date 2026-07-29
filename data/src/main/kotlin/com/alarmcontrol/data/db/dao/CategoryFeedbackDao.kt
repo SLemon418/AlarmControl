@@ -42,13 +42,19 @@ interface CategoryFeedbackDao {
     )
     suspend fun trimToMostRecent(max: Int): Int
 
+    /** Linked event ids whose correction rows would be removed by [trimToMostRecent]. */
+    @Query(
+        "SELECT DISTINCT notification_event_id FROM category_feedback " +
+            "WHERE notification_event_id IS NOT NULL AND id NOT IN (" +
+            "SELECT id FROM category_feedback ORDER BY id DESC LIMIT :max)",
+    )
+    suspend fun getLinkedTrimVictimEventIds(max: Int): List<Long>
+
     /** Keeps one current correction per linked event; legacy unlinked feedback remains additive. */
     @Transaction
     suspend fun record(feedback: CategoryFeedbackEntity): Long {
         feedback.notificationEventId?.let { deleteForEvent(it) }
-        val id = insert(feedback)
-        trimToMostRecent(MAX_RETAINED_ROWS)
-        return id
+        return insert(feedback)
     }
 
     /**

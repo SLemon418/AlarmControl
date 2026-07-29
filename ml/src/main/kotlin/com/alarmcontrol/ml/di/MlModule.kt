@@ -134,14 +134,17 @@ object MlModule {
         @Dispatcher(AppDispatcher.IO) ioDispatcher: CoroutineDispatcher,
     ): OnDeviceLlmManager {
         val modelFile = File(context.filesDir, MlConfig.LLM_MODEL_FILE)
+        val modelStore =
+            LocalLlmModelStore(
+                modelFile = modelFile,
+                storageGuard = AndroidModelStorageGuard(context),
+            )
+        // This singleton provider runs before the store can own an import in this process.
+        modelStore.recoverStaleStagingAtStartup()
         return DefaultOnDeviceLlmManager(
             engine = MediaPipeLlmEngine(context, modelFile),
             dispatcher = ioDispatcher,
-            modelStore =
-                LocalLlmModelStore(
-                    modelFile = modelFile,
-                    storageGuard = AndroidModelStorageGuard(context),
-                ),
+            modelStore = modelStore,
             feedbackAdjuster = RepositoryLlmFeedbackAdjuster.from(adFeedbackRepository, applicationScope),
         )
     }

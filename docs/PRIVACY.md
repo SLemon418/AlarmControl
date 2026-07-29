@@ -22,12 +22,17 @@ Depending on enabled features, app-private Room/DataStore/files storage may cont
 - named profiles, rule membership, settings, retention periods, and local opt-ins;
 - decision metadata: package, channel id, Android/ML category, ML confidence, actual/monitor rule
   ids and actions, timestamps, and the statistics-exclusion flag;
+- bounded frequency state: a non-reversible HMAC of the transient listener key, a random occurrence
+  id, package/channel, and latest post time. The raw listener key is never stored; state is capped
+  at 10,000 occurrences and local housekeeping removes rows outside the longest 24-hour window;
 - bounded explanation nodes: active/monitor lane, condition kind, result, depth, and position;
 - daily aggregate totals and action, active/monitor rule, category, package/channel, app, local-hour,
   semantic-intent, ML-coverage, and correction counts;
 - package-level category and seven-way semantic correction/observation counts and confidences;
 - stable suggestion-dismissal keys and a bounded automation audit containing source, operation,
   target type, outcome, changed count, and time;
+- a random per-install automation authentication token in app-private Preferences when external
+  automation is enabled. It is never logged, included in the audit, or backed up;
 - the optional quantized LLM model the user explicitly imports into app-private storage.
 - only after explicit opt-in, a separate title/body payload that is length-bounded and encrypted
   with AES-256-GCM under a non-exportable Android Keystore key. `SECRET` notifications and
@@ -35,19 +40,20 @@ Depending on enabled features, app-private Room/DataStore/files storage may cont
 
 Installed-app names and icons are resolved at display time and are not notification content.
 
-## Data never exported or stored in plaintext
+## Data never exported or stored as plaintext notification content
 
 AlarmControl never writes notification content to list/analytics rows, logs, feedback, traces, or
 backup files. It never persists:
 
 - rule trace predicate/comparison values copied from a notification;
 - LLM prompts, generated reasoning, or free-form model output;
-- automation authentication tokens, backup passwords, or encryption keys;
+- backup passwords or encryption keys;
 - gradients or a runtime training corpus.
 
-Optional detail ciphertext is read only for a user-selected record. Turning the feature off deletes
-all ciphertext rows and the key immediately. Fixed error messages are used in logs so notification
-content cannot enter logcat.
+Optional detail ciphertext is read only for a user-selected record. A successful opt-out deletes
+all ciphertext rows and the key before the setting becomes off; if deletion fails, the setting
+remains on and the app asks the user to retry. Fixed error messages are used in logs so
+notification content cannot enter logcat.
 
 ## Local AI and learning
 
@@ -67,8 +73,9 @@ anyone who receives the file. New encrypted exports require at least eight passw
 shorter legacy passwords remain accepted for restore. Restore previews and validates data before a
 transactional merge or replacement, and v1–v5 backups remain supported.
 
-The per-install automation token, imported LLM model, notification content, and LLM reasoning are
-never backed up. Android OS cloud backup is disabled for the app.
+The per-install automation token, frequency occurrence state and HMAC key, imported LLM model,
+notification content, and LLM reasoning are never backed up. Android OS cloud backup is disabled
+for the app.
 
 ## User control and platform boundaries
 

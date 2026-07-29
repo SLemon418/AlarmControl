@@ -37,4 +37,15 @@ class LimitedInputTest {
 
         assertEquals("{\"name\":\"집중\"}", output.toString(Charsets.UTF_8))
     }
+
+    @Test
+    fun `rejects output whose UTF-8 bytes exceed the import limit`() {
+        val output = ByteArrayOutputStream()
+
+        assertThrows(IllegalArgumentException::class.java) {
+            output.writeBackupText("한", maxBytes = 2)
+        }
+
+        assertEquals(0, output.size())
+    }
 }

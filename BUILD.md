@@ -62,6 +62,12 @@ APK and App Bundle paths both remain buildable with AGP resource shrinking. `bun
 deliberately remains usable without a keystore for local and CI compatibility checks, but an AAB is
 not the current publication artifact and its successful compilation does **not** make a release.
 
+Before the first release, create and securely back up one long-lived Android update keystore.
+Independently verify its certificate SHA-256 (for example, with `keytool -list -v`), remove the
+colons from the 64 hexadecimal characters, and replace the pending value in
+`config/release-signing-certificate.sha256`. The fingerprint is public; the keystore and passwords
+are not. Until this committed pin is valid, `releaseCandidate` deliberately fails.
+
 For GitHub Releases distribution, provide all four signing environment variables (never commit a
 keystore or its credentials) and run the explicit release-candidate gate:
 
@@ -77,8 +83,9 @@ Providing only some of the variables fails configuration intentionally. `release
 all device-independent quality/offline checks, compiles the instrumented-test and Baseline Profile
 variants, caps the raw semantic classifier at 45 MiB, the physical non-semantic payload at 140 MiB,
 and the complete physical APK at 185 MiB. It also verifies the four semantic assets and their
-manifest hashes, then runs `apksigner` verification for minSdk 26. The verified universal APK is the
-only APK under `app/build/outputs/apk/release/`. Only that APK is a GitHub distribution candidate;
+manifest hashes, then runs `apksigner` verification for minSdk 26 and requires its sole signer to
+match the committed update-certificate fingerprint. The verified universal APK is the only APK
+under `app/build/outputs/apk/release/`. Only that APK is a GitHub distribution candidate;
 `bundleRelease` remains a CI/format-regression artifact with its existing AAB limits.
 
 The current release APK is universal: it contains native libraries for every supported ABI. GitHub
@@ -96,7 +103,10 @@ The workflow checks the committed metadata from every strict SemVer release tag 
 checked-out default-branch ref, not just tags behind the new tag. It rejects a code that is not
 greater than all of them, so adding a release tag later to an older commit cannot bypass the check;
 the first such release is allowed. This comparison uses only the history fetched by checkout and
-performs no additional network request. Configure the `github-release` Environment with:
+performs no additional network request. Before signing or publication, the workflow also confirms
+that the checkout is the tag's exact commit and runs the `:data`, `:ml`, and `:app`
+`pixel2Api34DebugAndroidTest` suites on that checkout. Configure the `github-release` Environment
+with:
 
 - `ALARMCONTROL_KEYSTORE_BASE64`
 - `ALARMCONTROL_KEYSTORE_PASSWORD`
@@ -111,8 +121,8 @@ base64 < /absolute/path/to/release.jks |
   gh secret set ALARMCONTROL_KEYSTORE_BASE64 --env github-release
 ```
 
-After the quality, offline, test-APK compilation, and signature gates pass, the workflow creates a
-release with these assets:
+After the managed-device, quality, offline, test-APK compilation, and signature gates pass, the
+workflow creates a release with these assets:
 
 - `AlarmControl-<version>-universal.apk`
 - `AlarmControl-<version>-universal.apk.sha256`
@@ -168,7 +178,7 @@ Without a device, compile the test APKs to catch source, resource, and dependenc
 
 Do not report a compiled instrumented-test APK as an executed device test.
 
-The Room tests exercise every real path from seeded v1, v2, v3, v10, and v12 databases to v13,
+The Room tests exercise every real path from seeded v1, v2, v3, v10, and v12 databases to v15,
 including migration of legacy binary advertisement observations into seven-way semantic-intent priors. The
 `:baselineprofile:assemble` lifecycle is configured to compile both generator variants without
 starting a device; profile collection remains an explicit command.
@@ -200,11 +210,12 @@ See the official [Gradle Managed Devices documentation](https://developer.androi
 Pull requests run JVM/Robolectric tests, detekt, ktlint, Android Lint, `offlineGuard`, debug/release
 APK, release AAB, all instrumented-test APK builds, and both Baseline Profile generator variants.
 Main pushes, the nightly schedule, and manual runs additionally execute the managed-device suite.
-Gradle wrapper validation runs before both jobs and `gradle/verification-metadata.xml` enforces
-strict SHA-256 verification of resolved Gradle artifacts. The root `verifyCiActionPins` gate scans
-workflow, reusable-workflow, and composite-action YAML: remote actions require a full 40-character
-commit SHA and container actions require a SHA-256 image digest. Failure reports are uploaded as CI
-artifacts.
+Strict SemVer release tags independently rerun the same suite on the tagged commit and cannot be
+published if it fails. Gradle wrapper validation runs before these jobs and
+`gradle/verification-metadata.xml` enforces strict SHA-256 verification of resolved Gradle
+artifacts. The root `verifyCiActionPins` gate scans workflow, reusable-workflow, and composite-action
+YAML: remote actions require a full 40-character commit SHA and container actions require a SHA-256
+image digest. Failure reports are uploaded as CI artifacts.
 
 ## Baseline Profile and offline startup benchmark
 

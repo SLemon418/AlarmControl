@@ -24,6 +24,7 @@ import com.alarmcontrol.service.AppHealthProvider
 import com.alarmcontrol.service.AppHealthSnapshot
 import com.alarmcontrol.testsupport.MainDispatcherRule
 import com.alarmcontrol.testsupport.awaitUntil
+import com.alarmcontrol.ui.UiText
 import com.alarmcontrol.ui.app.AppIdentityResolver
 import com.alarmcontrol.ui.app.AppIdentityUi
 import io.mockk.coEvery
@@ -51,6 +52,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 
 @RunWith(RobolectricTestRunner::class)
 @Config(application = Application::class, sdk = [34])
@@ -180,14 +182,10 @@ class SettingsViewModelTest {
         }
 
     @Test
-    fun `disabling encrypted content storage blocks new capture before deleting payloads`() =
+    fun `disabling encrypted content storage uses the atomic settings boundary`() =
         runTest {
             repository.setNotificationContentStorageEnabled(true)
             repository.operationLog.clear()
-            coEvery { localDataRepository.reconcileStoredNotificationContentPolicy() } answers {
-                repository.operationLog += "reconcile-content"
-                ClearedDataCounts()
-            }
             val vm = viewModel()
 
             vm.uiState.test {
@@ -197,11 +195,34 @@ class SettingsViewModelTest {
                 cancelAndIgnoreRemainingEvents()
             }
 
-            coVerify(exactly = 1) { localDataRepository.reconcileStoredNotificationContentPolicy() }
-            assertTrue(
-                repository.operationLog.indexOf("content-storage:false") <
-                    repository.operationLog.indexOf("reconcile-content"),
-            )
+            assertEquals(listOf("content-storage:false"), repository.operationLog)
+            coVerify(exactly = 0) { localDataRepository.reconcileStoredNotificationContentPolicy() }
+        }
+
+    @Test
+    fun `content deletion failure keeps storage enabled and shows a specific error`() =
+        runTest {
+            repository.setNotificationContentStorageEnabled(true)
+            repository.beforeSetNotificationContentStorageEnabled = { enabled ->
+                if (!enabled) throw IOException("content deletion failed")
+            }
+            val vm = viewModel()
+
+            vm.uiState.test {
+                awaitUntil { it.notificationContentStorageEnabled }
+                vm.setNotificationContentStorageEnabled(false)
+                val failed = awaitUntil { it.userMessage != null }
+
+                assertTrue(failed.notificationContentStorageEnabled)
+                assertEquals(
+                    UiText.Resource(R.string.message_content_storage_disable_failed),
+                    failed.userMessage,
+                )
+                cancelAndIgnoreRemainingEvents()
+            }
+
+            assertTrue(repository.notificationContentStorageEnabled.first())
+            coVerify(exactly = 0) { localDataRepository.reconcileStoredNotificationContentPolicy() }
         }
 
     @Test

@@ -7,6 +7,9 @@ import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasClickAction
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -99,6 +102,28 @@ class RulesScreenTest {
     }
 
     @Test
+    fun setupHealth_requiresNotificationAccess_whenDeniedWithFilteringAndActiveRule() {
+        setSetupHealthScreen(NotificationAccessUiState.DENIED)
+
+        assertSetupHealthText(
+            "AlarmControl can't filter or record anything until you grant notification access.",
+        )
+        composeRule.onNodeWithText("Inactive").assertIsDisplayed()
+        composeRule.onNodeWithText("Active").assertDoesNotExist()
+        composeRule.onNodeWithText("Filtering is ready", substring = true).assertDoesNotExist()
+    }
+
+    @Test
+    fun setupHealth_checksNotificationAccess_beforeFilteringAndActiveRule() {
+        setSetupHealthScreen(NotificationAccessUiState.CHECKING)
+
+        assertSetupHealthText("Checking notification access…")
+        composeRule.onNodeWithText("Inactive").assertIsDisplayed()
+        composeRule.onNodeWithText("Active").assertDoesNotExist()
+        composeRule.onNodeWithText("Filtering is ready", substring = true).assertDoesNotExist()
+    }
+
+    @Test
     fun ruleEditorRouteOnlyClosesAfterLoadingCompletesWithoutADraft() {
         val state = mutableStateOf(RulesUiState())
         var closeCount = 0
@@ -173,10 +198,15 @@ class RulesScreenTest {
 
         composeRule
             .onNodeWithTag(RULES_LIST_TEST_TAG)
-            .performScrollToNode(hasText("Always keep alarm notifications"))
-        composeRule.onNodeWithText("Always keep alarm notifications").performScrollTo().performClick()
+            .performScrollToNode(hasText("Quiet one app at night"))
+        composeRule
+            .onNode(hasText("Quiet one app at night") and hasClickAction())
+            .performScrollTo()
+            .performClick()
 
-        assertEquals(RuleTemplate.KEEP_ALARMS, selected)
+        composeRule.runOnIdle {
+            assertEquals(RuleTemplate.ONE_APP_AT_NIGHT, selected)
+        }
     }
 
     private fun setRulesScreen(showHint: Boolean) {
@@ -196,6 +226,36 @@ class RulesScreenTest {
                 onUserMessageShown = {},
             )
         }
+    }
+
+    private fun setSetupHealthScreen(notificationAccessState: NotificationAccessUiState) {
+        composeRule.setContent {
+            RulesScreen(
+                state =
+                    RulesUiState(
+                        isLoading = false,
+                        notificationAccessState = notificationAccessState,
+                        filteringEnabled = true,
+                        enabledRuleCount = 1,
+                    ),
+                onAddRule = {},
+                onEditRule = {},
+                onToggleRule = { _, _ -> },
+                onDeleteRule = {},
+                onUserMessageShown = {},
+            )
+        }
+        composeRule
+            .onNodeWithTag(RULES_LIST_TEST_TAG)
+            .performScrollToNode(hasTestTag(SETUP_HEALTH_CARD_TEST_TAG))
+    }
+
+    private fun assertSetupHealthText(text: String) {
+        composeRule
+            .onNode(
+                hasText(text).and(hasAnyAncestor(hasTestTag(SETUP_HEALTH_CARD_TEST_TAG))),
+                useUnmergedTree = true,
+            ).assertIsDisplayed()
     }
 
     @Test

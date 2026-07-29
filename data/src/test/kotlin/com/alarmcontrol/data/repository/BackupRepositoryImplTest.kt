@@ -1,5 +1,6 @@
 package com.alarmcontrol.data.repository
 
+import com.alarmcontrol.core.backup.BackupCategoryFeedback
 import com.alarmcontrol.core.backup.BackupData
 import com.alarmcontrol.core.backup.BackupSemanticFeedback
 import com.alarmcontrol.core.backup.BackupSummary
@@ -20,6 +21,11 @@ import com.alarmcontrol.core.settings.SettingsSnapshot
 import com.alarmcontrol.data.backup.BackupCodec
 import com.alarmcontrol.data.backup.BackupCryptor
 import com.alarmcontrol.data.db.TransactionRunner
+import com.alarmcontrol.data.db.dao.CategoryFeedbackDao
+import com.alarmcontrol.data.db.entity.CategoryFeedbackEntity
+import com.alarmcontrol.data.db.entity.LlmObservationEntity
+import com.alarmcontrol.data.db.entity.NotificationEventEntity
+import com.alarmcontrol.data.db.model.StoredRuleAction
 import com.alarmcontrol.data.mapper.toWrite
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -31,6 +37,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+@Suppress("LargeClass") // Keeps the cross-section backup and restore matrix in one fixture.
 class BackupRepositoryImplTest {
     private val ruleDao = FakeRuleDao()
     private val dailyDao = FakeDailyInsightDao()
@@ -192,6 +199,234 @@ class BackupRepositoryImplTest {
             val insights = dailyRepository.observeRecent(10).first().associateBy(DailyInsight::epochDay)
             assertEquals(local, insights.getValue(local.epochDay))
             assertEquals(missing, insights.getValue(missing.epochDay))
+            assertEquals(
+                listOf(missing.epochDay),
+                dailyDao.observeSourceGapDaysBetween(local.epochDay, missing.epochDay).first(),
+            )
+        }
+
+    @Test
+    fun `restore preserves an incomplete daily source marker without exporting raw gap rows`() =
+        runTest {
+            dailyDao.seedSourceGap(19_999)
+            val incomplete =
+                DailyInsight(
+                    epochDay = 20_000,
+                    windowStartMillis = 10,
+                    windowEndMillis = 20,
+                    totalNotifications = 1,
+                    mutedCount = 0,
+                    topRules = emptyList(),
+                    categoryBreakdown = emptyList(),
+                    generatedAtMillis = 30,
+                    sourceComplete = false,
+                )
+
+            val result =
+                backup.restore(
+                    BackupCodec.encode(BackupData(emptyList(), listOf(incomplete))),
+                    options =
+                        RestoreOptions(
+                            mode = RestoreMode.REPLACE,
+                            rulesAndProfiles = false,
+                            settings = false,
+                        ),
+                )
+
+            assertTrue(result is DataResult.Success)
+            assertEquals(
+                false,
+                dailyRepository
+                    .observeRecent(1)
+                    .first()
+                    .single()
+                    .sourceComplete,
+            )
+            assertEquals(
+                listOf(19_999L, 20_000L),
+                dailyDao.observeSourceGapDaysBetween(19_999, 20_000).first(),
+            )
+        }
+
+    @Test
+    fun `restore stores a complete snapshot without erasing local source provenance`() =
+        runTest {
+            dailyDao.seedSourceGap(20_000)
+            val complete =
+                DailyInsight(
+                    epochDay = 20_000,
+                    windowStartMillis = 10,
+                    windowEndMillis = 20,
+                    totalNotifications = 1,
+                    mutedCount = 0,
+                    topRules = emptyList(),
+                    categoryBreakdown = emptyList(),
+                    generatedAtMillis = 30,
+                    sourceComplete = true,
+                )
+
+            val result =
+                backup.restore(
+                    BackupCodec.encode(BackupData(emptyList(), listOf(complete))),
+                    options =
+                        RestoreOptions(
+                            mode = RestoreMode.REPLACE,
+                            rulesAndProfiles = false,
+                            settings = false,
+                        ),
+                )
+
+            assertTrue(result is DataResult.Success)
+            assertEquals(complete, dailyRepository.observeRecent(1).first().single())
+            assertEquals(
+                listOf(20_000L),
+                dailyDao.observeSourceGapDaysBetween(20_000, 20_000).first(),
+            )
+        }
+
+    @Test
+    fun `complete imported snapshot remains complete but a later rebuild is source incomplete`() =
+        runTest {
+            val epochDay = 20_000L
+            val complete =
+                DailyInsight(
+                    epochDay = epochDay,
+                    windowStartMillis = 0,
+                    windowEndMillis = 1_000,
+                    totalNotifications = 7,
+                    mutedCount = 2,
+                    topRules = emptyList(),
+                    categoryBreakdown = emptyList(),
+                    generatedAtMillis = 1_000,
+                    sourceComplete = true,
+                )
+
+            val result =
+                backup.restore(
+                    BackupCodec.encode(BackupData(emptyList(), listOf(complete))),
+                    options =
+                        RestoreOptions(
+                            mode = RestoreMode.REPLACE,
+                            rulesAndProfiles = false,
+                            settings = false,
+                        ),
+                )
+
+            assertTrue(result is DataResult.Success)
+            assertEquals(complete, dailyRepository.observeRecent(1).first().single())
+            assertEquals(
+                listOf(epochDay),
+                dailyDao.observeSourceGapDaysBetween(epochDay, epochDay).first(),
+            )
+
+            val localEvent =
+                NotificationEventEntity(
+                    id = 77,
+                    packageName = "com.local",
+                    category = null,
+                    postedAtMillis = 100,
+                    postedEpochDay = epochDay,
+                    action = StoredRuleAction.KEEP,
+                    matchedRuleId = null,
+                    recordedAtMillis = 100,
+                )
+            dailyDao.seedEvents(localEvent)
+            dailyDao.deleteContainingEvent(localEvent.id)
+            val rebuilt =
+                dailyRepository.aggregateAndStore(
+                    epochDay = epochDay,
+                    startMillis = 0,
+                    endMillis = 1_000,
+                    generatedAtMillis = 2_000,
+                    topRules = 5,
+                )
+
+            assertFalse(rebuilt.sourceComplete)
+            assertEquals(1, rebuilt.totalNotifications)
+            assertEquals(rebuilt, dailyRepository.observeRecent(1).first().single())
+        }
+
+    @Test
+    fun `feedback replace invalidates local correction before importing the same day rollup`() =
+        runTest {
+            val epochDay = 20_000L
+            val correctedEvent =
+                NotificationEventEntity(
+                    id = 1,
+                    packageName = "com.local",
+                    category = null,
+                    postedAtMillis = 10,
+                    postedEpochDay = epochDay,
+                    action = StoredRuleAction.KEEP,
+                    matchedRuleId = null,
+                    recordedAtMillis = 10,
+                )
+            dailyDao.seedEvents(correctedEvent)
+            dailyDao.seedSemantic(
+                eventId = correctedEvent.id,
+                predicted = "OTHER",
+                corrected = "DELIVERY",
+            )
+            llmObservationDao.upsertIfEventExists(
+                LlmObservationEntity(
+                    notificationEventId = correctedEvent.id,
+                    packageName = correctedEvent.packageName,
+                    predictedIsAdvertisement = false,
+                    predictedIntent = "OTHER",
+                    confidenceScore = 0.8f,
+                    correctedIsAdvertisement = false,
+                    correctedIntent = "DELIVERY",
+                    analyzedAtMillis = 10,
+                ),
+            )
+            val local =
+                DailyInsight(
+                    epochDay = epochDay,
+                    windowStartMillis = 0,
+                    windowEndMillis = 20,
+                    totalNotifications = 1,
+                    mutedCount = 0,
+                    topRules = emptyList(),
+                    categoryBreakdown = emptyList(),
+                    generatedAtMillis = 20,
+                )
+            dailyDao.store(local.toWrite())
+            val imported = local.copy(totalNotifications = 7, generatedAtMillis = 30)
+            val password = "password".toCharArray()
+            val payload =
+                BackupCryptor.encrypt(
+                    BackupCodec.encode(
+                        BackupData(
+                            rules = emptyList(),
+                            dailyInsights = listOf(imported),
+                            semanticFeedback =
+                                listOf(
+                                    BackupSemanticFeedback(
+                                        packageName = "com.remote",
+                                        intent = SemanticIntent.SECURITY,
+                                        count = 1,
+                                    ),
+                                ),
+                        ),
+                    ),
+                    password,
+                )
+
+            val result =
+                backup.restore(
+                    payload,
+                    password,
+                    RestoreOptions(
+                        mode = RestoreMode.REPLACE,
+                        rulesAndProfiles = false,
+                        settings = false,
+                        learningFeedback = true,
+                    ),
+                )
+
+            assertTrue(result is DataResult.Success)
+            assertEquals(1, dailyDao.linkedFeedbackInvalidationCalls)
+            assertEquals(imported, dailyRepository.observeRecent(1).first().single())
         }
 
     @Test
@@ -337,6 +572,199 @@ class BackupRepositoryImplTest {
                 feedbackDao.lastTrimMaximum,
             )
             assertEquals(3, llmObservationDao.getSemanticFeedbackCounts().single().count)
+        }
+
+    @Test
+    fun `learning export combines one local vote with imported priors without double counting live columns`() =
+        runTest {
+            llmObservationDao.upsertIfEventExists(
+                com.alarmcontrol.data.db.entity.LlmObservationEntity(
+                    notificationEventId = 1,
+                    packageName = "com.shop",
+                    predictedIsAdvertisement = false,
+                    predictedIntent = "OTHER",
+                    confidenceScore = 0.8f,
+                    correctedIsAdvertisement = false,
+                    correctedIntent = "DELIVERY",
+                    analyzedAtMillis = 10,
+                ),
+            )
+            llmObservationDao.upsertLocalSemanticFeedback(
+                com.alarmcontrol.data.db.entity.LocalSemanticFeedbackEntity(
+                    sourceEventId = 1,
+                    packageName = "com.shop",
+                    correctedIntent = "DELIVERY",
+                    recordedAtMillis = 11,
+                ),
+            )
+            llmObservationDao.upsertSemanticImportedPriors(
+                listOf(
+                    com.alarmcontrol.data.db.entity.SemanticFeedbackPriorEntity(
+                        "com.shop",
+                        "DELIVERY",
+                        2,
+                    ),
+                ),
+            )
+
+            val encrypted = backup.export("password".toCharArray(), includeLearningFeedback = true)
+            val decoded =
+                BackupCodec.decode(
+                    BackupCryptor.decrypt(encrypted, "password".toCharArray()),
+                )
+
+            assertEquals(
+                listOf(BackupSemanticFeedback("com.shop", SemanticIntent.DELIVERY, 3)),
+                decoded.semanticFeedback,
+            )
+        }
+
+    @Test
+    fun `feedback merge preserves local votes while replace removes local and live corrections`() =
+        runTest {
+            llmObservationDao.upsertIfEventExists(
+                com.alarmcontrol.data.db.entity.LlmObservationEntity(
+                    notificationEventId = 1,
+                    packageName = "com.local",
+                    predictedIsAdvertisement = true,
+                    predictedIntent = "MARKETING",
+                    confidenceScore = 0.8f,
+                    correctedIsAdvertisement = true,
+                    correctedIntent = "MARKETING",
+                    analyzedAtMillis = 10,
+                ),
+            )
+            llmObservationDao.upsertLocalSemanticFeedback(
+                com.alarmcontrol.data.db.entity.LocalSemanticFeedbackEntity(
+                    1,
+                    "com.local",
+                    "MARKETING",
+                    11,
+                ),
+            )
+            val password = "password".toCharArray()
+            val payload =
+                BackupCryptor.encrypt(
+                    BackupCodec.encode(
+                        BackupData(
+                            rules = emptyList(),
+                            dailyInsights = emptyList(),
+                            semanticFeedback =
+                                listOf(BackupSemanticFeedback("com.remote", SemanticIntent.SECURITY, 2)),
+                        ),
+                    ),
+                    password,
+                )
+
+            val merged =
+                backup.restore(
+                    payload,
+                    password,
+                    RestoreOptions(
+                        mode = RestoreMode.MERGE,
+                        rulesAndProfiles = false,
+                        dailyInsights = false,
+                        settings = false,
+                        learningFeedback = true,
+                    ),
+                )
+
+            assertTrue(merged is DataResult.Success)
+            assertEquals(1, llmObservationDao.countLocalSemanticFeedback())
+            assertEquals(
+                mapOf("com.local" to 1, "com.remote" to 2),
+                llmObservationDao
+                    .getSemanticFeedbackCounts()
+                    .associate { it.packageName to it.count },
+            )
+
+            val replaced =
+                backup.restore(
+                    payload,
+                    password,
+                    RestoreOptions(
+                        mode = RestoreMode.REPLACE,
+                        rulesAndProfiles = false,
+                        dailyInsights = false,
+                        settings = false,
+                        learningFeedback = true,
+                    ),
+                )
+
+            assertTrue(replaced is DataResult.Success)
+            assertEquals(0, llmObservationDao.countLocalSemanticFeedback())
+            assertEquals(
+                null,
+                llmObservationDao
+                    .observeAll()
+                    .first()
+                    .single()
+                    .correctedIntent,
+            )
+            assertEquals(
+                mapOf("com.remote" to 2),
+                llmObservationDao
+                    .getSemanticFeedbackCounts()
+                    .associate { it.packageName to it.count },
+            )
+        }
+
+    @Test
+    fun `feedback merge invalidates a linked row evicted by the global cap`() =
+        runTest {
+            feedbackDao.seedRows(
+                List(CategoryFeedbackDao.MAX_RETAINED_ROWS) { index ->
+                    CategoryFeedbackEntity(
+                        id = index + 1L,
+                        packageName = "com.local.$index",
+                        notificationEventId = if (index == 0) 77L else null,
+                        predictedLabel = "promotion",
+                        correctedLabel = "social",
+                        recordedAtMillis = index.toLong(),
+                    )
+                },
+            )
+            val password = "password".toCharArray()
+            val payload =
+                BackupCryptor.encrypt(
+                    BackupCodec.encode(
+                        BackupData(
+                            rules = emptyList(),
+                            dailyInsights = emptyList(),
+                            categoryFeedback =
+                                listOf(
+                                    BackupCategoryFeedback(
+                                        packageName = "com.remote",
+                                        predictedLabel = "promotion",
+                                        correctedLabel = "news",
+                                        recordedAtMillis = 100_000,
+                                    ),
+                                ),
+                        ),
+                    ),
+                    password,
+                )
+
+            val result =
+                backup.restore(
+                    payload,
+                    password,
+                    RestoreOptions(
+                        mode = RestoreMode.MERGE,
+                        rulesAndProfiles = false,
+                        dailyInsights = false,
+                        settings = false,
+                        learningFeedback = true,
+                    ),
+                )
+
+            assertTrue(result is DataResult.Success)
+            assertEquals(listOf(77L), dailyDao.invalidatedEventIds)
+            assertEquals(CategoryFeedbackDao.MAX_RETAINED_ROWS, feedbackDao.countAll())
+            assertEquals(
+                emptyList<Long>(),
+                feedbackDao.inserted.mapNotNull { it.notificationEventId },
+            )
         }
 
     @Test
@@ -620,7 +1048,7 @@ class BackupRepositoryImplTest {
         }
 }
 
-private class InMemoryBackupSettingsRepository : SettingsRepository {
+internal class InMemoryBackupSettingsRepository : SettingsRepository {
     private val state = MutableStateFlow(SettingsSnapshot())
     val current: SettingsSnapshot get() = state.value
     var failEnabledRestore = false

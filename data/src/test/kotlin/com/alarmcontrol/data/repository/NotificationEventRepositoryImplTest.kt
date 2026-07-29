@@ -13,6 +13,7 @@ import com.alarmcontrol.core.filtering.NotificationEvent
 import com.alarmcontrol.core.filtering.NotificationHistoryQuery
 import com.alarmcontrol.core.filtering.RuleAction
 import com.alarmcontrol.core.insights.ActionBreakdown
+import com.alarmcontrol.data.db.entity.NotificationEventEntity
 import com.alarmcontrol.data.db.model.StoredRuleAction
 import com.alarmcontrol.data.security.NotificationContentAccessGuard
 import kotlinx.coroutines.CoroutineStart
@@ -80,6 +81,77 @@ class NotificationEventRepositoryImplTest {
             assertEquals(StoredRuleAction.SNOOZE, entity.action)
             assertEquals(42L, entity.matchedRuleId)
             assertEquals(2_000L, entity.recordedAtMillis)
+        }
+
+    @Test
+    fun `record invalidates the retained rollup for the posted day inside the atomic insert`() =
+        runTest {
+            repository.record(
+                event(
+                    postedAtMillis = 1_234,
+                    postedEpochDay = 42,
+                ),
+            )
+
+            assertEquals(
+                listOf(42L to 1_234L),
+                dao.invalidatedRollupPosts,
+            )
+        }
+
+    @Test
+    fun `record hard caps raw history and returns an id when the inserted old row is trimmed`() =
+        runTest {
+            repeat(10_000) {
+                dao.insert(
+                    NotificationEventEntity(
+                        packageName = "com.example.newer",
+                        category = null,
+                        postedAtMillis = 2_000,
+                        postedEpochDay = 2,
+                        action = StoredRuleAction.KEEP,
+                        matchedRuleId = null,
+                        recordedAtMillis = 2_000,
+                    ),
+                )
+            }
+            val trace =
+                DecisionTraceNode(
+                    lane = DecisionTraceLane.ACTIVE,
+                    position = 0,
+                    depth = 0,
+                    kind = DecisionConditionKind.PACKAGE,
+                    result = ConditionResult.MATCH,
+                )
+
+            val id =
+                repository.record(
+                    event(
+                        recordedAtMillis = 1_000,
+                        postedAtMillis = 1_000,
+                        postedEpochDay = 1,
+                    ).copy(decisionTrace = listOf(trace)),
+                    NotificationContent("old title", "old body"),
+                )
+
+            assertEquals("10001", id)
+            assertEquals(10_000, dao.countAll())
+            assertEquals(null, repository.getDetail(id))
+            assertEquals(0, dao.countEncryptedContents())
+            assertEquals(setOf(1L), dao.sourceGapDays)
+
+            repository.enrichRecordedDecision(
+                id,
+                NotificationDecisionEnrichment(
+                    mlCategory = "OTHER",
+                    mlConfidence = 0.8f,
+                    monitoredRuleId = null,
+                    monitoredAction = null,
+                    decisionTrace = emptyList(),
+                ),
+            )
+            assertEquals(10_000, dao.countAll())
+            assertEquals(emptyList<Long>(), dao.invalidatedRollupEventIds)
         }
 
     @Test
@@ -308,19 +380,7 @@ class NotificationEventRepositoryImplTest {
             assertEquals("9", stored.monitoredRuleId)
             assertEquals(RuleAction.Snooze(0L), stored.monitoredAction)
             assertEquals(monitorTrace, stored.decisionTrace)
-        }
-
-    @Test
-    fun `rate history exposes only content-free metadata since cutoff`() =
-        runTest {
-            repository.record(event(recordedAtMillis = 1_000).copy(channelId = "old", postedAtMillis = 1_000))
-            repository.record(event(recordedAtMillis = 2_000).copy(channelId = "new", postedAtMillis = 2_000))
-
-            val history = repository.rateHistorySince(1_500)
-
-            assertEquals(1, history.size)
-            assertEquals("new", history.single().channelId)
-            assertEquals("com.example.clock", history.single().packageName)
+            assertEquals(listOf(id.toLong()), dao.invalidatedRollupEventIds)
         }
 
     @Test

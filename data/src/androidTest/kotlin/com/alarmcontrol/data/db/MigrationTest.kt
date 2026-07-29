@@ -5,6 +5,7 @@ import androidx.room.testing.MigrationTestHelper
 import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.alarmcontrol.core.filtering.MAX_RATE_WINDOW_MILLIS
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -15,7 +16,7 @@ import java.io.IOException
 /**
  * Instrumented Room migration test (CLAUDE.md §9). Runs on a device/emulator via
  * `./gradlew :data:connectedDebugAndroidTest`. It seeds realistic user data in the v3 schema, then
- * upgrades sequentially v3 -> ... -> v10 -> v11 -> v12 -> v13 with the real migrations.
+ * upgrades sequentially v3 -> ... -> v10 -> v11 -> v12 -> v13 -> v14 -> v15 with the real migrations.
  * It asserts old data survives while insight, feedback, profile, and audit tables remain usable.
  *
  * Schemas are read from the test APK assets (wired via `room.schemaLocation` + the androidTest assets
@@ -32,7 +33,7 @@ class MigrationTest {
 
     @Test
     @Throws(IOException::class)
-    fun migratesFromV3ToV13PreservingDataAndSemanticFeedback() {
+    fun migratesFromV3ToV15PreservingDataAndSemanticFeedback() {
         helper.createDatabase(TEST_DB, version = 3).use(::seedVersion3)
 
         helper
@@ -49,14 +50,17 @@ class MigrationTest {
                 AppDatabase.MIGRATION_9_10,
             ).use(::seedVersion10BinaryFeedback)
 
+        val migrationStartedAtMillis = System.currentTimeMillis()
         val db =
             helper.runMigrationsAndValidate(
                 TEST_DB,
-                13,
+                15,
                 true,
                 AppDatabase.MIGRATION_10_11,
                 AppDatabase.MIGRATION_11_12,
                 AppDatabase.MIGRATION_12_13,
+                AppDatabase.MIGRATION_13_14,
+                AppDatabase.MIGRATION_14_15,
             )
 
         assertVersion3DataSurvived(db)
@@ -67,11 +71,13 @@ class MigrationTest {
         assertMilestone5TablesAndDefaultsWork(db)
         assertMilestone6TablesAndDefaultsWork(db)
         assertStabilizationDefaultsAndIndexesWork(db)
+        val incompleteUntilMillis = db.conservativeRateIncompleteUntil(migrationStartedAtMillis)
+        assertRateOccurrenceFoundationWork(db, expectedIncompleteUntilMillis = incompleteUntilMillis)
     }
 
     @Test
     @Throws(IOException::class)
-    fun migratesFromV1ToV13PreservingRulesAndEvents() {
+    fun migratesFromV1ToV15PreservingRulesAndEvents() {
         helper.createDatabase(V1_TEST_DB, version = 1).use { db ->
             seedLegacyCore(db, includeUndone = false)
         }
@@ -79,7 +85,7 @@ class MigrationTest {
         helper
             .runMigrationsAndValidate(
                 V1_TEST_DB,
-                13,
+                15,
                 true,
                 *migrationsFrom(1),
             ).use { db ->
@@ -89,7 +95,7 @@ class MigrationTest {
 
     @Test
     @Throws(IOException::class)
-    fun migratesFromV2ToV13PreservingExcludedStatisticsState() {
+    fun migratesFromV2ToV15PreservingExcludedStatisticsState() {
         helper.createDatabase(V2_TEST_DB, version = 2).use { db ->
             seedLegacyCore(db, includeUndone = true)
         }
@@ -97,7 +103,7 @@ class MigrationTest {
         helper
             .runMigrationsAndValidate(
                 V2_TEST_DB,
-                13,
+                15,
                 true,
                 *migrationsFrom(2),
             ).use { db ->
@@ -107,7 +113,7 @@ class MigrationTest {
 
     @Test
     @Throws(IOException::class)
-    fun migratesFromV10ToV13ConvertingBinaryAdFeedback() {
+    fun migratesFromV10ToV15ConvertingBinaryAdFeedback() {
         helper.createDatabase(V10_TEST_DB, version = 10).use { db ->
             seedVersion10CoreAndBinaryFeedback(db)
         }
@@ -115,7 +121,7 @@ class MigrationTest {
         helper
             .runMigrationsAndValidate(
                 V10_TEST_DB,
-                13,
+                15,
                 true,
                 *migrationsFrom(10),
             ).use { db ->
@@ -126,7 +132,7 @@ class MigrationTest {
 
     @Test
     @Throws(IOException::class)
-    fun migratesFromV12ToV13PreservingDailyHistoryAndSemanticPrior() {
+    fun migratesFromV12ToV15PreservingDailyHistoryAndSemanticPrior() {
         helper.createDatabase(V12_TEST_DB, version = 12).use { db ->
             db.execSQL(
                 "INSERT INTO daily_insights " +
@@ -138,24 +144,28 @@ class MigrationTest {
                     "VALUES ('com.example.bank', 'SECURITY', 4)",
             )
         }
+        val migrationStartedAtMillis = System.currentTimeMillis()
 
         helper
             .runMigrationsAndValidate(
                 V12_TEST_DB,
-                13,
+                15,
                 true,
                 AppDatabase.MIGRATION_12_13,
+                AppDatabase.MIGRATION_13_14,
+                AppDatabase.MIGRATION_14_15,
             ).use { db ->
                 db
                     .query(
                         "SELECT total_notifications, muted_count, rule_breakdown_complete, " +
                             "monitor_rule_breakdown_complete, app_breakdown_complete, " +
-                            "channel_breakdown_complete FROM daily_insights WHERE epoch_day = 20000",
+                            "channel_breakdown_complete, source_complete FROM daily_insights " +
+                            "WHERE epoch_day = 20000",
                     ).use { cursor ->
                         assertTrue(cursor.moveToFirst())
                         assertEquals(4, cursor.getInt(0))
                         assertEquals(3, cursor.getInt(1))
-                        repeat(4) { index -> assertEquals(0, cursor.getInt(index + 2)) }
+                        repeat(5) { index -> assertEquals(0, cursor.getInt(index + 2)) }
                     }
                 db
                     .query(
@@ -165,6 +175,170 @@ class MigrationTest {
                         assertTrue(cursor.moveToFirst())
                         assertEquals(4, cursor.getInt(0))
                     }
+                val incompleteUntilMillis = db.rateIncompleteUntilMillis()
+                assertTrue(
+                    incompleteUntilMillis >= incompleteUntilAfter(migrationStartedAtMillis),
+                )
+                assertRateOccurrenceFoundationWork(
+                    db,
+                    expectedIncompleteUntilMillis = incompleteUntilMillis,
+                )
+            }
+    }
+
+    @Test
+    @Throws(IOException::class)
+    fun migratesFromV14BackfillingValidFeedbackAndMarkingLegacyRollupsIncomplete() {
+        helper.createDatabase(V14_TEST_DB, version = 14).use { db ->
+            db.execSQL(
+                "INSERT INTO daily_insights " +
+                    "(epoch_day, window_start_millis, window_end_millis, total_notifications, " +
+                    "muted_count, generated_at_millis) VALUES (20000, 0, 1, 4, 3, 5)",
+            )
+            db.execSQL(
+                "INSERT INTO notification_events " +
+                    "(id, package_name, posted_at_millis, action, recorded_at_millis, undone) VALUES " +
+                    "(1, 'com.example.valid', 100, 'KEEP', 101, 0), " +
+                    "(2, 'com.example.invalid', 200, 'KEEP', 201, 0)",
+            )
+            db.execSQL(
+                "INSERT INTO llm_observations " +
+                    "(notification_event_id, package_name, predicted_is_ad, predicted_intent, " +
+                    "confidence_score, corrected_is_ad, corrected_intent, analyzed_at_millis) VALUES " +
+                    "(1, 'com.example.valid', 0, 'OTHER', 0.8, 0, 'DELIVERY', 1234), " +
+                    "(2, 'com.example.invalid', 0, 'OTHER', 0.8, 0, 'NOT_A_REAL_INTENT', 2345)",
+            )
+        }
+
+        helper
+            .runMigrationsAndValidate(
+                V14_TEST_DB,
+                15,
+                true,
+                AppDatabase.MIGRATION_14_15,
+            ).use { db ->
+                db
+                    .query(
+                        "SELECT source_event_id, package_name, corrected_intent, recorded_at_millis " +
+                            "FROM local_semantic_feedback",
+                    ).use { cursor ->
+                        assertTrue(cursor.moveToFirst())
+                        assertEquals(1L, cursor.getLong(0))
+                        assertEquals("com.example.valid", cursor.getString(1))
+                        assertEquals("DELIVERY", cursor.getString(2))
+                        assertEquals(1234L, cursor.getLong(3))
+                        assertTrue(!cursor.moveToNext())
+                    }
+                db.query("SELECT COUNT(*) FROM daily_insight_source_gaps").use { cursor ->
+                    assertTrue(cursor.moveToFirst())
+                    assertEquals(0, cursor.getInt(0))
+                }
+                db
+                    .query(
+                        "SELECT source_complete FROM daily_insights WHERE epoch_day = 20000",
+                    ).use { cursor ->
+                        assertTrue(cursor.moveToFirst())
+                        // v14 did not retain source-loss provenance, so completeness is unknowable.
+                        assertEquals(0, cursor.getInt(0))
+                    }
+            }
+    }
+
+    @Test
+    @Throws(IOException::class)
+    fun migratesFromV13ToV14WithoutGuessingLegacyOccurrences() {
+        helper.createDatabase(V13_TEST_DB, version = 13).use { db ->
+            db.execSQL(
+                "INSERT INTO notification_events " +
+                    "(id, package_name, posted_at_millis, action, recorded_at_millis, undone) " +
+                    "VALUES (1, 'com.example.first', 100, 'KEEP', 101, 0)",
+            )
+            db.execSQL(
+                "INSERT INTO notification_events " +
+                    "(id, package_name, posted_at_millis, action, recorded_at_millis, undone) " +
+                    "VALUES (2, 'com.example.second', 500, 'KEEP', 501, 0)",
+            )
+        }
+
+        val migrationStartedAtMillis = System.currentTimeMillis()
+        helper
+            .runMigrationsAndValidate(
+                V13_TEST_DB,
+                14,
+                true,
+                AppDatabase.MIGRATION_13_14,
+            ).use { db ->
+                db
+                    .query(
+                        "SELECT package_name, posted_at_millis " +
+                            "FROM notification_events ORDER BY id",
+                    ).use { cursor ->
+                        assertTrue(cursor.moveToFirst())
+                        assertEquals("com.example.first", cursor.getString(0))
+                        assertEquals(100L, cursor.getLong(1))
+                        assertTrue(cursor.moveToNext())
+                        assertEquals("com.example.second", cursor.getString(0))
+                        assertEquals(500L, cursor.getLong(1))
+                    }
+                assertRateOccurrenceFoundationWork(
+                    db,
+                    expectedIncompleteUntilMillis =
+                        db.conservativeRateIncompleteUntil(migrationStartedAtMillis),
+                )
+            }
+    }
+
+    @Test
+    @Throws(IOException::class)
+    fun migratesFutureDatedV13WithSaturatedIncompleteRateState() {
+        helper.createDatabase(V13_FUTURE_TEST_DB, version = 13).use { db ->
+            db.execSQL(
+                "INSERT INTO notification_events " +
+                    "(id, package_name, posted_at_millis, action, recorded_at_millis, undone) " +
+                    "VALUES (1, 'com.example.future', ?, 'KEEP', ?, 0)",
+                arrayOf(Long.MAX_VALUE, Long.MAX_VALUE),
+            )
+        }
+
+        helper
+            .runMigrationsAndValidate(
+                V13_FUTURE_TEST_DB,
+                14,
+                true,
+                AppDatabase.MIGRATION_13_14,
+            ).use { db ->
+                assertRateOccurrenceFoundationWork(
+                    db,
+                    expectedIncompleteUntilMillis = Long.MAX_VALUE,
+                )
+            }
+    }
+
+    @Test
+    @Throws(IOException::class)
+    fun migratesEmptyV13DatabaseWithConservativeIncompleteRateState() {
+        helper.createDatabase(V13_EMPTY_TEST_DB, version = 13).close()
+        val migrationStartedAtMillis = System.currentTimeMillis()
+
+        helper
+            .runMigrationsAndValidate(
+                V13_EMPTY_TEST_DB,
+                14,
+                true,
+                AppDatabase.MIGRATION_13_14,
+            ).use { db ->
+                val migrationFinishedAtMillis = System.currentTimeMillis()
+                val incompleteUntilMillis = db.rateIncompleteUntilMillis()
+                assertTrue(
+                    incompleteUntilMillis >= incompleteUntilAfter(migrationStartedAtMillis),
+                )
+                assertTrue(
+                    incompleteUntilMillis <= incompleteUntilAfter(migrationFinishedAtMillis),
+                )
+                assertRateOccurrenceFoundationWork(
+                    db,
+                    expectedIncompleteUntilMillis = incompleteUntilMillis,
+                )
             }
     }
 
@@ -479,11 +653,13 @@ class MigrationTest {
         db
             .query(
                 "SELECT rule_breakdown_complete, monitor_rule_breakdown_complete, " +
-                    "app_breakdown_complete, channel_breakdown_complete " +
+                    "app_breakdown_complete, channel_breakdown_complete, source_complete " +
                     "FROM daily_insights WHERE epoch_day = 20000",
             ).use { cursor ->
                 assertTrue(cursor.moveToFirst())
                 repeat(4) { index -> assertEquals(0, cursor.getInt(index)) }
+                // Every pre-v15 rollup must remain conservative until it is rebuilt.
+                assertEquals(0, cursor.getInt(4))
             }
         val indexNames = mutableSetOf<String>()
         db.query("PRAGMA index_list('notification_events')").use { cursor ->
@@ -499,12 +675,89 @@ class MigrationTest {
         )
     }
 
+    private fun assertRateOccurrenceFoundationWork(
+        db: SupportSQLiteDatabase,
+        expectedIncompleteUntilMillis: Long,
+    ) {
+        db.query("SELECT COUNT(*) FROM active_notification_rate_occurrences").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(0, cursor.getInt(0))
+        }
+        db.query("SELECT COUNT(*) FROM notification_rate_occurrence_history").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(0, cursor.getInt(0))
+        }
+        db
+            .query(
+                "SELECT singleton_id, incomplete_until_millis FROM notification_rate_state",
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(0, cursor.getInt(0))
+                assertEquals(expectedIncompleteUntilMillis, cursor.getLong(1))
+            }
+
+        val activeIndexes = db.indexesFor("active_notification_rate_occurrences")
+        assertEquals(
+            1,
+            activeIndexes["index_active_notification_rate_occurrences_occurrence_id"],
+        )
+        assertEquals(
+            0,
+            activeIndexes[
+                "index_active_notification_rate_occurrences_last_posted_at_millis_occurrence_id",
+            ],
+        )
+        val historyIndexes = db.indexesFor("notification_rate_occurrence_history")
+        assertEquals(
+            0,
+            historyIndexes[
+                "index_notification_rate_occurrence_history_latest_posted_at_millis_occurrence_id",
+            ],
+        )
+    }
+
+    private fun SupportSQLiteDatabase.indexesFor(tableName: String): Map<String, Int> =
+        buildMap {
+            query("PRAGMA index_list('$tableName')").use { cursor ->
+                val nameIndex = cursor.getColumnIndexOrThrow("name")
+                val uniqueIndex = cursor.getColumnIndexOrThrow("unique")
+                while (cursor.moveToNext()) {
+                    put(cursor.getString(nameIndex), cursor.getInt(uniqueIndex))
+                }
+            }
+        }
+
+    private fun SupportSQLiteDatabase.rateIncompleteUntilMillis(): Long =
+        query("SELECT incomplete_until_millis FROM notification_rate_state WHERE singleton_id = 0").use { cursor ->
+            check(cursor.moveToFirst())
+            cursor.getLong(0)
+        }
+
+    private fun SupportSQLiteDatabase.conservativeRateIncompleteUntil(migrationStartedAtMillis: Long): Long =
+        rateIncompleteUntilMillis().also { incompleteUntilMillis ->
+            assertTrue(
+                incompleteUntilMillis >= incompleteUntilAfter(migrationStartedAtMillis),
+            )
+        }
+
+    private fun incompleteUntilAfter(anchorMillis: Long): Long =
+        if (anchorMillis > Long.MAX_VALUE - RATE_WINDOW_PLUS_ONE) {
+            Long.MAX_VALUE
+        } else {
+            anchorMillis + RATE_WINDOW_PLUS_ONE
+        }
+
     private companion object {
         const val TEST_DB = "migration-test"
         const val V1_TEST_DB = "migration-v1-test"
         const val V2_TEST_DB = "migration-v2-test"
         const val V10_TEST_DB = "migration-v10-test"
         const val V12_TEST_DB = "migration-v12-test"
+        const val V13_TEST_DB = "migration-v13-test"
+        const val V13_EMPTY_TEST_DB = "migration-v13-empty-test"
+        const val V13_FUTURE_TEST_DB = "migration-v13-future-test"
+        const val V14_TEST_DB = "migration-v14-test"
+        const val RATE_WINDOW_PLUS_ONE = MAX_RATE_WINDOW_MILLIS + 1L
 
         fun migrationsFrom(version: Int): Array<Migration> =
             listOf(
@@ -520,6 +773,8 @@ class MigrationTest {
                 AppDatabase.MIGRATION_10_11,
                 AppDatabase.MIGRATION_11_12,
                 AppDatabase.MIGRATION_12_13,
+                AppDatabase.MIGRATION_13_14,
+                AppDatabase.MIGRATION_14_15,
             ).filter { migration -> migration.startVersion >= version }
                 .toTypedArray()
     }

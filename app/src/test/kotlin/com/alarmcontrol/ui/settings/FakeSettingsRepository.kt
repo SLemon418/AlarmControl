@@ -18,6 +18,7 @@ class FakeSettingsRepository(
 ) : SettingsRepository {
     val operationLog = mutableListOf<String>()
     var beforeSetContentExcludedPackages: suspend (Set<String>) -> Unit = {}
+    var beforeSetNotificationContentStorageEnabled: suspend (Boolean) -> Unit = {}
     private val state = MutableStateFlow(enabled)
     private val filteringState = MutableStateFlow(filtering)
     private val llmState = MutableStateFlow(llmEnabled)
@@ -75,6 +76,7 @@ class FakeSettingsRepository(
     }
 
     override suspend fun setNotificationContentStorageEnabled(enabled: Boolean) {
+        beforeSetNotificationContentStorageEnabled(enabled)
         operationLog += "content-storage:$enabled"
         contentStorageState.value = enabled
     }

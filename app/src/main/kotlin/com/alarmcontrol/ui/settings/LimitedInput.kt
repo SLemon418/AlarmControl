@@ -1,5 +1,6 @@
 package com.alarmcontrol.ui.settings
 
+import com.alarmcontrol.core.backup.MAX_BACKUP_FILE_BYTES
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.OutputStream
@@ -9,7 +10,7 @@ import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 
 /** Reads a UTF-8 backup while bounding memory use before JSON parsing. */
-internal fun InputStream.readBackupText(maxBytes: Int = MAX_BACKUP_BYTES): String {
+internal fun InputStream.readBackupText(maxBytes: Int = MAX_BACKUP_FILE_BYTES): String {
     require(maxBytes > 0) { "Backup size limit must be positive" }
     val output = WipingByteArrayOutputStream()
     val buffer = ByteArray(BUFFER_BYTES)
@@ -46,9 +47,14 @@ internal fun InputStream.readBackupText(maxBytes: Int = MAX_BACKUP_BYTES): Strin
 }
 
 /** Writes a backup without retaining an additional immutable UTF-8 byte array. */
-internal fun OutputStream.writeBackupText(text: String) {
+internal fun OutputStream.writeBackupText(
+    text: String,
+    maxBytes: Int = MAX_BACKUP_FILE_BYTES,
+) {
+    require(maxBytes > 0) { "Backup size limit must be positive" }
     val bytes = text.toByteArray(Charsets.UTF_8)
     try {
+        require(bytes.size <= maxBytes) { "Backup file is too large" }
         write(bytes)
     } finally {
         bytes.fill(0)
@@ -63,4 +69,3 @@ private class WipingByteArrayOutputStream : ByteArrayOutputStream() {
 }
 
 private const val BUFFER_BYTES = 8 * 1_024
-private const val MAX_BACKUP_BYTES = 32 * 1_024 * 1_024

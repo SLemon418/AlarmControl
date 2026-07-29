@@ -62,6 +62,12 @@ APK와 App Bundle 경로는 AGP 리소스 축소를 적용한 상태로 모두 �
 `bundleRelease`는 로컬 및 CI 호환성 확인을 위해 키 저장소 없이도 실행할 수 있지만 AAB는
 현재 배포 산출물이 아니며, 이 작업의 성공만으로 출시 가능한 상태가 되지 않습니다.
 
+첫 Release 전에 장기간 유지할 Android 업데이트 키 저장소 하나를 만들고 안전하게
+백업합니다. `keytool -list -v` 등으로 인증서 SHA-256을 별도로 확인한 뒤 콜론을 제거한
+64자리 16진수로 `config/release-signing-certificate.sha256`의 대기 값을 교체합니다.
+지문은 공개 정보지만 키 저장소와 비밀번호는 공개하거나 커밋하면 안 됩니다. 이 공개
+지문이 유효하게 커밋되기 전에는 `releaseCandidate`가 의도적으로 실패합니다.
+
 GitHub Releases 배포본을 만들 때는 네 환경 변수를 모두 제공하고 명시적인 배포 후보
 게이트를 실행합니다. 키 저장소와 자격 증명은 커밋하지 않습니다.
 
@@ -77,7 +83,8 @@ export ALARMCONTROL_KEY_PASSWORD="..."
 실행 가능한 품질·오프라인 검사 전체, 계측 테스트 APK와 Baseline Profile 변형 컴파일,
 의미 분류기 raw 45MiB, 비의미 물리 payload 140MiB, 전체 물리 APK 185MiB 상한을
 검사합니다. 또한 의미 asset 네 개와 manifest 해시를 확인한 뒤 minSdk 26 기준으로
-`apksigner` 검증을 수행합니다. 검증된 범용 APK는
+`apksigner` 검증을 수행하고 유일한 서명자가 커밋된 업데이트 인증서 지문과 일치하는지
+확인합니다. 검증된 범용 APK는
 `app/build/outputs/apk/release/` 아래 유일한 APK입니다. 이 APK만 GitHub 배포 후보이며
 `bundleRelease`는 기존 AAB 상한을 유지한 CI와 형식 회귀 확인용 산출물로 남습니다.
 
@@ -96,8 +103,10 @@ Release 워크플로는 `vMAJOR.MINOR.PATCH` 태그를 push할 때만 실행합�
 모든 strict SemVer Release 태그의 커밋된 메타데이터를 확인합니다. 현재 코드가 그
 모두보다 크지 않으면 거부하므로 과거 커밋에 Release 태그를 뒤늦게 붙여도 우회할 수
 없습니다. 해당 태그가 없는 첫 Release는 허용하며, 비교에는 checkout이 받은 Git 이력만
-사용하고 추가 네트워크 요청을 하지 않습니다. `github-release` Environment에 다음
-secret을 설정합니다.
+사용하고 추가 네트워크 요청을 하지 않습니다. 서명과 게시 전에는 checkout이 태그가
+가리키는 정확한 커밋인지 확인하고, 그 checkout에서 `:data`, `:ml`, `:app`
+`pixel2Api34DebugAndroidTest`를 실행합니다. `github-release` Environment에 다음 secret을
+설정합니다.
 
 - `ALARMCONTROL_KEYSTORE_BASE64`
 - `ALARMCONTROL_KEYSTORE_PASSWORD`
@@ -112,8 +121,8 @@ base64 < /absolute/path/to/release.jks |
   gh secret set ALARMCONTROL_KEYSTORE_BASE64 --env github-release
 ```
 
-품질, 오프라인, 테스트 APK 컴파일과 서명 게이트를 모두 통과하면 워크플로가 다음 자산을
-포함한 Release를 만듭니다.
+Managed Device, 품질, 오프라인, 테스트 APK 컴파일과 서명 게이트를 모두 통과하면
+워크플로가 다음 자산을 포함한 Release를 만듭니다.
 
 - `AlarmControl-<version>-universal.apk`
 - `AlarmControl-<version>-universal.apk.sha256`
@@ -170,7 +179,7 @@ JVM 테스트는 실제 Android 런타임 검증을 대체하지 않습니다. �
 
 계측 테스트 APK 컴파일을 실제 기기 테스트 실행으로 보고하지 않습니다.
 
-현재 Room 테스트는 v1, v2, v3, v10, v12에서 v13까지의 실제 경로와 기존 이진 광고
+현재 Room 테스트는 v1, v2, v3, v10, v12에서 v15까지의 실제 경로와 기존 이진 광고
 관찰값의 7종 의미 prior 이관을 검증합니다.
 `:baselineprofile:assemble`은 기기를 시작하지 않고 생성기 변형을 컴파일하며 프로필 수집은
 명시적인 별도 작업입니다.
@@ -202,11 +211,12 @@ mkdir -p "$ANDROID_AVD_HOME"
 
 PR에서는 JVM/Robolectric, detekt, ktlint, Android Lint, 오프라인 가드, Debug/Release APK,
 Release AAB, 모든 계측 APK와 Baseline Profile 생성기 변형을 검사합니다. main 변경, 매일
-예약 실행, 수동 실행에서는 Managed Device 테스트까지 수행합니다. 두 작업 모두 Gradle
-wrapper 검증을 먼저 실행하고 `gradle/verification-metadata.xml`의 SHA-256을 strict 모드로
-확인합니다. 루트 `verifyCiActionPins` 게이트는 워크플로, 재사용 워크플로, composite action
-YAML을 모두 검사하며 원격 Action은 40자 커밋 SHA, 컨테이너 Action은 SHA-256 이미지
-digest로 고정해야 합니다. 실패 보고서는 CI artifact로 보존합니다.
+예약 실행, 수동 실행에서는 Managed Device 테스트까지 수행합니다. strict SemVer Release
+태그도 태그 커밋에서 같은 테스트를 별도로 다시 실행하며, 실패하면 게시할 수 없습니다.
+각 작업은 Gradle wrapper 검증을 먼저 실행하고 `gradle/verification-metadata.xml`의
+SHA-256을 strict 모드로 확인합니다. 루트 `verifyCiActionPins` 게이트는 워크플로, 재사용
+워크플로, composite action YAML을 모두 검사하며 원격 Action은 40자 커밋 SHA, 컨테이너
+Action은 SHA-256 이미지 digest로 고정해야 합니다. 실패 보고서는 CI artifact로 보존합니다.
 
 ## Baseline Profile과 오프라인 시작 벤치마크
 

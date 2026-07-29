@@ -100,6 +100,51 @@ class LocalLlmModelStoreTest {
     }
 
     @Test
+    fun `startup recovery removes stale staging without touching live or rollback pairs`() {
+        val model = temporaryFolder.root.resolve("startup-recovery/model.task")
+        val store = LocalLlmModelStore(model)
+        store.install(byteArrayOf(9).inputStream())
+        store.stage(byteArrayOf(1, 2).inputStream()).activate()
+        val directory = requireNotNull(model.parentFile)
+        val metadata = directory.resolve("model.task.sha256")
+        val previous = directory.resolve("model.task.previous")
+        val previousMetadata = directory.resolve("model.task.sha256.previous")
+        val liveMetadata = metadata.readBytes()
+        val rollbackMetadata = previousMetadata.readBytes()
+        directory.resolve("model.task.installing").writeBytes(byteArrayOf(7, 8, 9))
+        directory.resolve("model.task.sha256.installing").writeText("partial")
+
+        store.recoverStaleStagingAtStartup()
+
+        assertFalse(directory.resolve("model.task.installing").exists())
+        assertFalse(directory.resolve("model.task.sha256.installing").exists())
+        assertArrayEquals(byteArrayOf(1, 2), model.readBytes())
+        assertArrayEquals(liveMetadata, metadata.readBytes())
+        assertArrayEquals(byteArrayOf(9), previous.readBytes())
+        assertArrayEquals(rollbackMetadata, previousMetadata.readBytes())
+        assertEquals(2L, store.verifyInstalledModel()?.sizeBytes)
+        assertTrue(previous.isFile)
+        assertEquals(1L, store.restorePreviousModel()?.sizeBytes)
+        assertArrayEquals(byteArrayOf(9), model.readBytes())
+    }
+
+    @Test
+    fun `constructing another store does not remove a stage owned by this process`() {
+        val model = temporaryFolder.root.resolve("active-stage/model.task")
+        val store = LocalLlmModelStore(model)
+        val staged = store.stage(byteArrayOf(1, 2, 3).inputStream())
+        val directory = requireNotNull(model.parentFile)
+
+        LocalLlmModelStore(model)
+
+        assertTrue(directory.resolve("model.task.installing").isFile)
+        assertTrue(directory.resolve("model.task.sha256.installing").isFile)
+        staged.activate()
+        staged.commit()
+        assertArrayEquals(byteArrayOf(1, 2, 3), model.readBytes())
+    }
+
+    @Test
     fun `a verified previous model can replace an incompatible live replacement`() {
         val model = temporaryFolder.root.resolve("restore-previous/model.task")
         val store = LocalLlmModelStore(model)

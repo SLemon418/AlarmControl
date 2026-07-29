@@ -3,6 +3,7 @@ package com.alarmcontrol.data.repository
 import com.alarmcontrol.core.filtering.SemanticIntent
 import com.alarmcontrol.core.insights.ActionBreakdown
 import com.alarmcontrol.core.insights.AppInsightCount
+import com.alarmcontrol.core.insights.CURRENT_DAILY_INSIGHT_BREAKDOWN_VERSION
 import com.alarmcontrol.core.insights.CategoryCount
 import com.alarmcontrol.core.insights.ChannelCount
 import com.alarmcontrol.core.insights.DailyInsight
@@ -99,7 +100,8 @@ class DailyInsightRepositoryImpl
                             dao.countCategoryCorrectionsBetween(epochDay, startMillis, endMillis),
                         semanticCorrectionCount =
                             dao.countSemanticCorrectionsBetween(epochDay, startMillis, endMillis),
-                        breakdownVersion = CURRENT_BREAKDOWN_VERSION,
+                        breakdownVersion = CURRENT_DAILY_INSIGHT_BREAKDOWN_VERSION,
+                        sourceComplete = !dao.hasSourceGap(epochDay),
                         ruleBreakdownComplete =
                             dao.countMatchedRulesBetween(epochDay, startMillis, endMillis) <= topRules,
                         monitorRuleBreakdownComplete =
@@ -135,7 +137,6 @@ class DailyInsightRepositoryImpl
 
         private companion object {
             const val BREAKDOWN_LIMIT = 50
-            const val CURRENT_BREAKDOWN_VERSION = 2
             const val MAX_RULE_BREAKDOWN_LIMIT = 1_000
             const val MAX_DAILY_INSIGHT_READ_LIMIT = 3_650
         }

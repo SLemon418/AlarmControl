@@ -125,6 +125,16 @@ class ConditionTest {
     }
 
     @Test
+    fun `negated frequency remains unknown when its count is unavailable`() {
+        val condition =
+            Condition.Not(
+                Condition.RateAtLeast(RateScope.PACKAGE, 60_000, threshold = 2),
+            )
+
+        assertEquals(ConditionResult.UNKNOWN, condition.evaluate(snapshot()))
+    }
+
+    @Test
     fun `frequency constructor rejects unsupported windows and thresholds`() {
         assertThrows(IllegalArgumentException::class.java) {
             Condition.RateAtLeast(RateScope.PACKAGE, 59_999, 2)

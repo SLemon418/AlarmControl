@@ -1,6 +1,10 @@
 package com.alarmcontrol.data.insights
 
+import com.alarmcontrol.core.filtering.MAX_RETAINED_NOTIFICATION_EVENTS
+import com.alarmcontrol.core.filtering.MAX_RETAINED_NOTIFICATION_TRACE_EVENTS
 import com.alarmcontrol.core.filtering.NotificationEventRepository
+import com.alarmcontrol.core.filtering.RateOccurrencePersistenceResult
+import com.alarmcontrol.core.filtering.RateOccurrenceRepository
 import com.alarmcontrol.core.insights.DailyInsightRepository
 import com.alarmcontrol.core.insights.InsightsAnalyzer
 import com.alarmcontrol.core.insights.InsightsReport
@@ -26,10 +30,11 @@ import javax.inject.Singleton
  * framework-free logic so it is unit-testable without WorkManager — the `:app` worker is just a thin
  * shell that calls [run]. Everything is local: SQL aggregation + a DataStore write, no network.
  *
- * Each run: (1) removes expired encrypted content, (2) files completed-day rollups before raw-event
- * retention can truncate their oldest day, (3) deletes expired event rows, (4) computes and saves
- * the compact headline, and (5) caps the event table. Both retention deletion and size trimming
- * happen after daily aggregation so a high-volume day is counted before source rows disappear.
+ * Each run: (1) purges durable rate metadata outside every supported window, (2) removes expired
+ * encrypted content, (3) files completed-day rollups before raw-event retention can truncate their
+ * oldest day, (4) deletes expired event rows, (5) computes and saves the compact headline, and (6)
+ * caps the event table. Event deletion records a content-free source-gap marker for every affected
+ * local day, so later rollup invalidation never claims false completeness.
  */
 @Singleton
 class InsightsHousekeeper
@@ -40,6 +45,7 @@ class InsightsHousekeeper
         private val dailyInsightRepository: DailyInsightRepository,
         private val settingsRepository: SettingsRepository,
         private val localDataRepository: LocalDataRepository,
+        private val rateOccurrenceRepository: RateOccurrenceRepository,
         private val maintenancePolicyAccessGuard: MaintenancePolicyAccessGuard =
             MaintenancePolicyAccessGuard(),
     ) {
@@ -55,6 +61,7 @@ class InsightsHousekeeper
                     val purged =
                         maintenancePolicyAccessGuard.withLock {
                             val settings = settingsRepository.maintenanceSnapshot()
+                            purgeExpiredRateHistory(nowMillis)
                             val eventRetentionDays = settings.eventRetentionDays.toLong()
                             val dailyRetentionDays = settings.dailyInsightRetentionDays.toLong()
                             // Retry privacy cleanup after an earlier UI-triggered deletion failure.
@@ -70,6 +77,7 @@ class InsightsHousekeeper
                             )
                             eventRepository.purgeEventsOlderThan(
                                 nowMillis - eventRetentionDays * DAY_MILLIS,
+                                zoneId,
                             )
                         }
 
@@ -94,10 +102,10 @@ class InsightsHousekeeper
 
                     summaryRepository.save(report.toSummary(nowMillis))
 
-                    // Size guard after every aggregation: retain only the newest raw rows without
-                    // undercounting the day that was just summarized.
-                    eventRepository.trimToMostRecent(MAX_EVENTS)
-                    eventRepository.trimDecisionTracesToMostRecent(MAX_TRACE_EVENTS)
+                    // Size guard after every aggregation. Every affected day is marked incomplete
+                    // in the same database transaction as deletion.
+                    eventRepository.trimToMostRecent(MAX_RETAINED_NOTIFICATION_EVENTS, zoneId)
+                    eventRepository.trimDecisionTracesToMostRecent(MAX_RETAINED_NOTIFICATION_TRACE_EVENTS)
 
                     report
                 }.fold(
@@ -105,6 +113,14 @@ class InsightsHousekeeper
                     onFailure = { DataResult.Failure(it) },
                 )
             }
+
+        private suspend fun purgeExpiredRateHistory(nowMillis: Long) {
+            when (rateOccurrenceRepository.purgeExpiredHistory(nowMillis)) {
+                is RateOccurrencePersistenceResult.Success -> Unit
+                is RateOccurrencePersistenceResult.Unavailable ->
+                    throw RateOccurrenceMaintenanceException()
+            }
+        }
 
         private suspend fun aggregateDailyHistory(
             nowMillis: Long,
@@ -196,8 +212,6 @@ class InsightsHousekeeper
 
         private companion object {
             const val DAY_MILLIS = 24L * 60 * 60 * 1000
-            const val MAX_EVENTS = 10_000
-            const val MAX_TRACE_EVENTS = 1_000
             const val MAX_BACKFILL_DAYS = 7
             const val RULE_BREAKDOWN_LIMIT = 50
             const val WINDOW_DAYS = 7L
@@ -206,3 +220,6 @@ class InsightsHousekeeper
             const val ANOMALY_SPIKE_FACTOR = 2
         }
     }
+
+private class RateOccurrenceMaintenanceException :
+    IllegalStateException("Durable notification-rate maintenance is unavailable")

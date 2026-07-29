@@ -3,6 +3,7 @@ package com.alarmcontrol.data.repository
 import app.cash.turbine.test
 import com.alarmcontrol.core.feedback.CategoryFeedback
 import com.alarmcontrol.data.db.dao.CategoryFeedbackDao
+import com.alarmcontrol.data.db.entity.CategoryFeedbackEntity
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -121,5 +122,28 @@ class FeedbackRepositoryImplTest {
             repository.recordCorrection(correction("social", eventId = "7"))
 
             assertEquals(listOf(7L), dailyInsightDao.invalidatedEventIds)
+        }
+
+    @Test
+    fun `feedback cap invalidates linked victim before trimming it`() =
+        runTest {
+            dao.seedRows(
+                List(CategoryFeedbackDao.MAX_RETAINED_ROWS) { index ->
+                    CategoryFeedbackEntity(
+                        id = index + 1L,
+                        packageName = "com.example.$index",
+                        notificationEventId = if (index == 0) 77L else null,
+                        predictedLabel = "promotion",
+                        correctedLabel = "social",
+                        recordedAtMillis = index.toLong(),
+                    )
+                },
+            )
+
+            repository.recordCorrection(correction("news"))
+
+            assertEquals(listOf(77L), dailyInsightDao.invalidatedEventIds)
+            assertEquals(CategoryFeedbackDao.MAX_RETAINED_ROWS, dao.countAll())
+            assertEquals(emptyList<Long>(), dao.inserted.mapNotNull { it.notificationEventId })
         }
 }

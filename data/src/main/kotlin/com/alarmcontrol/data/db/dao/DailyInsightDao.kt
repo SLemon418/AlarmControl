@@ -14,6 +14,7 @@ import com.alarmcontrol.data.db.entity.DailyInsightHourCountEntity
 import com.alarmcontrol.data.db.entity.DailyInsightMonitorRuleCountEntity
 import com.alarmcontrol.data.db.entity.DailyInsightRuleCountEntity
 import com.alarmcontrol.data.db.entity.DailyInsightSemanticCountEntity
+import com.alarmcontrol.data.db.entity.DailyInsightSourceGapEntity
 import com.alarmcontrol.data.db.model.StoredRuleAction
 import com.alarmcontrol.data.db.relation.DailyInsightWithBreakdown
 import kotlinx.coroutines.flow.Flow
@@ -284,6 +285,9 @@ interface DailyInsightDao {
     @Insert
     suspend fun insertSemanticCounts(rows: List<DailyInsightSemanticCountEntity>)
 
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertSourceGaps(rows: List<DailyInsightSourceGapEntity>)
+
     @Query("DELETE FROM daily_insight_rule_counts WHERE epoch_day = :epochDay")
     suspend fun deleteRuleCounts(epochDay: Long)
 
@@ -324,6 +328,9 @@ interface DailyInsightDao {
         insertAppCounts(write.appCounts)
         insertHourCounts(write.hourCounts)
         insertSemanticCounts(write.semanticCounts)
+        if (!write.sourceComplete) {
+            insertSourceGaps(listOf(DailyInsightSourceGapEntity(insight.epochDay)))
+        }
     }
 
     /** Retention housekeeping: deletes rollups before [epochDay]; breakdown rows cascade. */
@@ -332,6 +339,21 @@ interface DailyInsightDao {
 
     @Query("DELETE FROM daily_insights")
     suspend fun deleteAll(): Int
+
+    @Query("DELETE FROM daily_insight_source_gaps")
+    suspend fun deleteAllSourceGaps(): Int
+
+    @Query("SELECT EXISTS(SELECT 1 FROM daily_insight_source_gaps WHERE epoch_day = :epochDay)")
+    suspend fun hasSourceGap(epochDay: Long): Boolean
+
+    @Query(
+        "SELECT epoch_day FROM daily_insight_source_gaps " +
+            "WHERE epoch_day BETWEEN :startEpochDay AND :endEpochDay ORDER BY epoch_day ASC",
+    )
+    fun observeSourceGapDaysBetween(
+        startEpochDay: Long,
+        endEpochDay: Long,
+    ): Flow<List<Long>>
 
     /**
      * Removes a completed-day rollup whose category/semantic correction just changed. The next
@@ -346,6 +368,24 @@ interface DailyInsightDao {
             "AND event.posted_at_millis < daily_insights.window_end_millis)))",
     )
     suspend fun deleteContainingEvent(eventId: Long): Int
+
+    /**
+     * Invalidates only rollups whose raw events currently carry linked category or semantic
+     * corrections. Package priors and detached learning votes never enter a historical rollup.
+     */
+    @Query(
+        "DELETE FROM daily_insights WHERE EXISTS (" +
+            "SELECT 1 FROM notification_events AS event WHERE (" +
+            "EXISTS (SELECT 1 FROM category_feedback AS feedback " +
+            "WHERE feedback.notification_event_id = event.id) OR " +
+            "EXISTS (SELECT 1 FROM llm_observations AS llm " +
+            "WHERE llm.notification_event_id = event.id AND " +
+            "(llm.corrected_intent IS NOT NULL OR llm.corrected_is_ad IS NOT NULL))) AND (" +
+            "(event.posted_epoch_day IS NOT NULL AND event.posted_epoch_day = daily_insights.epoch_day) OR " +
+            "(event.posted_epoch_day IS NULL AND event.posted_at_millis >= daily_insights.window_start_millis " +
+            "AND event.posted_at_millis < daily_insights.window_end_millis)))",
+    )
+    suspend fun deleteRollupsAffectedByLinkedFeedback(): Int
 
     /** Most recent days first, with breakdowns attached, for the history UI. */
     @Transaction
@@ -389,6 +429,7 @@ data class DailyInsightWrite(
     val appCounts: List<DailyInsightAppCountEntity>,
     val hourCounts: List<DailyInsightHourCountEntity>,
     val semanticCounts: List<DailyInsightSemanticCountEntity>,
+    val sourceComplete: Boolean,
 )
 
 /** Projection for [DailyInsightDao.topRulesBetween]: a rule's stored id and its tally. */

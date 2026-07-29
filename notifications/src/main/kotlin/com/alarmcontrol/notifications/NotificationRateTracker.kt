@@ -1,256 +1,273 @@
 package com.alarmcontrol.notifications
 
 import com.alarmcontrol.core.filtering.MAX_RATE_WINDOW_MILLIS
-import com.alarmcontrol.core.filtering.NotificationRateEvent
 import com.alarmcontrol.core.filtering.NotificationSnapshot
+import com.alarmcontrol.core.filtering.PersistedRateOccurrence
+import com.alarmcontrol.core.filtering.RateOccurrenceId
 import com.alarmcontrol.core.filtering.RateScope
 import com.alarmcontrol.core.filtering.RateSignal
 
 /**
- * Content-free, in-memory frequency tracker for the notification hot path. It is seeded once from
- * Room when the listener connects, then updated without per-notification database reads.
+ * Content-free, in-memory frequency tracker for the notification hot path.
+ *
+ * The listener pipeline serializes durable occurrence writes and calls [record] only after they
+ * commit. Identity is therefore the opaque [RateOccurrenceId], not an Android listener key or a
+ * timestamp: an update moves one occurrence, while a remove followed by a repost has a new id.
  */
 class NotificationRateTracker {
-    private val packageEvents = mutableMapOf<String, MutableList<Long>>()
-    private val channelEvents = mutableMapOf<ChannelKey, MutableList<Long>>()
-    private val livePostsByKey = linkedMapOf<String, NotificationRateEvent>()
+    private val occurrencesById = mutableMapOf<RateOccurrenceId, PersistedRateOccurrence>()
+    private val packageOccurrences = mutableMapOf<String, MutableList<TimedOccurrence>>()
+    private val channelOccurrences = mutableMapOf<ChannelKey, MutableList<TimedOccurrence>>()
     private var initialized = false
-    private var newestTimestampMillis = Long.MIN_VALUE
+    private var coverageStartMillis = Long.MAX_VALUE
 
-    /** Replaces current state with at most the last 24 hours of local event metadata. */
+    /**
+     * Replaces current state with a bounded occurrence snapshot ending at [nowMillis].
+     *
+     * Only windows whose inclusive cutoff is at or after [coverageStartMillis] are exposed. Returns
+     * false when the snapshot exceeded the safety bound and the tracker became unavailable.
+     */
     @Synchronized
     fun seed(
-        events: List<NotificationRateEvent>,
+        occurrences: List<PersistedRateOccurrence>,
         nowMillis: Long,
-    ) {
-        val livePosts = livePostsByKey.values.toList()
-        packageEvents.clear()
-        channelEvents.clear()
-        val cutoff = nowMillis - MAX_RATE_WINDOW_MILLIS
-        mergeSeedAndLive(events, livePosts)
-            .asSequence()
-            .filter { it.postedAtMillis in cutoff..nowMillis }
-            .sortedBy { it.postedAtMillis }
-            .forEach(::append)
-        newestTimestampMillis = maxOf(nowMillis, livePosts.maxOfOrNull { it.postedAtMillis } ?: Long.MIN_VALUE)
-        prune(newestTimestampMillis - MAX_RATE_WINDOW_MILLIS)
-        initialized = true
-    }
-
-    /** Marks a failed seed; requested frequency signals then stay unknown instead of guessing. */
-    @Synchronized
-    fun markUnavailable() {
-        packageEvents.clear()
-        channelEvents.clear()
-        livePostsByKey.clear()
-        newestTimestampMillis = Long.MIN_VALUE
-        initialized = false
-    }
-
-    /**
-     * Records a post immediately, before optional ML/LLM work. Re-posts for the same listener [key]
-     * replace the prior timestamp instead of inflating frequency counts.
-     */
-    @Synchronized
-    fun record(
-        snapshot: NotificationSnapshot,
-        key: String,
-    ) {
-        val event = NotificationRateEvent(snapshot.packageName, snapshot.channelId, snapshot.postedAtMillis)
-        val previous = livePostsByKey[key]
-        if (previous == event) return
-        if (previous != null && event.postedAtMillis < previous.postedAtMillis) return
-        if (previous == null && livePostsByKey.size >= MAX_LIVE_KEYS) {
-            // Losing update identity could otherwise over-count a later repost and trigger a
-            // destructive rate rule. Degrade all rate signals to UNKNOWN until the next seed.
-            initialized = false
-            packageEvents.clear()
-            channelEvents.clear()
-            livePostsByKey.entries.iterator().let { iterator ->
-                if (iterator.hasNext()) {
-                    iterator.next()
-                    iterator.remove()
-                }
+        coverageStartMillis: Long = subtractSaturated(nowMillis, MAX_RATE_WINDOW_MILLIS),
+    ): Boolean {
+        clear()
+        val cutoff =
+            maxOf(
+                coverageStartMillis,
+                subtractSaturated(nowMillis, MAX_RATE_WINDOW_MILLIS),
+            )
+        val retainedById = mutableMapOf<RateOccurrenceId, PersistedRateOccurrence>()
+        occurrences.forEach { occurrence ->
+            if (occurrence.postedAtMillis !in cutoff..nowMillis) return@forEach
+            val previous = retainedById[occurrence.occurrenceId]
+            if (
+                previous == null ||
+                occurrence.postedAtMillis >= previous.postedAtMillis
+            ) {
+                retainedById[occurrence.occurrenceId] = occurrence
             }
         }
-        livePostsByKey[key] = event
-        if (initialized) {
-            previous?.let(::remove)
-            append(event)
+        if (retainedById.size > MAX_TRACKED_OCCURRENCES) {
+            markUnavailable()
+            return false
         }
-        newestTimestampMillis = maxOf(newestTimestampMillis, event.postedAtMillis)
-        prune(newestTimestampMillis - MAX_RATE_WINDOW_MILLIS)
+        retainedById.values
+            .sortedWith(
+                compareBy<PersistedRateOccurrence> { it.postedAtMillis }
+                    .thenBy { it.occurrenceId.value },
+            ).forEach { occurrence ->
+                occurrencesById[occurrence.occurrenceId] = occurrence
+                append(occurrence)
+            }
+        this.coverageStartMillis = cutoff
+        initialized = true
+        return true
     }
 
     /**
-     * Stops treating a later post with [key] as an update while retaining this post in historical
-     * frequency counts. A notification removed and subsequently reposted is a new occurrence.
+     * Moves the earliest complete timestamp forward after a newly persisted gap marker.
+     *
+     * Moving it backward would claim history that was not present in the seed, so it is ignored.
      */
     @Synchronized
-    fun markRemoved(key: String) {
-        livePostsByKey.remove(key)
+    fun restrictCoverage(coverageStartMillis: Long): RateTrackerRecordResult {
+        if (!initialized) return RateTrackerRecordResult.UNAVAILABLE
+        if (coverageStartMillis <= this.coverageStartMillis) {
+            return RateTrackerRecordResult.UNCHANGED
+        }
+        this.coverageStartMillis = coverageStartMillis
+        packageOccurrences.prune(coverageStartMillis)
+        channelOccurrences.prune(coverageStartMillis)
+        occurrencesById.entries.removeAll { it.value.postedAtMillis < coverageStartMillis }
+        return RateTrackerRecordResult.CHANGED
     }
 
-    /** Returns requested counts at the snapshot's post time without recording another event. */
+    /** Marks frequency history incomplete; every requested rate signal then remains unknown. */
+    @Synchronized
+    fun markUnavailable() {
+        clear()
+    }
+
+    /**
+     * Applies the latest durable metadata for one occurrence and reports whether counts changed.
+     *
+     * An older update for the same id makes the tracker unavailable instead of moving state
+     * backward. Distinct out-of-order occurrences remain supported; [counts] omits any signal whose
+     * full window predates the tracker's known coverage.
+     */
+    @Synchronized
+    fun record(occurrence: PersistedRateOccurrence): RateTrackerRecordResult {
+        if (!initialized) return RateTrackerRecordResult.UNAVAILABLE
+        val previous = occurrencesById[occurrence.occurrenceId]
+        if (previous != null && occurrence.postedAtMillis < previous.postedAtMillis) {
+            markUnavailable()
+            return RateTrackerRecordResult.UNAVAILABLE
+        }
+
+        // Do not advance coverage from a later post: an in-flight destructive decision must still
+        // be able to recalculate the exact count at its earlier snapshot time. The global bound
+        // remains the memory guard; a reseed or durable gap can deliberately move coverage.
+        if (occurrence.postedAtMillis < coverageStartMillis) {
+            return RateTrackerRecordResult.UNCHANGED
+        }
+        if (
+            previous == null &&
+            occurrencesById.size >= MAX_TRACKED_OCCURRENCES
+        ) {
+            markUnavailable()
+            return RateTrackerRecordResult.UNAVAILABLE
+        }
+        if (previous == occurrence) return RateTrackerRecordResult.UNCHANGED
+
+        previous?.let(::remove)
+        occurrencesById[occurrence.occurrenceId] = occurrence
+        append(occurrence)
+        return RateTrackerRecordResult.CHANGED
+    }
+
+    /** Returns only counts backed by a complete retained window at the snapshot's post time. */
     @Synchronized
     fun counts(
         snapshot: NotificationSnapshot,
         requestedSignals: Set<RateSignal>,
     ): Map<RateSignal, Int> {
         if (!initialized) return emptyMap()
-        return calculateCounts(snapshot, requestedSignals, snapshot.postedAtMillis)
-    }
-
-    /**
-     * Includes [snapshot] as the current post and returns counts only for requested signals. A
-     * channel-scoped signal is omitted when the notification has no channel id.
-     */
-    @Synchronized
-    fun recordAndCount(
-        snapshot: NotificationSnapshot,
-        requestedSignals: Set<RateSignal>,
-        nowMillis: Long = snapshot.postedAtMillis,
-    ): Map<RateSignal, Int> {
-        if (!initialized) return emptyMap()
-        val event = NotificationRateEvent(snapshot.packageName, snapshot.channelId, nowMillis)
-        append(event)
-        newestTimestampMillis = maxOf(newestTimestampMillis, nowMillis)
-        prune(newestTimestampMillis - MAX_RATE_WINDOW_MILLIS)
-        return calculateCounts(snapshot, requestedSignals, nowMillis)
-    }
-
-    private fun calculateCounts(
-        snapshot: NotificationSnapshot,
-        requestedSignals: Set<RateSignal>,
-        nowMillis: Long,
-    ): Map<RateSignal, Int> =
-        buildMap {
+        return buildMap {
             requestedSignals.forEach { signal ->
+                val cutoff = subtractSaturated(snapshot.postedAtMillis, signal.windowMillis)
+                if (cutoff < coverageStartMillis) return@forEach
                 val timestamps =
                     when (signal.scope) {
-                        RateScope.PACKAGE -> packageEvents[snapshot.packageName]
+                        RateScope.PACKAGE -> packageOccurrences[snapshot.packageName]
                         RateScope.CHANNEL -> {
                             val channelId = snapshot.channelId ?: return@forEach
-                            channelEvents[ChannelKey(snapshot.packageName, channelId)]
+                            channelOccurrences[ChannelKey(snapshot.packageName, channelId)]
                         }
                     }
-                if (timestamps != null) {
-                    val cutoff = nowMillis - signal.windowMillis
-                    val first = timestamps.lowerBound(cutoff)
-                    val afterLast = timestamps.upperBound(nowMillis)
-                    put(signal, (afterLast - first).coerceAtLeast(0))
-                } else {
+                if (timestamps == null) {
                     put(signal, 0)
+                } else {
+                    val first = timestamps.lowerBound(cutoff)
+                    val afterLast = timestamps.upperBound(snapshot.postedAtMillis)
+                    put(signal, (afterLast - first).coerceAtLeast(0))
                 }
             }
         }
+    }
 
-    private fun append(event: NotificationRateEvent) {
-        packageEvents
-            .getOrPut(event.packageName, ::mutableListOf)
-            .also { timestamps ->
-                timestamps.insertSorted(event.postedAtMillis)
-                timestamps.retainNewest()
+    private fun append(occurrence: PersistedRateOccurrence) {
+        val timed = occurrence.toTimedOccurrence()
+        packageOccurrences
+            .getOrPut(occurrence.packageName, ::mutableListOf)
+            .also { values ->
+                values.insertSorted(timed)
             }
-        event.channelId?.let { channelId ->
-            channelEvents
-                .getOrPut(ChannelKey(event.packageName, channelId), ::mutableListOf)
-                .also { timestamps ->
-                    timestamps.insertSorted(event.postedAtMillis)
-                    timestamps.retainNewest()
+        occurrence.channelId?.let { channelId ->
+            channelOccurrences
+                .getOrPut(ChannelKey(occurrence.packageName, channelId), ::mutableListOf)
+                .also { values ->
+                    values.insertSorted(timed)
                 }
         }
     }
 
-    private fun remove(event: NotificationRateEvent) {
-        packageEvents.removeTimestamp(event.packageName, event.postedAtMillis)
-        event.channelId?.let { channelId ->
-            channelEvents.removeTimestamp(ChannelKey(event.packageName, channelId), event.postedAtMillis)
+    private fun remove(occurrence: PersistedRateOccurrence) {
+        packageOccurrences.removeOccurrence(occurrence.packageName, occurrence.occurrenceId)
+        occurrence.channelId?.let { channelId ->
+            channelOccurrences.removeOccurrence(
+                ChannelKey(occurrence.packageName, channelId),
+                occurrence.occurrenceId,
+            )
         }
     }
 
-    private fun prune(cutoffMillis: Long) {
-        packageEvents.prune(cutoffMillis)
-        channelEvents.prune(cutoffMillis)
-        livePostsByKey.entries.removeAll { it.value.postedAtMillis < cutoffMillis }
+    private fun clear() {
+        occurrencesById.clear()
+        packageOccurrences.clear()
+        channelOccurrences.clear()
+        initialized = false
+        coverageStartMillis = Long.MAX_VALUE
     }
 
-    private fun <K> MutableMap<K, MutableList<Long>>.prune(cutoffMillis: Long) {
+    private fun <K> MutableMap<K, MutableList<TimedOccurrence>>.prune(cutoffMillis: Long) {
         val iterator = entries.iterator()
         while (iterator.hasNext()) {
-            val timestamps = iterator.next().value
-            val firstRetained = timestamps.lowerBound(cutoffMillis)
-            if (firstRetained > 0) timestamps.subList(0, firstRetained).clear()
-            if (timestamps.isEmpty()) iterator.remove()
+            val occurrences = iterator.next().value
+            val firstRetained = occurrences.lowerBound(cutoffMillis)
+            if (firstRetained > 0) occurrences.subList(0, firstRetained).clear()
+            if (occurrences.isEmpty()) iterator.remove()
         }
     }
 
-    private fun MutableList<Long>.insertSorted(timestamp: Long) {
-        add(upperBound(timestamp), timestamp)
+    private fun MutableList<TimedOccurrence>.insertSorted(occurrence: TimedOccurrence) {
+        add(upperBound(occurrence.postedAtMillis), occurrence)
     }
 
-    private fun MutableList<Long>.retainNewest() {
-        val overflow = size - MAX_POSTS_PER_SCOPE
-        if (overflow > 0) subList(0, overflow).clear()
-    }
-
-    private fun List<Long>.lowerBound(value: Long): Int {
+    private fun List<TimedOccurrence>.lowerBound(value: Long): Int {
         var low = 0
         var high = size
         while (low < high) {
             val middle = (low + high).ushr(1)
-            if (this[middle] < value) low = middle + 1 else high = middle
+            if (this[middle].postedAtMillis < value) low = middle + 1 else high = middle
         }
         return low
     }
 
-    private fun List<Long>.upperBound(value: Long): Int {
+    private fun List<TimedOccurrence>.upperBound(value: Long): Int {
         var low = 0
         var high = size
         while (low < high) {
             val middle = (low + high).ushr(1)
-            if (this[middle] <= value) low = middle + 1 else high = middle
+            if (this[middle].postedAtMillis <= value) low = middle + 1 else high = middle
         }
         return low
     }
 
-    private fun <K> MutableMap<K, MutableList<Long>>.removeTimestamp(
+    private fun <K> MutableMap<K, MutableList<TimedOccurrence>>.removeOccurrence(
         key: K,
-        timestamp: Long,
+        occurrenceId: RateOccurrenceId,
     ) {
-        val timestamps = this[key] ?: return
-        val index = timestamps.binarySearch(timestamp)
-        if (index >= 0) timestamps.removeAt(index)
-        if (timestamps.isEmpty()) remove(key)
+        val occurrences = this[key] ?: return
+        occurrences.removeAll { it.occurrenceId == occurrenceId }
+        if (occurrences.isEmpty()) remove(key)
     }
+
+    private fun PersistedRateOccurrence.toTimedOccurrence(): TimedOccurrence =
+        TimedOccurrence(occurrenceId, postedAtMillis)
+
+    private data class TimedOccurrence(
+        val occurrenceId: RateOccurrenceId,
+        val postedAtMillis: Long,
+    )
 
     private data class ChannelKey(
         val packageName: String,
         val channelId: String,
     )
 
-    private fun mergeSeedAndLive(
-        seed: List<NotificationRateEvent>,
-        live: List<NotificationRateEvent>,
-    ): List<NotificationRateEvent> {
-        val remainingSeedMatches = seed.groupingBy { it }.eachCount().toMutableMap()
-        val additionalLive =
-            live.filter { event ->
-                val matches = remainingSeedMatches[event] ?: 0
-                if (matches > 0) {
-                    remainingSeedMatches[event] = matches - 1
-                    false
-                } else {
-                    true
-                }
-            }
-        return seed + additionalLive
-    }
-
     private companion object {
-        // RuleDefinitionValidator caps rate thresholds at 1,000. Retaining the newest 1,000
-        // timestamps therefore preserves every possible RateAtLeast result without unbounded memory.
-        const val MAX_POSTS_PER_SCOPE = 1_000
-        const val MAX_LIVE_KEYS = 4_096
+        // The global bound also bounds every package/channel index. Per-scope truncation would lose
+        // rows needed to backfill an exact count when a retained occurrence later changes scope.
+        const val MAX_TRACKED_OCCURRENCES = 10_000
     }
 }
+
+/** Whether one durable occurrence or coverage update changed usable in-memory frequency state. */
+enum class RateTrackerRecordResult {
+    CHANGED,
+    UNCHANGED,
+    UNAVAILABLE,
+}
+
+private fun subtractSaturated(
+    value: Long,
+    amount: Long,
+): Long =
+    if (value < Long.MIN_VALUE + amount) {
+        Long.MIN_VALUE
+    } else {
+        value - amount
+    }

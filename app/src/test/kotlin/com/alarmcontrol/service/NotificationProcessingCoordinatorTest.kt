@@ -1,5 +1,6 @@
 package com.alarmcontrol.service
 
+import com.alarmcontrol.core.settings.FilteringActionGate
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -15,10 +16,115 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class NotificationProcessingCoordinatorTest {
+    @Test
+    fun `processing token waits for its parentless rate outcome before commit`() =
+        runTest {
+            val coordinator = NotificationProcessingCoordinator(this)
+            val rateOutcome = CompletableDeferred<RatePostOutcome>(parent = null)
+            val awaitingOutcome = CompletableDeferred<Unit>()
+            var committed = false
+
+            coordinator.submit("rate-pending") { token ->
+                awaitingOutcome.complete(Unit)
+                if (rateOutcome.await() == RatePostOutcome.Proceed) {
+                    committed = token.commit {}
+                }
+            }
+            awaitingOutcome.await()
+            runCurrent()
+
+            assertFalse(committed)
+            assertFalse(rateOutcome.isCompleted)
+
+            rateOutcome.complete(RatePostOutcome.Proceed)
+            advanceUntilIdle()
+
+            assertTrue(committed)
+        }
+
+    @Test
+    fun `changed rate inputs reject commit after evaluation`() =
+        runTest {
+            val coordinator = NotificationProcessingCoordinator(this)
+            val filteringGate = FilteringActionGate()
+            val expectedRateCounts = mapOf("package-minute" to 1)
+            val currentRateCounts = AtomicReference(expectedRateCounts)
+            val evaluated = CompletableDeferred<Unit>()
+            val releaseCommit = CompletableDeferred<Unit>()
+            var committed = true
+
+            filteringGate.initializeFromPersistedState(true)
+            filteringGate.acknowledgeRuleRefresh(filteringGate.ruleRefreshRequests.value)
+            coordinator.submit("rate-stale") { token ->
+                evaluated.complete(Unit)
+                releaseCommit.await()
+                committed =
+                    commitFilteringAction(
+                        token = token,
+                        filteringActionGate = filteringGate,
+                        tokenCommit = { action ->
+                            if (currentRateCounts.get() == expectedRateCounts) {
+                                token.commit(action)
+                            } else {
+                                false
+                            }
+                        },
+                        action = {},
+                    )
+            }
+            evaluated.await()
+            currentRateCounts.set(mapOf("package-minute" to 2))
+            releaseCommit.complete(Unit)
+            advanceUntilIdle()
+
+            assertFalse(committed)
+        }
+
+    @Test
+    fun `later unrelated rate mutation can commit when original inputs are unchanged`() =
+        runTest {
+            val coordinator = NotificationProcessingCoordinator(this)
+            val filteringGate = FilteringActionGate()
+            val expectedRateCounts = mapOf("package-minute" to 1)
+            val currentRateCounts = AtomicReference(expectedRateCounts)
+            val evaluated = CompletableDeferred<Unit>()
+            val releaseCommit = CompletableDeferred<Unit>()
+            var committed = false
+
+            filteringGate.initializeFromPersistedState(true)
+            filteringGate.acknowledgeRuleRefresh(filteringGate.ruleRefreshRequests.value)
+            coordinator.submit("rate-current") { token ->
+                evaluated.complete(Unit)
+                releaseCommit.await()
+                committed =
+                    commitFilteringAction(
+                        token = token,
+                        filteringActionGate = filteringGate,
+                        tokenCommit = { action ->
+                            if (currentRateCounts.get() == expectedRateCounts) {
+                                token.commit(action)
+                            } else {
+                                false
+                            }
+                        },
+                        action = {},
+                    )
+            }
+            evaluated.await()
+            currentRateCounts.set(expectedRateCounts.toMap())
+            releaseCommit.complete(Unit)
+            advanceUntilIdle()
+
+            assertTrue(committed)
+        }
+
     @Test
     fun `newer post for the same key is the only result allowed to commit`() =
         runTest {
@@ -422,6 +528,67 @@ class NotificationProcessingCoordinatorTest {
             assertFalse(submitThread.isAlive)
         } finally {
             releaseUpdate.countDown()
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `rule publication cannot deadlock or commit a token paused inside the filtering gate`() {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val coordinator = NotificationProcessingCoordinator(scope)
+        val gate = FilteringActionGate()
+        val actionHasGate = CountDownLatch(1)
+        val releaseBeforeCommit = CountDownLatch(1)
+        val actionReturned = CountDownLatch(1)
+        val updatePublished = CountDownLatch(1)
+        val publishReturned = CountDownLatch(1)
+        val committed = AtomicBoolean(true)
+        val platformActions = AtomicInteger(0)
+        gate.initializeFromPersistedState(true)
+        gate.acknowledgeRuleRefresh(gate.ruleRefreshRequests.value)
+
+        try {
+            coordinator.submit("stale") { token ->
+                try {
+                    committed.set(
+                        commitFilteringAction(
+                            token = token,
+                            filteringActionGate = gate,
+                            beforeCommit = {
+                                actionHasGate.countDown()
+                                check(releaseBeforeCommit.await(TEST_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+                            },
+                            action = platformActions::incrementAndGet,
+                        ),
+                    )
+                } finally {
+                    actionReturned.countDown()
+                }
+            }
+            assertTrue(actionHasGate.await(TEST_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+
+            val publishThread =
+                thread(name = "rule-snapshot-publish") {
+                    publishRuleSnapshot(
+                        coordinator = coordinator,
+                        filteringActionGate = gate,
+                        requestId = gate.ruleRefreshRequests.value,
+                        publish = updatePublished::countDown,
+                    )
+                    publishReturned.countDown()
+                }
+            assertTrue(updatePublished.await(TEST_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+            assertTrue(publishReturned.await(TEST_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+            publishThread.join(TimeUnit.SECONDS.toMillis(TEST_TIMEOUT_SECONDS))
+            assertFalse(publishThread.isAlive)
+
+            releaseBeforeCommit.countDown()
+            assertTrue(actionReturned.await(TEST_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+
+            assertFalse(committed.get())
+            assertEquals(0, platformActions.get())
+        } finally {
+            releaseBeforeCommit.countDown()
             scope.cancel()
         }
     }

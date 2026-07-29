@@ -15,6 +15,7 @@ import com.alarmcontrol.core.insights.SemanticIntentCount
 import com.alarmcontrol.data.db.dao.DailyInsightDao
 import com.alarmcontrol.data.mapper.toDomain
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import java.time.DayOfWeek
 import java.time.LocalDate
@@ -27,7 +28,10 @@ class InsightsAnalyticsRepositoryImpl
         private val dao: DailyInsightDao,
     ) : InsightsAnalyticsRepository {
         override fun observe(range: InsightsDateRange): Flow<InsightsAnalytics> =
-            dao.observeBetween(range.startEpochDay, range.endEpochDay).map { rows ->
+            combine(
+                dao.observeBetween(range.startEpochDay, range.endEpochDay),
+                dao.observeSourceGapDaysBetween(range.startEpochDay, range.endEpochDay),
+            ) { rows, sourceGapDays ->
                 val days = rows.map { it.toDomain() }
                 val actualRules =
                     days.flatMap { it.topRules }.groupingBy { it.ruleId }.fold(0) { sum, row ->
@@ -107,6 +111,7 @@ class InsightsAnalyticsRepositoryImpl
                     semanticCorrectionCount = days.map { it.semanticCorrectionCount }.saturatedSum(),
                     bucket = range.bucket(),
                     trend = days.toTrend(range.bucket()),
+                    sourceComplete = days.hasCompleteSource(sourceGapDays),
                     breakdownCoverageStartEpochDay =
                         days.filter { it.breakdownVersion > 0 }.minOfOrNull { it.epochDay },
                 )
@@ -119,6 +124,11 @@ class InsightsAnalyticsRepositoryImpl
                 if (oldest == null || newest == null) null else InsightsDateRange(oldest, newest)
             }
     }
+
+private fun List<com.alarmcontrol.core.insights.DailyInsight>.hasCompleteSource(sourceGapDays: List<Long>): Boolean {
+    val rolledDays = mapTo(mutableSetOf()) { it.epochDay }
+    return all { it.sourceComplete } && sourceGapDays.none { it !in rolledDays }
+}
 
 private fun InsightsDateRange.bucket(): InsightsBucket =
     when (endEpochDay - startEpochDay + 1) {

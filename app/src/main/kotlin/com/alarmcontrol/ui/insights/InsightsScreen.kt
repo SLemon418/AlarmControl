@@ -263,6 +263,9 @@ private fun InsightsContent(
     ) {
         item { InsightsSummaryCard(state.summary, state.metrics) }
         item { MetricsRow(state.metrics) }
+        if (!state.overviewSourceComplete || state.dailyInsights.any { !it.sourceComplete }) {
+            item { SourceIncompleteNotice() }
+        }
         if (state.suggestions.isNotEmpty()) {
             item { SectionHeading(R.string.insights_suggestions) }
             items(state.suggestions, key = { it.key }) { suggestion ->
@@ -594,6 +597,15 @@ private fun DailyInsightCard(
             }
         }
     }
+}
+
+@Composable
+internal fun SourceIncompleteNotice() {
+    Text(
+        text = stringResource(R.string.insights_source_incomplete),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.error,
+    )
 }
 
 @Composable

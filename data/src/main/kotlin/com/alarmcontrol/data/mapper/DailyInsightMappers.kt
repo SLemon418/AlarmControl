@@ -41,6 +41,7 @@ fun DailyInsight.toEntity(): DailyInsightEntity =
         categoryCorrectionCount = categoryCorrectionCount,
         semanticCorrectionCount = semanticCorrectionCount,
         breakdownVersion = breakdownVersion,
+        sourceComplete = sourceComplete,
         ruleBreakdownComplete = ruleBreakdownComplete,
         monitorRuleBreakdownComplete = monitorRuleBreakdownComplete,
         appBreakdownComplete = appBreakdownComplete,
@@ -116,6 +117,7 @@ fun DailyInsight.toWrite(): DailyInsightWrite =
         appCounts = toAppCountEntities(),
         hourCounts = toHourCountEntities(),
         semanticCounts = toSemanticCountEntities(),
+        sourceComplete = sourceComplete,
     )
 
 /**
@@ -183,6 +185,7 @@ fun DailyInsightWithBreakdown.toDomain(): DailyInsight =
         categoryCorrectionCount = insight.categoryCorrectionCount,
         semanticCorrectionCount = insight.semanticCorrectionCount,
         breakdownVersion = insight.breakdownVersion,
+        sourceComplete = insight.sourceComplete,
         ruleBreakdownComplete = insight.ruleBreakdownComplete,
         monitorRuleBreakdownComplete = insight.monitorRuleBreakdownComplete,
         appBreakdownComplete = insight.appBreakdownComplete,

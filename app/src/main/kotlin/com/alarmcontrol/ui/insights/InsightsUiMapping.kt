@@ -145,6 +145,7 @@ internal fun DailyInsight.toUiModel(
         mlClassifiedCount = mlClassifiedCount,
         categoryCorrectionCount = categoryCorrectionCount,
         semanticCorrectionCount = semanticCorrectionCount,
+        sourceComplete = sourceComplete,
     )
 
 internal fun InsightsAnalytics.toUiModel(
@@ -204,6 +205,7 @@ internal fun InsightsAnalytics.toUiModel(
         mlClassifiedCount = mlClassifiedCount,
         categoryCorrectionCount = categoryCorrectionCount,
         semanticCorrectionCount = semanticCorrectionCount,
+        sourceComplete = sourceComplete,
         coverageStartEpochDay = breakdownCoverageStartEpochDay,
     )
 

@@ -145,6 +145,7 @@
     <string name="message_clear_failed">선택한 데이터를 삭제하지 못했습니다</string>
     <string name="message_generic_error">작업을 완료하지 못했습니다</string>
     <string name="message_setting_update_failed">설정을 변경하지 못했습니다</string>
+    <string name="message_content_storage_disable_failed">알림 상세 내용 저장을 끄지 못했습니다. 설정은 켜진 상태로 유지됩니다. 다시 시도해 주세요.</string>
     <string name="message_model_installed">로컬 모델을 설치했습니다</string>
     <string name="message_model_install_failed">모델을 설치하지 못했습니다</string>
     <string name="message_model_removed">로컬 LLM 모델을 삭제했습니다</string>
@@ -385,6 +386,7 @@
     <string name="insights_updated">업데이트: %1$s</string>
     <string name="insights_daily_counts">조용히 처리 %1$d · 전체 %2$d</string>
     <string name="insights_breakdown_partial">앱·채널·규칙 목록 일부가 생략되었습니다. 전체 합계는 정확합니다.</string>
+    <string name="insights_source_incomplete">저장 한도에 도달해 이 기간의 합계·분포·추천은 보관된 활동만 기준으로 하며 일부가 누락될 수 있습니다.</string>
     <string name="insights_no_notifications">기록된 알림이 없습니다.</string>
     <string name="insights_categories">카테고리</string>
     <string name="insights_top_rules">가장 많이 실행된 규칙</string>

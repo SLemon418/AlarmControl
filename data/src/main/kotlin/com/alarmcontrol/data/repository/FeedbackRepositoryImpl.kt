@@ -21,9 +21,15 @@ class FeedbackRepositoryImpl
         override suspend fun recordCorrection(feedback: CategoryFeedback) {
             transactionRunner.run {
                 feedbackDao.record(feedback.toEntity())
-                feedback.notificationEventId
-                    ?.toLongOrNull()
-                    ?.let { eventId -> dailyInsightDao.deleteContainingEvent(eventId) }
+                buildSet<Long> {
+                    feedback.notificationEventId?.toLongOrNull()?.let(::add)
+                    addAll(
+                        feedbackDao.getLinkedTrimVictimEventIds(
+                            CategoryFeedbackDao.MAX_RETAINED_ROWS,
+                        ),
+                    )
+                }.forEach { eventId -> dailyInsightDao.deleteContainingEvent(eventId) }
+                feedbackDao.trimToMostRecent(CategoryFeedbackDao.MAX_RETAINED_ROWS)
             }
         }
 

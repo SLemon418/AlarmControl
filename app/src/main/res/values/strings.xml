@@ -146,6 +146,7 @@
     <string name="message_clear_failed">Couldn\'t delete the selected data</string>
     <string name="message_generic_error">Something went wrong</string>
     <string name="message_setting_update_failed">Couldn\'t update the setting</string>
+    <string name="message_content_storage_disable_failed">Couldn\'t turn off notification detail storage. It remains enabled; try again.</string>
     <string name="message_model_installed">Local model installed</string>
     <string name="message_model_install_failed">Couldn\'t install the model</string>
     <string name="message_model_removed">Removed the local LLM model</string>
@@ -389,6 +390,7 @@
     <string name="insights_updated">Updated %1$s</string>
     <string name="insights_daily_counts">%1$d muted · %2$d total</string>
     <string name="insights_breakdown_partial">Some app, channel, or rule lists are partial. Totals remain accurate.</string>
+    <string name="insights_source_incomplete">The storage limit removed some activity in this period. Totals, breakdowns, and suggestions may omit notifications.</string>
     <string name="insights_no_notifications">No notifications recorded.</string>
     <string name="insights_categories">Categories</string>
     <string name="insights_top_rules">Top rules</string>

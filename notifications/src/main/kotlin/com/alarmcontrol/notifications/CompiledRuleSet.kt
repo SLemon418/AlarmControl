@@ -46,6 +46,14 @@ data class CategoryResolutionRequirements(
     val any: Boolean = activeNeedsCategory || monitorNeedsCategory
 }
 
+/** Whether a missing frequency signal blocks the first definite match in either lane. */
+data class RateResolutionRequirements(
+    val activeNeedsRate: Boolean,
+    val monitorNeedsRate: Boolean,
+) {
+    val any: Boolean = activeNeedsRate || monitorNeedsRate
+}
+
 /** Whether resolving the trusted semantic intent can change either lane's selected rule. */
 data class SemanticResolutionRequirements(
     val activeNeedsSemantic: Boolean,

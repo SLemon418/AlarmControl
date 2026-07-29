@@ -34,6 +34,7 @@ import org.robolectric.annotation.GraphicsMode
  * Same Robolectric setup as RulesScreenTest: plain [Application] (no Hilt boot — state is passed in),
  * SDK 34 (Robolectric 4.11.1's max), NATIVE graphics so Compose actually lays out.
  */
+@Suppress("LargeClass") // Keeps one public-screen Compose fixture and its interaction matrix together.
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @Config(application = Application::class, sdk = [34])
@@ -280,6 +281,24 @@ class InsightsScreenTest {
             .onNodeWithTag(INSIGHTS_LIST_TEST_TAG)
             .performScrollToNode(hasText("Daily summaries appear here", substring = true))
         composeRule.onNodeWithText("Daily summaries appear here", substring = true).assertIsDisplayed()
+    }
+
+    @Test
+    fun dailyHistory_warnsWhenStorageCleanupMadeSourceIncomplete() {
+        composeRule.setContent {
+            InsightsScreen(
+                state =
+                    InsightsUiState(
+                        isLoading = false,
+                        dailyInsights = listOf(day.copy(sourceComplete = false)),
+                    ),
+                onUndo = {},
+                onRecategorize = { _, _, _, _ -> },
+                onUserMessageShown = {},
+            )
+        }
+
+        composeRule.onNodeWithText("The storage limit removed some activity", substring = true).assertIsDisplayed()
     }
 
     @Test
@@ -596,6 +615,31 @@ class InsightsScreenTest {
         composeRule.onNodeWithText("Quiet offers").assertIsDisplayed()
         list.performScrollToNode(hasText("ML classified 18", substring = true))
         composeRule.onNodeWithText("ML classified 18", substring = true).assertIsDisplayed()
+    }
+
+    @Test
+    fun emptyAnalysisRangeStillWarnsAboutKnownSourceGap() {
+        composeRule.setContent {
+            InsightsScreen(
+                state =
+                    InsightsUiState(
+                        isLoading = false,
+                        selectedTab = InsightsTab.ANALYSIS,
+                        analysis =
+                            InsightsAnalysisUi(
+                                startEpochDay = 20_260,
+                                endEpochDay = 20_266,
+                                sourceComplete = false,
+                            ),
+                    ),
+                onUndo = {},
+                onRecategorize = { _, _, _, _ -> },
+                onUserMessageShown = {},
+            )
+        }
+
+        composeRule.onNodeWithText("The storage limit removed some activity", substring = true).assertIsDisplayed()
+        composeRule.onNodeWithText("No completed data in this range").assertIsDisplayed()
     }
 
     @Test

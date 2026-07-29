@@ -2,6 +2,9 @@ package com.alarmcontrol.core.backup
 
 import com.alarmcontrol.core.result.DataResult
 
+/** Maximum UTF-8 size of a portable backup accepted by both export and import. */
+const val MAX_BACKUP_FILE_BYTES = 32 * 1_024 * 1_024
+
 /**
  * Exports and restores local rules, profiles, and daily-history data (CLAUDE.md §3). The interface
  * lives in `:core`; the `:data` implementation serializes a structured string and reads/writes Room.
@@ -11,7 +14,8 @@ import com.alarmcontrol.core.result.DataResult
 interface BackupRepository {
     /**
      * Serializes rules and history. A non-empty [passphrase] wraps the JSON in a local AES-GCM
-     * envelope; `null` keeps backward-compatible structured JSON.
+     * envelope; `null` keeps backward-compatible structured JSON. Every successful result is at
+     * most [MAX_BACKUP_FILE_BYTES] when encoded as UTF-8, so the app's bounded importer can read it.
      */
     suspend fun export(
         passphrase: CharArray? = null,

@@ -65,6 +65,26 @@ val maxPhysicalBundleBytes = 105L * 1_024 * 1_024
 // wrong ABI. Its four native ABI payloads need a larger non-semantic budget than the Play AAB.
 val maxNonSemanticApkPhysicalBytes = 140L * 1_024 * 1_024
 val maxPhysicalApkBytes = 185L * 1_024 * 1_024
+val releaseSigningCertificatePinFile =
+    rootProject.layout.projectDirectory
+        .file("config/release-signing-certificate.sha256")
+        .asFile
+val releaseSigningCertificatePattern = Regex("[0-9a-fA-F]{64}")
+val apksignerCertificateDigestPattern =
+    Regex("""(?m)^Signer #[0-9]+ certificate SHA-256 digest: ([0-9a-fA-F]{64})\s*$""")
+
+fun requireReleaseSigningCertificatePin(): String {
+    check(releaseSigningCertificatePinFile.isFile) {
+        "Missing public release-signing certificate pin: $releaseSigningCertificatePinFile"
+    }
+    val pin = releaseSigningCertificatePinFile.readText().trim()
+    check(releaseSigningCertificatePattern.matches(pin)) {
+        "Release-signing certificate pin is not configured. Replace the pending value in " +
+            "$releaseSigningCertificatePinFile with the independently verified SHA-256 digest " +
+            "of the long-lived Android update certificate."
+    }
+    return pin.lowercase()
+}
 
 @Suppress("UNCHECKED_CAST")
 val semanticAssetPayloadVerifier =
@@ -944,13 +964,14 @@ tasks.named("check").configure {
 // mistaken for a publishable artifact.
 val verifyReleaseSigningConfiguration by tasks.registering {
     group = "verification"
-    description = "Fails unless every release-signing environment variable is configured."
+    description = "Fails unless release credentials and the public certificate pin are configured."
 
     doLast {
         check(hasCompleteReleaseSigning) {
             "Release signing is not configured. Set ALARMCONTROL_KEYSTORE_FILE, " +
                 "ALARMCONTROL_KEYSTORE_PASSWORD, ALARMCONTROL_KEY_ALIAS, and ALARMCONTROL_KEY_PASSWORD."
         }
+        requireReleaseSigningCertificatePin()
     }
 }
 
@@ -1003,10 +1024,21 @@ val verifyReleaseApkSigning by tasks.registering {
                         apk.absolutePath,
                     )
                     isIgnoreExitValue = true
-                }.result
-                .get()
-        check(verification.exitValue == 0) {
+                }
+        check(verification.result.get().exitValue == 0) {
             "Release APK signature verification failed for ${apk.absolutePath}"
+        }
+        val signerDigests =
+            apksignerCertificateDigestPattern
+                .findAll(verification.standardOutput.asText.get())
+                .map { match -> match.groupValues[1].lowercase() }
+                .toList()
+        check(signerDigests.size == 1) {
+            "Expected exactly one APK signer certificate digest, found ${signerDigests.size}"
+        }
+        val expectedSignerDigest = requireReleaseSigningCertificatePin()
+        check(signerDigests.single() == expectedSignerDigest) {
+            "Release APK signer certificate does not match the pinned Android update certificate."
         }
         logger.lifecycle(
             "Verified signed universal release APK: ${apk.absolutePath} " +

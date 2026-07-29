@@ -271,6 +271,7 @@ class BackupCodecTest {
             remove("categoryCorrectionCount")
             remove("semanticCorrectionCount")
             remove("breakdownVersion")
+            remove("sourceComplete")
             remove("ruleBreakdownComplete")
             remove("monitorRuleBreakdownComplete")
             remove("appBreakdownComplete")
@@ -286,6 +287,7 @@ class BackupCodecTest {
         assertEquals(emptyList<SemanticIntentCount>(), restored.semanticBreakdown)
         assertEquals(null, restored.channelBreakdown.single().channelName)
         assertEquals(0, restored.breakdownVersion)
+        assertEquals(false, restored.sourceComplete)
         assertEquals(false, restored.ruleBreakdownComplete)
         assertEquals(false, restored.channelBreakdownComplete)
     }
@@ -296,6 +298,7 @@ class BackupCodecTest {
         root.put("version", 5)
         root.getJSONObject("settings").remove("semanticAnalysisScope")
         root.getJSONArray("dailyInsights").getJSONObject(0).apply {
+            remove("sourceComplete")
             remove("ruleBreakdownComplete")
             remove("monitorRuleBreakdownComplete")
             remove("appBreakdownComplete")
@@ -305,6 +308,7 @@ class BackupCodecTest {
         val restored = BackupCodec.decode(root.toString())
 
         assertEquals(SemanticAnalysisScope.RULES_ONLY, restored.settings?.semanticAnalysisScope)
+        assertEquals(false, restored.dailyInsights.single().sourceComplete)
         assertEquals(false, restored.dailyInsights.single().appBreakdownComplete)
     }
 

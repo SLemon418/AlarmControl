@@ -127,7 +127,7 @@ Boundaries exist to keep features small and to make the offline rule structurall
 ```
 :app           Compose UI host, navigation, DI wiring, the NotificationListenerService entry point
 :core          framework-free domain models, repository contracts, dispatchers, Result types
-:data          Room v13 + DataStore, repositories, backup, mappers (the only module that persists)
+:data          Room v15 + DataStore, repositories, backup, mappers (the only module that persists)
 :ml            bundled classifier, optional local LLM, feature extraction, feedback/learning
 :notifications notification matching/filtering engine (pure, testable logic)
 :automation    exported intents, Tasker/Locale plugin, QS tiles, App Shortcuts
@@ -280,10 +280,11 @@ Turn tasks into verifiable goals and loop until green (see §10).
 - **A compiled release artifact is not automatically distributable.** CI keeps the potentially
   unsigned `bundleRelease` path only for App Bundle compatibility regression. The GitHub
   distribution APK must instead pass `:app:releaseCandidate`, which requires all four
-  release-signing environment variables, runs the device-independent gates, enforces the APK
-  payload limits defined by the build, and cryptographically validates the APK signature. This is
-  the installed app's update-signing key, not a Play upload key: never commit it or its credentials,
-  and retain an encrypted offline backup so future releases can update existing installations.
+  release-signing environment variables and a committed public certificate SHA-256 pin, runs the
+  device-independent gates, enforces the APK payload limits defined by the build, and
+  cryptographically validates that exact APK signer. This is the installed app's update-signing
+  key, not a Play upload key: never commit it or its credentials, and retain an encrypted offline
+  backup so future releases can update existing installations.
 - **Supply-chain verification is mandatory.** CI validates the Gradle wrapper and resolves artifacts
   with strict SHA-256 checks from `gradle/verification-metadata.xml`. `verifyCiActionPins` scans
   workflow, reusable-workflow, and composite-action YAML; remote actions require a full 40-character

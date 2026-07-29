@@ -20,6 +20,7 @@ class FakeRuleDao : RuleDao {
 
     private val state = MutableStateFlow<List<RuleWithConditions>>(emptyList())
     var countOverride: Int? = null
+    var deleteFailureAfterMutation: Throwable? = null
 
     override suspend fun countAll(): Int = countOverride ?: rules.size
 
@@ -58,7 +59,10 @@ class FakeRuleDao : RuleDao {
 
     override suspend fun deleteRule(rule: RuleEntity) = removeRule(rule.id)
 
-    override suspend fun deleteRuleById(id: Long) = removeRule(id)
+    override suspend fun deleteRuleById(id: Long) {
+        removeRule(id)
+        deleteFailureAfterMutation?.let { throw it }
+    }
 
     override suspend fun deleteAllRules(): Int {
         val count = rules.size

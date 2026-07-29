@@ -102,6 +102,9 @@ internal fun InsightsAnalysisContent(
             )
         }
         item { AnalysisHero(analysis) }
+        if (!analysis.sourceComplete) {
+            item { SourceIncompleteNotice() }
+        }
         if (analysis.totalNotifications == 0) {
             item {
                 EmptyAnalysisCard()

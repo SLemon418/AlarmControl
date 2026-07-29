@@ -43,6 +43,18 @@ class RuleSuggestionDaoInstrumentedTest {
                     arrayOf(if (index < 3) "promotion" else "social"),
                 )
             }
+            repeat(3) { index ->
+                sql.execSQL(
+                    "INSERT INTO local_semantic_feedback " +
+                        "(source_event_id, package_name, corrected_intent, recorded_at_millis) " +
+                        "VALUES (?, 'com.local', 'MARKETING', 100)",
+                    arrayOf(100 + index),
+                )
+            }
+            sql.execSQL(
+                "INSERT INTO semantic_feedback_priors (package_name, intent, count) " +
+                    "VALUES ('com.imported', 'MARKETING', 100)",
+            )
 
             val dao = database.ruleSuggestionDao()
             val channels =
@@ -58,8 +70,8 @@ class RuleSuggestionDaoInstrumentedTest {
 
             assertEquals(1, channels.size)
             assertEquals(8, channels.single().silencedCount)
-            assertEquals(1, marketing.size)
-            assertEquals(3, marketing.single().marketingCount)
+            assertEquals(setOf("com.shop", "com.local"), marketing.mapTo(mutableSetOf()) { it.packageName })
+            assertEquals(3, marketing.first { it.packageName == "com.shop" }.marketingCount)
         }
 
     private fun insertEvent(

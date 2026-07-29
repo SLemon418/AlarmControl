@@ -3,8 +3,10 @@ package com.alarmcontrol.data.db.dao
 import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Insert
+import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
+import com.alarmcontrol.data.db.entity.DailyInsightSourceGapEntity
 import com.alarmcontrol.data.db.entity.EncryptedNotificationContentEntity
 import com.alarmcontrol.data.db.entity.NotificationDecisionTraceEntity
 import com.alarmcontrol.data.db.entity.NotificationEventEntity
@@ -12,6 +14,8 @@ import com.alarmcontrol.data.db.model.StoredRuleAction
 import com.alarmcontrol.data.db.relation.NotificationEventDetailRelation
 import com.alarmcontrol.data.db.relation.NotificationEventWithTrace
 import kotlinx.coroutines.flow.Flow
+import java.time.Instant
+import java.time.ZoneId
 
 private const val EFFECTIVE_CATEGORY =
     "COALESCE((SELECT corrected_label FROM category_feedback " +
@@ -36,6 +40,17 @@ interface NotificationEventDao {
     @Insert
     suspend fun insertEncryptedContent(content: EncryptedNotificationContentEntity)
 
+    @Query(
+        "DELETE FROM daily_insights WHERE " +
+            "(:postedEpochDay IS NOT NULL AND epoch_day = :postedEpochDay) OR " +
+            "(:postedEpochDay IS NULL AND :postedAtMillis >= window_start_millis " +
+            "AND :postedAtMillis < window_end_millis)",
+    )
+    suspend fun deleteRollupContainingPost(
+        postedEpochDay: Long?,
+        postedAtMillis: Long,
+    ): Int
+
     @Transaction
     suspend fun insertWithTrace(
         event: NotificationEventEntity,
@@ -45,6 +60,34 @@ interface NotificationEventDao {
         val eventId = insert(event)
         if (trace.isNotEmpty()) insertTrace(trace.map { it.copy(eventId = eventId) })
         encryptedContent?.let { insertEncryptedContent(it.copy(eventId = eventId)) }
+        return eventId
+    }
+
+    /**
+     * Persists one complete decision, invalidates any retained rollup for its posted day, and
+     * enforces [max] plus [maxTraceEvents] before commit.
+     *
+     * The generated id is returned even when an out-of-order, older event is the row removed by the
+     * cap. Callers may still safely attempt post-commit enrichment because a missing row is a no-op.
+     */
+    @Transaction
+    suspend fun insertWithTraceAndTrim(
+        event: NotificationEventEntity,
+        trace: List<NotificationDecisionTraceEntity>,
+        encryptedContent: EncryptedNotificationContentEntity?,
+        max: Int,
+        maxTraceEvents: Int,
+        legacyZoneId: ZoneId,
+    ): Long {
+        require(max >= 0) { "Recent event maximum must not be negative" }
+        require(maxTraceEvents >= 0) { "Trace event maximum must not be negative" }
+        val eventId = insert(event)
+        deleteRollupContainingPost(event.postedEpochDay, event.postedAtMillis)
+        if (trace.isNotEmpty()) insertTrace(trace.map { it.copy(eventId = eventId) })
+        encryptedContent?.let { insertEncryptedContent(it.copy(eventId = eventId)) }
+        val eventCount = countAll()
+        if (eventCount > max) deleteOverLimitWithSourceGaps(max, legacyZoneId)
+        if (eventCount > maxTraceEvents) deleteTracesOutsideMostRecent(maxTraceEvents)
         return eventId
     }
 
@@ -64,9 +107,22 @@ interface NotificationEventDao {
         monitoredAction: StoredRuleAction?,
     ): Int
 
+    @Query(
+        "DELETE FROM daily_insights WHERE EXISTS (" +
+            "SELECT 1 FROM notification_events AS event WHERE event.id = :eventId AND (" +
+            "(event.posted_epoch_day IS NOT NULL AND event.posted_epoch_day = daily_insights.epoch_day) OR " +
+            "(event.posted_epoch_day IS NULL AND event.posted_at_millis >= daily_insights.window_start_millis " +
+            "AND event.posted_at_millis < daily_insights.window_end_millis)))",
+    )
+    suspend fun deleteRollupContainingEvent(eventId: Long): Int
+
     @Query("DELETE FROM notification_decision_traces WHERE event_id = :eventId")
     suspend fun deleteTraceForEvent(eventId: Long)
 
+    /**
+     * Applies delayed ML/monitor metadata and trace atomically. A successful metadata write also
+     * invalidates a rollup rebuilt after the initial insert; a missing trimmed event is a no-op.
+     */
     @Transaction
     suspend fun updatePostCommitEnrichmentWithTrace(
         eventId: Long,
@@ -75,7 +131,9 @@ interface NotificationEventDao {
         monitoredRuleId: Long?,
         monitoredAction: StoredRuleAction?,
         trace: List<NotificationDecisionTraceEntity>,
+        maxTraceEvents: Int,
     ) {
+        require(maxTraceEvents >= 0) { "Trace event maximum must not be negative" }
         if (
             updatePostCommitEnrichment(
                 eventId = eventId,
@@ -87,8 +145,10 @@ interface NotificationEventDao {
         ) {
             return
         }
+        deleteRollupContainingEvent(eventId)
         deleteTraceForEvent(eventId)
         if (trace.isNotEmpty()) insertTrace(trace.map { it.copy(eventId = eventId) })
+        if (countAll() > maxTraceEvents) deleteTracesOutsideMostRecent(maxTraceEvents)
     }
 
     /** Most recent decisions first, for the activity and statistics-exclusion feed. */
@@ -218,9 +278,73 @@ interface NotificationEventDao {
     @Query("UPDATE notification_events SET undone = 1 WHERE id = :id")
     suspend fun markUndone(id: Long)
 
-    /** Retention housekeeping: deletes log rows older than [cutoffMillis]; returns rows removed. */
-    @Query("DELETE FROM notification_events WHERE posted_at_millis < :cutoffMillis")
-    suspend fun deleteOlderThan(cutoffMillis: Long): Int
+    @Query(
+        "SELECT id, posted_at_millis, posted_epoch_day, undone FROM notification_events " +
+            "WHERE posted_at_millis < :cutoffMillis " +
+            "ORDER BY posted_at_millis ASC, id ASC LIMIT :limit",
+    )
+    suspend fun getRetentionDeletionCandidates(
+        cutoffMillis: Long,
+        limit: Int,
+    ): List<EventDeletionCandidateRow>
+
+    @Query(
+        "SELECT id, posted_at_millis, posted_epoch_day, undone FROM notification_events " +
+            "WHERE id NOT IN (SELECT id FROM notification_events " +
+            "ORDER BY posted_at_millis DESC, id DESC LIMIT :max) " +
+            "ORDER BY posted_at_millis ASC, id ASC LIMIT :limit",
+    )
+    suspend fun getOverflowDeletionCandidates(
+        max: Int,
+        limit: Int,
+    ): List<EventDeletionCandidateRow>
+
+    @Query(
+        "SELECT id, posted_at_millis, posted_epoch_day, undone FROM notification_events " +
+            "ORDER BY posted_at_millis ASC, id ASC LIMIT :limit",
+    )
+    suspend fun getAllDeletionCandidates(limit: Int): List<EventDeletionCandidateRow>
+
+    @Query("DELETE FROM notification_events WHERE id IN (:ids)")
+    suspend fun deleteByIds(ids: List<Long>): Int
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertInsightSourceGaps(rows: List<DailyInsightSourceGapEntity>)
+
+    /**
+     * Marks every analytics-relevant local day represented by the exact retention candidates before
+     * deleting those same ids.
+     */
+    @Transaction
+    suspend fun deleteOlderThanWithSourceGaps(
+        cutoffMillis: Long,
+        legacyZoneId: ZoneId,
+    ): Int =
+        deleteInBatches(legacyZoneId) {
+            getRetentionDeletionCandidates(cutoffMillis, DELETION_BATCH_SIZE)
+        }
+
+    /**
+     * Applies the deterministic newest-row cap while preserving an honest completeness marker for
+     * every day represented by the exact overflow candidate set.
+     */
+    @Transaction
+    suspend fun deleteOverLimitWithSourceGaps(
+        max: Int,
+        legacyZoneId: ZoneId,
+    ): Int {
+        require(max >= 0) { "Recent event maximum must not be negative" }
+        return deleteInBatches(legacyZoneId) {
+            getOverflowDeletionCandidates(max, DELETION_BATCH_SIZE)
+        }
+    }
+
+    /** Explicit activity clearing keeps completed rollups and marks every affected source day. */
+    @Transaction
+    suspend fun deleteAllWithSourceGaps(legacyZoneId: ZoneId): Int =
+        deleteInBatches(legacyZoneId) {
+            getAllDeletionCandidates(DELETION_BATCH_SIZE)
+        }
 
     @Query("DELETE FROM notification_events")
     suspend fun deleteAll(): Int
@@ -256,13 +380,6 @@ interface NotificationEventDao {
     )
     suspend fun deleteEncryptedContentsForPackage(packageName: String): Int
 
-    /** Caps the log at the [max] most recent rows, deleting the overflow; returns rows removed. */
-    @Query(
-        "DELETE FROM notification_events WHERE id NOT IN " +
-            "(SELECT id FROM notification_events ORDER BY posted_at_millis DESC, id DESC LIMIT :max)",
-    )
-    suspend fun deleteOverLimit(max: Int): Int
-
     @Query(
         "DELETE FROM notification_decision_traces WHERE event_id NOT IN " +
             "(SELECT id FROM notification_events ORDER BY posted_at_millis DESC, id DESC LIMIT :max)",
@@ -293,12 +410,39 @@ interface NotificationEventDao {
         snoozeAction: StoredRuleAction,
     ): List<PackageCount>
 
-    @Query(
-        "SELECT package_name, channel_id, posted_at_millis FROM notification_events " +
-            "WHERE posted_at_millis >= :sinceMillis " +
-            "ORDER BY posted_at_millis DESC, id DESC LIMIT 10000",
-    )
-    suspend fun rateHistorySince(sinceMillis: Long): List<RateHistoryRow>
+    private suspend fun deleteInBatches(
+        legacyZoneId: ZoneId,
+        select: suspend () -> List<EventDeletionCandidateRow>,
+    ): Int {
+        var total = 0
+        while (true) {
+            val candidates = select()
+            if (candidates.isEmpty()) return total
+            val analyticsDays =
+                candidates
+                    .asSequence()
+                    .filterNot(EventDeletionCandidateRow::undone)
+                    .map { candidate ->
+                        candidate.postedEpochDay
+                            ?: Instant
+                                .ofEpochMilli(candidate.postedAtMillis)
+                                .atZone(legacyZoneId)
+                                .toLocalDate()
+                                .toEpochDay()
+                    }.distinct()
+                    .toList()
+            if (analyticsDays.isNotEmpty()) {
+                insertInsightSourceGaps(analyticsDays.map(::DailyInsightSourceGapEntity))
+            }
+            val deleted = deleteByIds(candidates.map(EventDeletionCandidateRow::id))
+            check(deleted == candidates.size) { "Event deletion candidate set changed inside transaction" }
+            total += deleted
+        }
+    }
+
+    companion object {
+        private const val DELETION_BATCH_SIZE = 500
+    }
 }
 
 /** Projection for [NotificationEventDao.countByPackageBetween]: a package and its event tally. */
@@ -310,12 +454,6 @@ data class PackageCount(
 data class ActionCountRow(
     @ColumnInfo(name = "action") val action: StoredRuleAction,
     @ColumnInfo(name = "count") val count: Int,
-)
-
-data class RateHistoryRow(
-    @ColumnInfo(name = "package_name") val packageName: String,
-    @ColumnInfo(name = "channel_id") val channelId: String?,
-    @ColumnInfo(name = "posted_at_millis") val postedAtMillis: Long,
 )
 
 data class NotificationSourceRow(
@@ -331,6 +469,13 @@ data class EventTimeBoundsRow(
     @ColumnInfo(name = "newest_posted_at_millis") val newestPostedAtMillis: Long?,
     @ColumnInfo(name = "oldest_posted_epoch_day") val oldestPostedEpochDay: Long?,
     @ColumnInfo(name = "newest_posted_epoch_day") val newestPostedEpochDay: Long?,
+)
+
+data class EventDeletionCandidateRow(
+    @ColumnInfo(name = "id") val id: Long,
+    @ColumnInfo(name = "posted_at_millis") val postedAtMillis: Long,
+    @ColumnInfo(name = "posted_epoch_day") val postedEpochDay: Long?,
+    @ColumnInfo(name = "undone") val undone: Boolean,
 )
 
 data class HistoryCoverageRow(

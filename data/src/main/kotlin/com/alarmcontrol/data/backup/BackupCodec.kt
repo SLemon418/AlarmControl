@@ -266,6 +266,7 @@ object BackupCodec {
             .put("categoryCorrectionCount", categoryCorrectionCount)
             .put("semanticCorrectionCount", semanticCorrectionCount)
             .put("breakdownVersion", breakdownVersion)
+            .put("sourceComplete", sourceComplete)
             .put("ruleBreakdownComplete", ruleBreakdownComplete)
             .put("monitorRuleBreakdownComplete", monitorRuleBreakdownComplete)
             .put("appBreakdownComplete", appBreakdownComplete)
@@ -368,6 +369,7 @@ object BackupCodec {
             categoryCorrectionCount = optInt("categoryCorrectionCount", 0),
             semanticCorrectionCount = optInt("semanticCorrectionCount", 0),
             breakdownVersion = optInt("breakdownVersion", 0),
+            sourceComplete = optBoolean("sourceComplete", false),
             ruleBreakdownComplete = optBoolean("ruleBreakdownComplete", false),
             monitorRuleBreakdownComplete = optBoolean("monitorRuleBreakdownComplete", false),
             appBreakdownComplete = optBoolean("appBreakdownComplete", false),
