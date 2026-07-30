@@ -105,10 +105,8 @@ class FakeLlmObservationDao : LlmObservationDao {
     override suspend fun trimLocalSemanticFeedback(max: Int): Int {
         val retained =
             localFeedback.value
-                .sortedWith(
-                    compareByDescending<LocalSemanticFeedbackEntity> { it.recordedAtMillis }
-                        .thenByDescending { it.sourceEventId },
-                ).take(max)
+                .sortedByDescending(LocalSemanticFeedbackEntity::sourceEventId)
+                .take(max)
         val deleted = localFeedback.value.size - retained.size
         localFeedback.value = retained
         return deleted

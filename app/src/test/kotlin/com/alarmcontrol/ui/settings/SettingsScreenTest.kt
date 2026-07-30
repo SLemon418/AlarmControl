@@ -379,6 +379,47 @@ class SettingsScreenTest {
         )
     }
 
+    @Test
+    fun `notification detail retention is selectable while storage is enabled`() {
+        var selectedDays = 0
+        setScreen(
+            state =
+                SettingsUiState(
+                    notificationContentStorageEnabled = true,
+                    notificationContentRetentionDays = 7,
+                ),
+            destination = SettingsDestination.DATA_PRIVACY,
+            onContentRetentionChange = { selectedDays = it },
+        )
+
+        composeRule
+            .onNodeWithContentDescription("Notification detail retention")
+            .performScrollTo()
+            .assertIsEnabled()
+            .performClick()
+        composeRule.onNodeWithText("14 days").performClick()
+
+        assertEquals(14, selectedDays)
+    }
+
+    @Test
+    fun `notification detail retention stays visible but disabled with storage off`() {
+        setScreen(
+            state =
+                SettingsUiState(
+                    notificationContentStorageEnabled = false,
+                    notificationContentRetentionDays = 7,
+                ),
+            destination = SettingsDestination.DATA_PRIVACY,
+        )
+
+        composeRule
+            .onNodeWithContentDescription("Notification detail retention")
+            .performScrollTo()
+            .assertIsNotEnabled()
+        composeRule.onNodeWithText("Delete stored notification details now").assertDoesNotExist()
+    }
+
     private fun setScreen(
         state: SettingsUiState,
         destination: SettingsDestination = SettingsDestination.OVERVIEW,
@@ -389,6 +430,7 @@ class SettingsScreenTest {
         onRestoreSelectionChange: (RestoreSelectionUi) -> Unit = {},
         onCopyAutomationToken: (String) -> Unit = {},
         onDynamicColorChange: (Boolean) -> Unit = {},
+        onContentRetentionChange: (Int) -> Unit = {},
         appLanguage: AppLanguage = AppLanguage.SYSTEM,
         onAppLanguageChange: (AppLanguage) -> Unit = {},
         onNavigate: (SettingsDestination) -> Unit = {},
@@ -425,6 +467,7 @@ class SettingsScreenTest {
                         onRestoreSelectionChange = onRestoreSelectionChange,
                         onCopyAutomationToken = onCopyAutomationToken,
                         onDynamicColorChange = onDynamicColorChange,
+                        onContentRetentionChange = onContentRetentionChange,
                         appLanguage = appLanguage,
                         onAppLanguageChange = onAppLanguageChange,
                     )

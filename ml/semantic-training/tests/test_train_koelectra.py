@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import multiprocessing
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -11,6 +14,46 @@ TRAINING_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TRAINING_DIR))
 
 import train_koelectra as trainer  # noqa: E402
+from semantic_contract import resolve_training_model_bundle  # noqa: E402
+
+
+CHECKPOINT_FILES = (
+    "config.json",
+    "checkpoint.json",
+    "optimizer.pt",
+    "model.safetensors",
+)
+
+
+def _write_checkpoint_bundle(directory: Path, marker: bytes) -> None:
+    for name in CHECKPOINT_FILES:
+        (directory / name).write_bytes(marker + b"-" + name.encode())
+
+
+def _publish_checkpoint_process(
+    target_value: str,
+    marker: bytes,
+    start: multiprocessing.synchronize.Event,
+) -> None:
+    start.wait()
+    trainer._replace_directory(
+        Path(target_value),
+        lambda directory: _write_checkpoint_bundle(directory, marker),
+    )
+
+
+def _publish_checkpoint_then_pause_process(
+    target_value: str,
+    marker: bytes,
+    ready: multiprocessing.synchronize.Event,
+) -> None:
+    def writer(directory: Path) -> None:
+        _write_checkpoint_bundle(directory, marker)
+        ready.set()
+        while True:
+            time.sleep(1)
+
+    trainer._replace_directory(Path(target_value), writer)
 
 
 class KoElectraTrainingScriptTest(unittest.TestCase):
@@ -107,9 +150,11 @@ class KoElectraTrainingScriptTest(unittest.TestCase):
                 max_rss_bytes=trainer.DEFAULT_MAX_RSS_BYTES,
             )
 
+            examples, dataset_sha256 = trainer.load_dataset_snapshot(dataset)
             manifest = trainer.initial_manifest(
                 options,
-                trainer.load_dataset(dataset),
+                examples,
+                dataset_sha256,
                 torch_version="test-torch",
                 transformers_version="test-transformers",
             )
@@ -133,6 +178,60 @@ class KoElectraTrainingScriptTest(unittest.TestCase):
             self.assertEqual(
                 trainer.sha256_file(base_model / "vocab.txt"),
                 manifest["inputs"]["base_vocab_sha256"],
+            )
+
+    def test_training_manifest_reuses_the_loaded_dataset_snapshot_hash(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            dataset = root / "dataset.jsonl"
+            self._write_dataset(dataset)
+            original = dataset.read_bytes()
+            base_model = root / "base-model"
+            base_model.mkdir()
+            (base_model / "config.json").write_text("{}\n", encoding="utf-8")
+            real_loader = trainer.validated_training_rows_snapshot
+
+            def load_then_replace(path):
+                snapshot = real_loader(path)
+                dataset.write_bytes(original + b"\n")
+                return snapshot
+
+            with patch.object(
+                trainer,
+                "validated_training_rows_snapshot",
+                side_effect=load_then_replace,
+            ):
+                examples, dataset_sha256 = trainer.load_dataset_snapshot(
+                    dataset
+                )
+
+            options = trainer.TrainingOptions(
+                base_model=base_model,
+                dataset=dataset,
+                output=root / "output",
+                epochs=1,
+                batch_size=1,
+                learning_rate=1e-5,
+                seed=1,
+                max_rss_bytes=trainer.DEFAULT_MAX_RSS_BYTES,
+            )
+            manifest = trainer.initial_manifest(
+                options,
+                examples,
+                dataset_sha256,
+                torch_version="test-torch",
+                transformers_version="test-transformers",
+            )
+
+            self.assertEqual(
+                hashlib.sha256(original).hexdigest(),
+                manifest["inputs"]["dataset_sha256"],
+            )
+            self.assertNotEqual(
+                manifest["inputs"]["dataset_sha256"],
+                hashlib.sha256(dataset.read_bytes()).hexdigest(),
             )
 
     def test_checkpoint_preserves_regular_wordpiece_vocab(self) -> None:
@@ -170,6 +269,90 @@ class KoElectraTrainingScriptTest(unittest.TestCase):
 
             with self.assertRaises(trainer.TrainingInputError):
                 trainer._copy_base_vocab(base_model, target)
+
+    def test_concurrent_checkpoint_publishers_commit_one_complete_generation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            target = Path(temporary_directory) / "best"
+            context = multiprocessing.get_context("fork")
+            start = context.Event()
+            processes = [
+                context.Process(
+                    target=_publish_checkpoint_process,
+                    args=(str(target), marker, start),
+                )
+                for marker in (b"first", b"second")
+            ]
+            for process in processes:
+                process.start()
+            start.set()
+            for process in processes:
+                process.join(timeout=10)
+                self.assertEqual(0, process.exitcode)
+
+            generation = resolve_training_model_bundle(target)
+            markers = {
+                (generation / name).read_bytes().split(b"-", maxsplit=1)[0]
+                for name in CHECKPOINT_FILES
+            }
+            self.assertIn(markers, ({b"first"}, {b"second"}))
+
+    def test_sigkill_before_checkpoint_commit_preserves_old_generation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            target = Path(temporary_directory) / "checkpoint"
+            trainer._replace_directory(
+                target,
+                lambda directory: _write_checkpoint_bundle(directory, b"old"),
+            )
+            original = {
+                name: (resolve_training_model_bundle(target) / name).read_bytes()
+                for name in CHECKPOINT_FILES
+            }
+            context = multiprocessing.get_context("fork")
+            ready = context.Event()
+            process = context.Process(
+                target=_publish_checkpoint_then_pause_process,
+                args=(str(target), b"new", ready),
+            )
+            process.start()
+            self.assertTrue(ready.wait(timeout=10))
+            process.kill()
+            process.join(timeout=10)
+
+            self.assertIsNotNone(process.exitcode)
+            self.assertNotEqual(0, process.exitcode)
+            generation = resolve_training_model_bundle(target)
+            self.assertEqual(
+                original,
+                {
+                    name: (generation / name).read_bytes()
+                    for name in CHECKPOINT_FILES
+                },
+            )
+            _, generations_name = trainer.training_generation_names(target)
+            generations = target.parent / generations_name
+            self.assertTrue(list(generations.glob(".pending-*")))
+
+            trainer._replace_directory(
+                target,
+                lambda directory: _write_checkpoint_bundle(
+                    directory,
+                    b"recovered",
+                ),
+            )
+
+            self.assertEqual([], list(generations.glob(".pending-*")))
+            recovered = resolve_training_model_bundle(target)
+            self.assertEqual(
+                {b"recovered"},
+                {
+                    (recovered / name).read_bytes().split(b"-", maxsplit=1)[0]
+                    for name in CHECKPOINT_FILES
+                },
+            )
 
     def test_offline_cpu_environment_disables_accelerators(self) -> None:
         trainer.configure_offline_cpu_environment()

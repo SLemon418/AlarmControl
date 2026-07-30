@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -13,7 +14,9 @@ import tempfile
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from atomic_generation import _fsync_directory
 from evaluate_semantic import (
+    BoundPredictionSet,
     EvaluationError,
     evaluate_predictions,
     load_bound_prediction_set,
@@ -24,7 +27,6 @@ from semantic_contract import (
     ContractError,
     SemanticThresholds,
     model_bundle_hashes,
-    sha256_file,
 )
 
 SCHEMA_VERSION = "semantic-backend-parity-v2"
@@ -47,7 +49,10 @@ class ParityError(ValueError):
     """Raised when predictions cannot form trusted parity evidence."""
 
 
-def _load_json(path: Path, context: str) -> dict[str, Any]:
+def _load_json_snapshot(
+    path: Path,
+    context: str,
+) -> tuple[dict[str, Any], str]:
     if path.is_symlink() or not path.is_file():
         raise ParityError(f"{context}: must be a non-symlink regular file")
 
@@ -60,8 +65,9 @@ def _load_json(path: Path, context: str) -> dict[str, Any]:
         return value
 
     try:
+        content = path.read_bytes()
         value = json.loads(
-            path.read_text(encoding="utf-8"),
+            content.decode("utf-8"),
             object_pairs_hook=strict,
             parse_constant=lambda item: (_ for _ in ()).throw(
                 ParityError(f"{context}: invalid number {item}")
@@ -71,7 +77,11 @@ def _load_json(path: Path, context: str) -> dict[str, Any]:
         raise ParityError(f"{context}: invalid JSON: {error}") from error
     if not isinstance(value, dict):
         raise ParityError(f"{context}: must contain one JSON object")
-    return value
+    return value, hashlib.sha256(content).hexdigest()
+
+
+def _load_json(path: Path, context: str) -> dict[str, Any]:
+    return _load_json_snapshot(path, context)[0]
 
 
 def _sha(value: Any, context: str) -> str:
@@ -95,12 +105,56 @@ def _thresholds(
         raise ParityError(str(error)) from error
 
 
-def _prediction_manifest(path: Path) -> tuple[dict[str, Any], Path]:
+def _prediction_manifest(
+    path: Path,
+) -> tuple[dict[str, Any], Path, str]:
     manifest_path = path.with_suffix(f"{path.suffix}.manifest.json")
-    manifest = _load_json(manifest_path, "prediction manifest")
+    manifest, manifest_sha256 = _load_json_snapshot(
+        manifest_path,
+        "prediction manifest",
+    )
     if manifest.get("schema_version") != PREDICTION_MANIFEST_SCHEMA:
         raise ParityError("unsupported prediction-manifest schema")
-    return manifest, manifest_path
+    return manifest, manifest_path, manifest_sha256
+
+
+def _require_bound_prediction_snapshot(
+    manifest: Mapping[str, Any],
+    manifest_sha256: str,
+    bound: BoundPredictionSet,
+    context: str,
+) -> None:
+    if bound.prediction_manifest_sha256 != manifest_sha256:
+        raise ParityError(
+            f"{context} changed while its prediction snapshot was loaded"
+        )
+    bindings = {
+        "backend": (
+            bound.provenance.get("backend"),
+            manifest.get("backend"),
+        ),
+        "model_artifact_sha256": (
+            bound.provenance.get("model_artifact_sha256"),
+            manifest.get("model_artifact_sha256"),
+        ),
+        "prediction_sha256": (
+            bound.prediction_sha256,
+            manifest.get("output_sha256"),
+        ),
+        "selected_split": (
+            bound.selected_split,
+            manifest.get("selected_split"),
+        ),
+        "vocab_sha256": (
+            bound.provenance.get("vocab_sha256"),
+            manifest.get("vocab_sha256"),
+        ),
+    }
+    for field, (actual, expected) in bindings.items():
+        if actual != expected:
+            raise ParityError(
+                f"{context} changed while its prediction snapshot was loaded"
+            )
 
 
 def _resolved_path(
@@ -115,7 +169,10 @@ def _resolved_path(
 
 
 def _conversion_hashes(path: Path) -> dict[str, str]:
-    manifest = _load_json(path, "conversion manifest")
+    manifest, manifest_sha256 = _load_json_snapshot(
+        path,
+        "conversion manifest",
+    )
     if (
         manifest.get("schema_version") != CONVERSION_SCHEMA_VERSION
         or manifest.get("labels") != list(LABELS)
@@ -126,7 +183,7 @@ def _conversion_hashes(path: Path) -> dict[str, str]:
     if not isinstance(source, dict) or not isinstance(artifact, dict):
         raise ParityError("conversion provenance is missing")
     return {
-        "manifest": sha256_file(path),
+        "manifest": manifest_sha256,
         "bundle": _sha(source.get("model_bundle_sha256"), "conversion bundle"),
         "vocab": _sha(source.get("vocab_sha256"), "conversion vocabulary"),
         "model": _sha(artifact.get("sha256"), "conversion model"),
@@ -284,18 +341,18 @@ def build_parity_report(
             "sealed holdouts must not be read"
         )
 
-    pytorch_manifest, pytorch_manifest_path = _prediction_manifest(
+    (
+        pytorch_manifest,
+        pytorch_manifest_path,
+        pytorch_manifest_sha256,
+    ) = _prediction_manifest(
         pytorch_predictions
     )
-    tflite_manifest, _ = _prediction_manifest(tflite_predictions)
-    splits = {
-        pytorch_manifest.get("selected_split"),
-        tflite_manifest.get("selected_split"),
-    }
-    if len(splits) != 1 or next(iter(splits)) not in ALLOWED_SPLITS:
-        raise ParityError("both predictions must select validation or test")
-    split = str(next(iter(splits)))
-
+    (
+        tflite_manifest,
+        _,
+        tflite_manifest_sha256,
+    ) = _prediction_manifest(tflite_predictions)
     try:
         pytorch = load_bound_prediction_set(
             [pytorch_predictions],
@@ -312,6 +369,25 @@ def build_parity_report(
         or tflite.provenance["backend"] != TFLITE_BACKEND
     ):
         raise ParityError("prediction backends are reversed or unsupported")
+    _require_bound_prediction_snapshot(
+        pytorch_manifest,
+        pytorch_manifest_sha256,
+        pytorch,
+        "PyTorch prediction",
+    )
+    _require_bound_prediction_snapshot(
+        tflite_manifest,
+        tflite_manifest_sha256,
+        tflite,
+        "TFLite prediction",
+    )
+    splits = {
+        pytorch.selected_split,
+        tflite.selected_split,
+    }
+    if len(splits) != 1 or next(iter(splits)) not in ALLOWED_SPLITS:
+        raise ParityError("both predictions must select validation or test")
+    split = str(next(iter(splits)))
 
     conversion = _conversion_hashes(conversion_manifest)
     pytorch_bundle, pytorch_vocab = _pytorch_hashes(
@@ -397,8 +473,8 @@ def build_parity_report(
             "pytorch_model_bundle_sha256": pytorch_bundle,
             "tflite_model_sha256": tflite_model,
             "vocab_sha256": conversion["vocab"],
-            "pytorch_predictions_sha256": sha256_file(pytorch_predictions),
-            "tflite_predictions_sha256": sha256_file(tflite_predictions),
+            "pytorch_predictions_sha256": pytorch.prediction_sha256,
+            "tflite_predictions_sha256": tflite.prediction_sha256,
         },
         "agreement": {
             "raw_argmax": _agreement(raw_pytorch, raw_tflite),
@@ -459,6 +535,7 @@ def _write_json(path: Path, value: Mapping[str, Any]) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary_name, path)
+        _fsync_directory(path.parent)
     except BaseException:
         Path(temporary_name).unlink(missing_ok=True)
         raise

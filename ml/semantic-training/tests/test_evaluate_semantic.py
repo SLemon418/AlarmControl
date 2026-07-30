@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 TRAINING_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TRAINING_DIR))
@@ -751,6 +752,71 @@ class SemanticEvaluationTest(unittest.TestCase):
                 )
 
         self.assertEqual(len(rows), len(loaded))
+
+    def test_prediction_and_manifest_are_bound_to_one_byte_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rows = prediction_rows(split="validation")
+            source_path = root / "dataset.jsonl"
+            prediction_path = root / "predictions.jsonl"
+            source_manifest_path = root / "manifest.json"
+            write_jsonl(source_path, source_rows(rows, keep_split=True))
+            write_jsonl(prediction_path, rows)
+            write_prediction_manifest(
+                prediction_path,
+                source_path,
+                len(rows),
+                "validation",
+            )
+            source_manifest_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "semantic-dataset-manifest-v6",
+                        "row_count": len(rows),
+                        "files": {
+                            source_path.name: {
+                                "sha256": sha256_file(source_path),
+                                "rows": len(rows),
+                            }
+                        },
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            replacement = [dict(row) for row in rows]
+            replacement[0]["confidence"] = 0.99
+            replacement[0]["probabilities"] = probability_map(
+                str(replacement[0]["predicted_intent"]),
+                0.99,
+            )
+            real_snapshot = evaluator._prediction_snapshot
+
+            def snapshot_then_publish_replacement(path: Path):
+                snapshot = real_snapshot(path)
+                write_jsonl(prediction_path, replacement)
+                write_prediction_manifest(
+                    prediction_path,
+                    source_path,
+                    len(replacement),
+                    "validation",
+                )
+                return snapshot
+
+            with mock.patch.object(
+                evaluator,
+                "_prediction_snapshot",
+                side_effect=snapshot_then_publish_replacement,
+            ):
+                with self.assertRaisesRegex(
+                    evaluator.EvaluationError,
+                    "output SHA-256 mismatch",
+                ):
+                    evaluator.load_bound_prediction_set(
+                        [prediction_path],
+                        source_manifest_path,
+                    )
 
     def test_tensorflow_lite_binding_requires_and_verifies_vocab_hash(
         self,

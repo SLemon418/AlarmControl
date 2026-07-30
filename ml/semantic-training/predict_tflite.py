@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -14,13 +15,26 @@ import time
 from pathlib import Path
 from typing import Any, Sequence
 
+from atomic_generation import _fsync_directory
+from coupled_artifact_publisher import (
+    CoupledArtifactError,
+    json_bytes,
+    jsonl_bytes,
+    normalize_publication_path,
+    publish_coupled_files,
+)
 from semantic_contract import (
+    CONVERSION_MODEL_FILENAME,
+    CONVERSION_VOCAB_FILENAME,
+    ContractError,
     LABELS,
     MAX_SEQUENCE_LENGTH,
     WordPieceTokenizer,
-    load_jsonl,
+    load_jsonl_snapshot,
     notification_text,
-    sha256_file,
+    regular_file_evidence,
+    resolve_conversion_bundle,
+    resolve_training_model_bundle,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -88,10 +102,65 @@ def _atomic_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
                     json.dumps(record, ensure_ascii=False, separators=(",", ":"))
                 )
                 stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(temporary_name, path)
+        _fsync_directory(path.parent)
     except BaseException:
         Path(temporary_name).unlink(missing_ok=True)
         raise
+
+
+def _atomic_json(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, ensure_ascii=False, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, path)
+        _fsync_directory(path.parent)
+    except BaseException:
+        Path(temporary_name).unlink(missing_ok=True)
+        raise
+
+
+def _resolve_output_path(path: Path) -> Path:
+    try:
+        return normalize_publication_path(path)
+    except CoupledArtifactError as error:
+        raise ValueError(str(error)) from error
+
+
+def _resolve_regular_input(path: Path, context: str) -> Path:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"{context} must be a non-symlink regular file: {path}")
+    return path.resolve(strict=True)
+
+
+def _file_evidence(
+    path: Path,
+    context: str,
+) -> tuple[str, tuple[int, int, int, int, int]]:
+    try:
+        return regular_file_evidence(path)
+    except ContractError as error:
+        raise ValueError(f"{context}: {error}") from error
+
+
+def _require_unchanged_file(
+    path: Path,
+    context: str,
+    expected: tuple[str, tuple[int, int, int, int, int]],
+) -> None:
+    if _file_evidence(path, context) != expected:
+        raise ValueError(f"{context} changed while predictions were produced")
 
 
 def _validate_source_record(record: dict[str, Any], context: str) -> None:
@@ -108,17 +177,37 @@ def _validate_source_record(record: dict[str, Any], context: str) -> None:
         raise ValueError(f"{context}: title and body must be strings")
 
 
+def _load_source_records(
+    input_path: Path,
+    selected_split: str | None,
+) -> tuple[list[dict[str, Any]], str]:
+    """Validate selected rows and hash the exact JSONL bytes that produced them."""
+
+    source_records, input_sha256 = load_jsonl_snapshot(input_path)
+    if selected_split:
+        source_records = [
+            record
+            for record in source_records
+            if record.get("split") == selected_split
+        ]
+    if not source_records:
+        raise ValueError("no input records selected")
+    for index, record in enumerate(source_records, 1):
+        _validate_source_record(record, f"{input_path}:{index}")
+    return source_records, input_sha256
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--model",
         type=Path,
-        default=DEFAULT_MODEL_DIR / "semantic_notification_classifier.tflite",
+        help="override the model inside the committed default bundle",
     )
     parser.add_argument(
         "--vocab",
         type=Path,
-        default=DEFAULT_MODEL_DIR / "semantic_vocab.txt",
+        help="override the vocabulary inside the committed default bundle",
     )
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -130,6 +219,32 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_model_and_vocab(
+    model: Path | None,
+    vocab: Path | None,
+) -> tuple[Path, Path]:
+    if (
+        model is not None
+        and vocab is not None
+        and model.parent == vocab.parent
+        and model.name == CONVERSION_MODEL_FILENAME
+        and vocab.name == CONVERSION_VOCAB_FILENAME
+    ):
+        bundle = resolve_conversion_bundle(model.parent)
+        return bundle / model.name, bundle / vocab.name
+
+    default_bundle = (
+        resolve_conversion_bundle(DEFAULT_MODEL_DIR)
+        if model is None or vocab is None
+        else DEFAULT_MODEL_DIR
+    )
+    model_path = model if model is not None else default_bundle / CONVERSION_MODEL_FILENAME
+    vocab_path = vocab if vocab is not None else default_bundle / CONVERSION_VOCAB_FILENAME
+    if vocab_path.name == "vocab.txt":
+        vocab_path = resolve_training_model_bundle(vocab_path.parent) / vocab_path.name
+    return model_path, vocab_path
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     _configure_process_environment()
     arguments = build_parser().parse_args(argv)
@@ -137,21 +252,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     import numpy as np
     from ai_edge_litert.interpreter import Interpreter
 
-    model_path = arguments.model.resolve(strict=True)
-    vocab_path = arguments.vocab.resolve(strict=True)
+    selected_model, selected_vocab = _resolve_model_and_vocab(
+        arguments.model,
+        arguments.vocab,
+    )
+    model_path = _resolve_regular_input(selected_model, "model")
+    vocab_path = _resolve_regular_input(selected_vocab, "vocabulary")
     input_path = arguments.input.resolve(strict=True)
+    model_evidence = _file_evidence(model_path, "model")
+    vocab_evidence = _file_evidence(vocab_path, "vocabulary")
     tokenizer = WordPieceTokenizer.from_file(vocab_path)
-    source_records = load_jsonl(input_path)
-    if arguments.split:
-        source_records = [
-            record
-            for record in source_records
-            if record.get("split") == arguments.split
-        ]
-    if not source_records:
-        raise ValueError("no input records selected")
-    for index, record in enumerate(source_records, 1):
-        _validate_source_record(record, f"{input_path}:{index}")
+    source_records, input_sha256 = _load_source_records(
+        input_path,
+        arguments.split,
+    )
 
     interpreter = Interpreter(model_path=str(model_path), num_threads=2)
     interpreter.allocate_tensors()
@@ -232,23 +346,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             }
         )
 
-    output_path = arguments.output.resolve()
-    _atomic_jsonl(output_path, predictions)
+    output_path = _resolve_output_path(arguments.output)
+    prediction_bytes = jsonl_bytes(predictions)
+    _require_unchanged_file(model_path, "model", model_evidence)
+    _require_unchanged_file(vocab_path, "vocabulary", vocab_evidence)
+    model_sha256 = model_evidence[0]
+    vocab_sha256 = vocab_evidence[0]
     manifest = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "prediction_schema_version": PREDICTION_SCHEMA_VERSION,
         "backend": BACKEND,
         "input": str(input_path),
-        "input_sha256": sha256_file(input_path),
+        "input_sha256": input_sha256,
         "output": str(output_path),
-        "output_sha256": sha256_file(output_path),
-        "model_artifact_sha256": sha256_file(model_path),
+        "output_sha256": hashlib.sha256(prediction_bytes).hexdigest(),
+        "model_artifact_sha256": model_sha256,
         "selected_split": arguments.split,
         "row_count": len(predictions),
         "model": str(model_path),
-        "model_sha256": sha256_file(model_path),
+        "model_sha256": model_sha256,
         "vocab": str(vocab_path),
-        "vocab_sha256": sha256_file(vocab_path),
+        "vocab_sha256": vocab_sha256,
         "max_sequence_length": MAX_SEQUENCE_LENGTH,
         "max_threads": 2,
         "host_inference_millis": {
@@ -263,19 +381,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         },
     }
     manifest_path = output_path.with_suffix(f"{output_path.suffix}.manifest.json")
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{manifest_path.name}.",
-        suffix=".tmp",
-        dir=manifest_path.parent,
+    publish_coupled_files(
+        {
+            output_path: prediction_bytes,
+            manifest_path: json_bytes(manifest),
+        },
+        lock_name=f".{output_path.name}.publish.lock",
     )
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump(manifest, stream, ensure_ascii=False, indent=2, sort_keys=True)
-            stream.write("\n")
-        os.replace(temporary_name, manifest_path)
-    except BaseException:
-        Path(temporary_name).unlink(missing_ok=True)
-        raise
     print(json.dumps(manifest, ensure_ascii=False, sort_keys=True))
     return 0
 

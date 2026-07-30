@@ -68,7 +68,7 @@ class FakeCategoryFeedbackDao : CategoryFeedbackDao {
     override suspend fun trimToMostRecent(max: Int): Int {
         require(max >= 0)
         lastTrimMaximum = max
-        val retainedIds = rows.sortedByDescending { it.id }.take(max).mapTo(mutableSetOf()) { it.id }
+        val retainedIds = retainedIds(max)
         val before = rows.size
         rows.removeAll { it.id !in retainedIds }
         val removed = before - rows.size
@@ -78,7 +78,7 @@ class FakeCategoryFeedbackDao : CategoryFeedbackDao {
 
     override suspend fun getLinkedTrimVictimEventIds(max: Int): List<Long> {
         require(max >= 0)
-        val retainedIds = rows.sortedByDescending { it.id }.take(max).mapTo(mutableSetOf()) { it.id }
+        val retainedIds = retainedIds(max)
         return rows
             .asSequence()
             .filter { it.id !in retainedIds }
@@ -86,6 +86,12 @@ class FakeCategoryFeedbackDao : CategoryFeedbackDao {
             .distinct()
             .toList()
     }
+
+    private fun retainedIds(max: Int): Set<Long> =
+        rows
+            .sortedByDescending(CategoryFeedbackEntity::id)
+            .take(max)
+            .mapTo(mutableSetOf()) { it.id }
 
     override fun observeLabelCounts(packageName: String): Flow<List<LabelCount>> =
         revision.map {

@@ -1,5 +1,7 @@
 package com.alarmcontrol.data.repository
 
+import com.alarmcontrol.core.privacy.LocalDataResetWriteFence
+import com.alarmcontrol.core.privacy.StaleLocalDataWriteException
 import com.alarmcontrol.core.profile.FilteringProfile
 import com.alarmcontrol.core.profile.MAX_PROFILE_NAME_CHARS
 import com.alarmcontrol.core.profile.MAX_PROFILE_RULE_IDS
@@ -15,11 +17,13 @@ class ProfileRepositoryImpl
     @Inject
     constructor(
         private val profileDao: ProfileDao,
+        private val localDataResetWriteFence: LocalDataResetWriteFence = LocalDataResetWriteFence(),
     ) : ProfileRepository {
         override fun observeProfiles(): Flow<List<FilteringProfile>> =
             profileDao.observeProfiles().map { rows -> rows.map { it.toDomain() } }
 
         override suspend fun save(profile: FilteringProfile): String {
+            val resetEpoch = localDataResetWriteFence.captureEpoch()
             val name = profile.name.trim()
             require(name.isNotBlank()) { "Profile name is required" }
             require(name.length <= MAX_PROFILE_NAME_CHARS) { "Profile name is too long" }
@@ -35,11 +39,20 @@ class ProfileRepositoryImpl
                     requireNotNull(ruleId.toLongOrNull()?.takeIf { it > 0 }) { "Invalid rule id" }
                 }
             val now = System.currentTimeMillis()
-            return profileDao.store(profile.copy(name = name).toEntity(id, now), ruleIds).toString()
+            return localDataResetWriteFence
+                .writeIfCurrent(resetEpoch) {
+                    profileDao.store(profile.copy(name = name).toEntity(id, now), ruleIds).toString()
+                } ?: throw StaleLocalDataWriteException()
         }
 
         override suspend fun delete(profileId: String) {
-            profileId.toLongOrNull()?.let { profileDao.deleteById(it) }
+            val resetEpoch = localDataResetWriteFence.captureEpoch()
+            profileId.toLongOrNull()?.let { id ->
+                localDataResetWriteFence.writeIfCurrent(resetEpoch) {
+                    profileDao.deleteById(id)
+                    Unit
+                } ?: throw StaleLocalDataWriteException()
+            }
         }
 
         override suspend fun countUsingRule(ruleId: String): Int =

@@ -19,14 +19,17 @@ import com.alarmcontrol.core.filtering.NotificationHistoryCoverage
 import com.alarmcontrol.core.filtering.NotificationHistoryPage
 import com.alarmcontrol.core.filtering.NotificationHistoryQuery
 import com.alarmcontrol.core.filtering.NotificationHistoryRepository
+import com.alarmcontrol.core.filtering.NotificationHistoryWriteFence
 import com.alarmcontrol.core.filtering.NotificationSource
 import com.alarmcontrol.core.insights.ActionBreakdown
 import com.alarmcontrol.core.result.runCatchingPreservingCancellation
+import com.alarmcontrol.core.settings.RetentionDefaults
 import com.alarmcontrol.core.settings.SettingsRepository
 import com.alarmcontrol.data.db.TransactionRunner
 import com.alarmcontrol.data.db.dao.ActionCountRow
 import com.alarmcontrol.data.db.dao.DailyInsightDao
 import com.alarmcontrol.data.db.dao.NotificationEventDao
+import com.alarmcontrol.data.db.dao.PendingNotificationActionDao
 import com.alarmcontrol.data.db.model.StoredRuleAction
 import com.alarmcontrol.data.db.relation.NotificationEventDetailRelation
 import com.alarmcontrol.data.mapper.toDomain
@@ -54,12 +57,15 @@ class NotificationEventRepositoryImpl
     @Inject
     internal constructor(
         private val eventDao: NotificationEventDao,
+        private val pendingActionDao: PendingNotificationActionDao,
         private val contentCipher: NotificationContentCipher,
         private val clock: Clock,
         private val settingsRepository: SettingsRepository,
         private val contentAccessGuard: NotificationContentAccessGuard,
         private val dailyInsightDao: DailyInsightDao,
         private val transactionRunner: TransactionRunner,
+        private val notificationHistoryWriteFence: NotificationHistoryWriteFence =
+            NotificationHistoryWriteFence(),
         @Dispatcher(AppDispatcher.IO) private val ioDispatcher: CoroutineDispatcher,
     ) : NotificationEventRepository,
         NotificationHistoryRepository {
@@ -95,6 +101,7 @@ class NotificationEventRepositoryImpl
                             MAX_RETAINED_NOTIFICATION_EVENTS,
                             MAX_RETAINED_NOTIFICATION_TRACE_EVENTS,
                             clock.zone,
+                            clock.millis(),
                         ).toString()
                 }
             }
@@ -113,6 +120,7 @@ class NotificationEventRepositoryImpl
                     monitoredAction = enrichment.monitoredAction?.toStoredType(),
                     trace = enrichment.decisionTrace.map { it.toEntity() },
                     maxTraceEvents = MAX_RETAINED_NOTIFICATION_TRACE_EVENTS,
+                    nowMillis = clock.millis(),
                 )
             }
         }
@@ -190,6 +198,10 @@ class NotificationEventRepositoryImpl
                             val mayRead =
                                 settingsRepository.notificationContentStorageEnabled.first() &&
                                     row.event.packageName !in settingsRepository.contentExcludedPackages.first()
+                            val retentionMillis =
+                                settingsRepository.notificationContentRetentionDays
+                                    .first()
+                                    .toContentRetentionMillis()
                             NotificationEventDetail(
                                 event = row.toDomain(),
                                 content =
@@ -197,6 +209,7 @@ class NotificationEventRepositoryImpl
                                         mayRead = mayRead,
                                         cipher = contentCipher,
                                         nowMillis = clock.millis(),
+                                        retentionMillis = retentionMillis,
                                     ),
                             )
                         }
@@ -212,6 +225,10 @@ class NotificationEventRepositoryImpl
                 contentAccessGuard.withLock {
                     val contentStorageEnabled = settingsRepository.notificationContentStorageEnabled.first()
                     val excludedPackages = settingsRepository.contentExcludedPackages.first()
+                    val retentionMillis =
+                        settingsRepository.notificationContentRetentionDays
+                            .first()
+                            .toContentRetentionMillis()
                     eventDao
                         .getSimulationSamples(packageName, limit.coerceIn(1, MAX_SIMULATION_SAMPLES))
                         .map { row ->
@@ -221,6 +238,7 @@ class NotificationEventRepositoryImpl
                                     mayRead = contentStorageEnabled && row.event.packageName !in excludedPackages,
                                     cipher = contentCipher,
                                     nowMillis = clock.millis(),
+                                    retentionMillis = retentionMillis,
                                 ),
                             )
                         }
@@ -244,13 +262,19 @@ class NotificationEventRepositoryImpl
                 .observeActionCountsForDay(epochDay, legacyStartMillis, legacyEndMillis)
                 .map(List<ActionCountRow>::toActionBreakdown)
 
-        override suspend fun undo(eventId: String) {
-            eventId.toLongOrNull()?.let { id ->
+        override suspend fun undo(eventId: String): Boolean {
+            val id = eventId.toLongOrNull() ?: return false
+            val historyEpoch = notificationHistoryWriteFence.captureEpoch()
+            return notificationHistoryWriteFence.writeIfCurrent(historyEpoch) {
                 transactionRunner.run {
-                    eventDao.markUndone(id)
-                    dailyInsightDao.deleteContainingEvent(id)
+                    if (eventDao.markUndone(id) == 0) {
+                        false
+                    } else {
+                        dailyInsightDao.deleteContainingEvent(id)
+                        true
+                    }
                 }
-            }
+            } ?: false
         }
 
         override suspend fun purgeEventsOlderThan(cutoffMillis: Long): Int =
@@ -304,13 +328,20 @@ class NotificationEventRepositoryImpl
         }
 
         override suspend fun purgeEncryptedContentOlderThan(cutoffMillis: Long): Int =
-            eventDao.deleteEncryptedContentsOlderThan(cutoffMillis)
+            contentAccessGuard.withLock {
+                transactionRunner.run {
+                    val nowMillis = clock.millis()
+                    eventDao.deleteEncryptedContentsOlderThan(cutoffMillis, nowMillis) +
+                        pendingActionDao.deleteContentsOutsideRetention(cutoffMillis, nowMillis)
+                }
+            }
     }
 
 private fun NotificationEventDetailRelation.contentState(
     mayRead: Boolean,
     cipher: NotificationContentCipher,
     nowMillis: Long,
+    retentionMillis: Long,
 ): NotificationContentState {
     if (!mayRead) return NotificationContentState.NotStored
     val payload = encryptedContent
@@ -321,7 +352,10 @@ private fun NotificationEventDetailRelation.contentState(
             NotificationContentState.NotStored
         }
     }
-    if (nowMillis - payload.createdAtMillis >= ENCRYPTED_CONTENT_RETENTION_MILLIS) {
+    if (
+        payload.createdAtMillis > nowMillis ||
+        nowMillis - payload.createdAtMillis >= retentionMillis
+    ) {
         return NotificationContentState.Expired
     }
     return runCatchingPreservingCancellation {
@@ -357,7 +391,14 @@ private fun List<ActionCountRow>.toActionBreakdown(): ActionBreakdown {
 }
 
 private const val MAX_SIMULATION_SAMPLES = 20
-private const val ENCRYPTED_CONTENT_RETENTION_MILLIS = 7L * 24 * 60 * 60 * 1_000
+private const val CONTENT_RETENTION_DAY_MILLIS = 24L * 60 * 60 * 1_000
+
+internal fun Int.toContentRetentionMillis(): Long {
+    require(this in RetentionDefaults.MIN_ENCRYPTED_CONTENT_DAYS..RetentionDefaults.MAX_ENCRYPTED_CONTENT_DAYS) {
+        "Content retention is out of range"
+    }
+    return toLong() * CONTENT_RETENTION_DAY_MILLIS
+}
 
 private fun Int.requireInRange(
     minimum: Int,

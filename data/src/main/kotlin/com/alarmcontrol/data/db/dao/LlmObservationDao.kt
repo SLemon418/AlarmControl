@@ -92,7 +92,7 @@ interface LlmObservationDao {
     @Query(
         "DELETE FROM local_semantic_feedback WHERE source_event_id NOT IN (" +
             "SELECT source_event_id FROM local_semantic_feedback " +
-            "ORDER BY recorded_at_millis DESC, source_event_id DESC LIMIT :max)",
+            "ORDER BY source_event_id DESC LIMIT :max)",
     )
     suspend fun trimLocalSemanticFeedback(max: Int): Int
 

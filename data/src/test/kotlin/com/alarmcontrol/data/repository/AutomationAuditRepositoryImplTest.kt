@@ -38,4 +38,31 @@ class AutomationAuditRepositoryImplTest {
             )
             assertEquals(200, dao.lastTrimLimit)
         }
+
+    @Test
+    fun `clock rollback keeps the newly inserted audit row inside the cap`() =
+        runTest {
+            val dao = FakeAutomationAuditDao()
+            val repository = AutomationAuditRepositoryImpl(dao)
+            repeat(200) { index ->
+                repository.record(entry(requestedAtMillis = 10_000L + index))
+            }
+
+            repository.record(entry(requestedAtMillis = 1))
+
+            val retained = repository.observeRecent(200).first()
+            assertEquals(200, retained.size)
+            assertEquals(1, retained.count { it.requestedAtMillis == 1L })
+            assertEquals(0, retained.count { it.requestedAtMillis == 10_000L })
+        }
+
+    private fun entry(requestedAtMillis: Long): AutomationAuditEntry =
+        AutomationAuditEntry(
+            requestedAtMillis = requestedAtMillis,
+            source = AutomationSource.EXTERNAL,
+            operation = AutomationOperation.DISABLE,
+            target = AutomationTarget.PROFILE,
+            outcome = AutomationOutcome.UNAUTHORIZED,
+            changedCount = 0,
+        )
 }

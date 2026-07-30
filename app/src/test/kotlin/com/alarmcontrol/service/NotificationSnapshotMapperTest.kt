@@ -86,6 +86,19 @@ class NotificationSnapshotMapperTest {
             ),
         )
     }
+
+    @Test
+    fun `missing foreign notification extras map to empty text instead of crashing`() {
+        val extras: Bundle? = null
+
+        assertNull(
+            extras.boundedNotificationExtra(
+                40,
+                Notification.EXTRA_BIG_TEXT,
+                Notification.EXTRA_TEXT,
+            ),
+        )
+    }
 }
 
 private data object ThrowingCharSequence : CharSequence {

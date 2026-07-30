@@ -1,12 +1,11 @@
 package com.alarmcontrol.data.security
 
 import com.alarmcontrol.data.db.dao.NotificationRateStateDao
-import java.time.Clock
 import javax.inject.Inject
 
 internal interface RateOccurrenceDataCleaner {
     /** Called inside the app-wide Room clear transaction and rate-occurrence lifecycle gate. */
-    suspend fun clearDatabaseState()
+    suspend fun clearDatabaseState(resetAtMillis: Long)
 
     /** Called only after the database clear commits, while the lifecycle gate remains held. */
     fun deleteHmacKey()
@@ -17,10 +16,9 @@ internal class RoomRateOccurrenceDataCleaner
     constructor(
         private val dao: NotificationRateStateDao,
         private val hmacProvider: RateListenerKeyHmacProvider,
-        private val clock: Clock,
     ) : RateOccurrenceDataCleaner {
-        override suspend fun clearDatabaseState() {
-            dao.clearAllRateData(clock.millis())
+        override suspend fun clearDatabaseState(resetAtMillis: Long) {
+            dao.clearAllRateData(resetAtMillis)
         }
 
         override fun deleteHmacKey() {

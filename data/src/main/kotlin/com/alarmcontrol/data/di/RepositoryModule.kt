@@ -4,6 +4,7 @@ import com.alarmcontrol.core.automation.AutomationAuditRepository
 import com.alarmcontrol.core.backup.BackupRepository
 import com.alarmcontrol.core.feedback.AdFeedbackRepository
 import com.alarmcontrol.core.feedback.FeedbackRepository
+import com.alarmcontrol.core.filtering.NotificationActionOutbox
 import com.alarmcontrol.core.filtering.NotificationEventRepository
 import com.alarmcontrol.core.filtering.NotificationHistoryRepository
 import com.alarmcontrol.core.filtering.RateOccurrenceRepository
@@ -25,6 +26,7 @@ import com.alarmcontrol.data.repository.FeedbackRepositoryImpl
 import com.alarmcontrol.data.repository.InsightsAnalyticsRepositoryImpl
 import com.alarmcontrol.data.repository.InsightsSummaryRepositoryImpl
 import com.alarmcontrol.data.repository.LocalDataRepositoryImpl
+import com.alarmcontrol.data.repository.NotificationActionOutboxImpl
 import com.alarmcontrol.data.repository.NotificationEventRepositoryImpl
 import com.alarmcontrol.data.repository.ProfileRepositoryImpl
 import com.alarmcontrol.data.repository.RateOccurrenceRepositoryImpl
@@ -55,6 +57,10 @@ abstract class RepositoryModule {
     @Binds
     @Singleton
     abstract fun bindNotificationEventRepository(impl: NotificationEventRepositoryImpl): NotificationEventRepository
+
+    @Binds
+    @Singleton
+    abstract fun bindNotificationActionOutbox(impl: NotificationActionOutboxImpl): NotificationActionOutbox
 
     @Binds
     @Singleton

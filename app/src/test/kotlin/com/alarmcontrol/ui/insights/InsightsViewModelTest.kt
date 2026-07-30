@@ -40,6 +40,7 @@ import com.alarmcontrol.core.insights.InsightsSummaryRepository
 import com.alarmcontrol.core.insights.InsightsTrendPoint
 import com.alarmcontrol.core.insights.RuleInsightCount
 import com.alarmcontrol.core.insights.RuleTriggerCount
+import com.alarmcontrol.core.privacy.DailyInsightWriteFence
 import com.alarmcontrol.ml.NotificationCategories
 import com.alarmcontrol.testsupport.MainDispatcherRule
 import com.alarmcontrol.testsupport.awaitUntil
@@ -120,7 +121,9 @@ class InsightsViewModelTest {
     private val clock = Clock.fixed(Instant.parse("2026-06-22T10:00:00Z"), ZoneOffset.UTC)
     private val appIdentityResolver = AppIdentityResolver { AppIdentityUi("App: $it", null) }
 
-    private fun viewModel(): InsightsViewModel {
+    private fun viewModel(
+        dailyInsightWriteFence: DailyInsightWriteFence = DailyInsightWriteFence(),
+    ): InsightsViewModel {
         every { eventRepository.observeRecent(any()) } returns recent
         every { eventRepository.observeActionBreakdownSince(any()) } returns actionBreakdownFlow
         every {
@@ -144,7 +147,7 @@ class InsightsViewModelTest {
         every { insightsAnalyticsRepository.observe(any()) } returns analyticsFlow
         every { insightsAnalyticsRepository.observeAvailableRange() } returns availableRangeFlow
         every { ruleRepository.observeRules() } returns rulesFlow
-        every { ruleSuggestionRepository.observeSuggestions(any()) } returns suggestionsFlow
+        every { ruleSuggestionRepository.observeSuggestions(any(), any()) } returns suggestionsFlow
         return InsightsViewModel(
             eventRepository,
             feedbackRepository,
@@ -159,6 +162,7 @@ class InsightsViewModelTest {
             appIdentityResolver,
             clock,
             mainDispatcherRule.dispatcher,
+            dailyInsightWriteFence,
         )
     }
 
@@ -303,7 +307,7 @@ class InsightsViewModelTest {
     @Test
     fun `undo delegates to the repository and confirms`() =
         runTest {
-            coEvery { eventRepository.undo(any()) } just Runs
+            coEvery { eventRepository.undo(any()) } returns true
             val vm = viewModel()
 
             vm.uiState.test {
@@ -336,9 +340,17 @@ class InsightsViewModelTest {
                 )
             coEvery { eventRepository.undo("5") } answers {
                 recent.value = emptyList()
+                true
             }
             coEvery {
-                dailyInsightRepository.aggregateAndStore(any(), any(), any(), any(), any())
+                dailyInsightRepository.aggregateAndStoreIfCurrent(
+                    any(),
+                    any(),
+                    any(),
+                    any(),
+                    any(),
+                    any(),
+                )
             } returns
                 DailyInsight(
                     epochDay = day.toEpochDay(),
@@ -364,7 +376,7 @@ class InsightsViewModelTest {
             }
 
             coVerify {
-                dailyInsightRepository.aggregateAndStore(
+                dailyInsightRepository.aggregateAndStoreIfCurrent(
                     epochDay = day.toEpochDay(),
                     startMillis = day.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli(),
                     endMillis =
@@ -375,6 +387,33 @@ class InsightsViewModelTest {
                             .toEpochMilli(),
                     generatedAtMillis = clock.millis(),
                     topRules = 50,
+                    dailyInsightEpoch = any(),
+                )
+            }
+        }
+
+    @Test
+    fun `missing undo target reports failure without recreating a daily rollup`() =
+        runTest {
+            coEvery { eventRepository.undo("missing") } returns false
+            val vm = viewModel()
+
+            vm.uiState.test {
+                awaitUntil { !it.isLoading }
+                vm.onUndo("missing")
+                val failed = awaitUntil { it.userMessage != null }
+                assertEquals(uiText(R.string.message_insights_update_failed), failed.userMessage)
+                cancelAndIgnoreRemainingEvents()
+            }
+
+            coVerify(exactly = 0) {
+                dailyInsightRepository.aggregateAndStoreIfCurrent(
+                    any(),
+                    any(),
+                    any(),
+                    any(),
+                    any(),
+                    any(),
                 )
             }
         }
@@ -408,6 +447,7 @@ class InsightsViewModelTest {
     @Test
     fun `LLM observation and explicit ad correction stay linked to one event`() =
         runTest {
+            coEvery { adFeedbackRepository.recordCorrection("7", false) } returns true
             recent.value =
                 listOf(
                     NotificationEvent(
@@ -453,7 +493,7 @@ class InsightsViewModelTest {
     @Test
     fun `semantic correction records one of the seven intents`() =
         runTest {
-            coEvery { adFeedbackRepository.recordCorrection("7", SemanticIntent.SECURITY) } just Runs
+            coEvery { adFeedbackRepository.recordCorrection("7", SemanticIntent.SECURITY) } returns true
             val vm = viewModel()
 
             vm.uiState.test {

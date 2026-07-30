@@ -128,6 +128,14 @@ python3 ml/semantic-training/train_koelectra.py \
   --max-rss-bytes 4294967296
 ```
 
+출력의 `best`와 `checkpoint`는 논리 selector다. 게시할 때마다 모델,
+tokenizer, config, optimizer state, checkpoint metadata를 포함하는 완전한
+불변 hidden generation을 먼저 쓰고 fsync한 뒤, process lock 아래에서
+단일 pointer를 원자적으로 교체한다. 따라서 동시 학습이나 강제 종료도
+부분·혼합 bundle을 노출하지 않는다. 아래 저장소 도구에는 논리 selector
+경로를 그대로 넘기며, 도구가 하나의 committed generation으로 해석한다.
+`training_manifest.json`은 output 루트에 유지된다.
+
 검증 예측과 안전한 float32 임계값 선택은 다음과 같다.
 
 ```bash

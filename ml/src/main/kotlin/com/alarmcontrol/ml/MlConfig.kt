@@ -13,6 +13,8 @@ internal object MlConfig {
     const val MODEL_ASSET = "notification_classifier.tflite"
     const val VOCAB_ASSET = "vocab.txt"
     const val LABELS_ASSET = "labels.txt"
+    const val CLASSIFIER_GENERATION_POINTER_ASSET = "classifier_current.txt"
+    const val CLASSIFIER_GENERATIONS_ASSET_DIRECTORY = "classifier_generations"
 
     /** Minimum top score for a categorization to be trusted; mirrored by the trainer's verification. */
     const val CONFIDENCE_THRESHOLD = 0.6f

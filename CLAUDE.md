@@ -112,15 +112,17 @@ propose it first, don't just add it.
   are optional and may appear only inside a password-derived AES-256-GCM envelope; notification
   content, LLM reasoning, and the per-install
   automation token are never exported. Restore is previewed, validated, and applied transactionally.
-- **Notification detail history is explicit opt-in and local.** It is off by default. When enabled,
-  non-`SECRET` title/body payloads are bounded, encrypted with an Android Keystore AES-256-GCM key,
-  stored in a cascade child row, and removed after seven days; users may exclude packages. Lists,
-  search, analytics, logs, and backups never read or contain plaintext. Turning the setting off
-  deletes every ciphertext row and the non-exportable key immediately.
+- **Notification detail history is default-on and local.** Safe first-run initialization enables
+  eligible storage with seven-day retention; users can choose 1, 3, 7, 14, or 30 days, exclude
+  packages, or turn it off. Non-`SECRET` title/body payloads are bounded, encrypted with an Android
+  Keystore AES-256-GCM key, and stored in a cascade child row. Lists, search, analytics, logs, and
+  backups never read or contain plaintext. Turning the setting off deletes every ciphertext row and
+  the non-exportable key immediately.
 - **Enforced by automated gates:** `OfflineManifestGuardTest` (Robolectric, real merged manifest)
   and `OfflineGuardTest` (classpath) fail the JVM test gate on violations. The Gradle
-  `:app:offlineGuard` task also scans both debug/release merged manifests and resolved runtime
-  dependency graphs during `check`, APK assembly, and bundle creation. The build-only
+  `:app:offlineGuard` task also scans debug/release app manifests, the `:app`, `:data`, and `:ml`
+  debug instrumented-test APK manifests, and all five resolved runtime dependency graphs during
+  `check`, APK assembly, and bundle creation. The build-only
   `:baselineprofile:offlineManifestGuard` applies the same rule to both Baseline Profile test APKs.
   These gates reject `INTERNET` and networking libraries
   (OkHttp/Retrofit/Ktor/gRPC/Volley/Apollo/Firebase). WorkManager's read-only
@@ -136,7 +138,7 @@ Boundaries exist to keep features small and to make the offline rule structurall
 ```
 :app           Compose UI host, navigation, DI wiring, the NotificationListenerService entry point
 :core          framework-free domain models, repository contracts, dispatchers, Result types
-:data          Room v15 + DataStore, repositories, backup, mappers (the only module that persists)
+:data          Room v16 + DataStore, repositories, backup, mappers (the only module that persists)
 :ml            bundled classifier, optional local LLM, feature extraction, feedback/learning
 :notifications notification matching/filtering engine (pure, testable logic)
 :automation    exported intents, Tasker/Locale plugin, QS tiles, App Shortcuts
@@ -213,8 +215,9 @@ Boundaries exist to keep features small and to make the offline rule structurall
   imply silently marking another app's notification as read, blocking a system alarm, or preventing
   a heads-up notification before it appears — we can't (see §0).
 - Persist a content-free local event record for each decision (for insights and optional statistics
-  exclusion). Optional detail title/body is a separate, bounded, Keystore-encrypted seven-day child
-  payload and is never used by list queries or analytics. Exclusion cannot restore a dismissed notification.
+  exclusion). Detail title/body is a separate, bounded, Keystore-encrypted child payload with
+  user-selected 1–30 day retention and is never used by list queries or analytics. Exclusion cannot
+  restore a dismissed notification.
 - Raw history is bounded by both its configured age and the newest 10,000 rows; condition traces are
   retained only for the newest 1,000 events. Daily/today analytics use the local day captured when
   the notification was posted, with timestamp fallback only for legacy rows.
@@ -267,11 +270,11 @@ Turn tasks into verifiable goals and loop until green (see §10).
 - **Repositories/DB**: Room tests (in-memory or Robolectric).
 - **ViewModels/Flows**: Turbine + MockK.
 - **Offline**: JVM tests plus the Gradle `offlineGuard` assert no `INTERNET` permission and no
-  networking artifact on debug or release runtime classpaths (§3) — this is itself a success
-  criterion.
+  networking artifact on debug/release app or `:app`/`:data`/`:ml` debug-instrumented-test runtime
+  classpaths (§3) — this is itself a success criterion.
 - **Room migrations**: schema upgrades ship with an **instrumented** migration test
   (`:data/src/androidTest`, using `MigrationTestHelper` over the exported schema JSONs) that seeds
-  data in old versions and asserts it survives upgrades from v1, v2, v3, v10, and v12 to v13,
+  data in old versions and asserts it survives upgrades from v1, v2, v3, v10, v12, and v15 to v16,
   including legacy binary-ad feedback migration to semantic intents.
   Instrumented tests run on a device/emulator (`./gradlew :data:connectedDebugAndroidTest`),
   complementing the JVM unit suite — they are **not** part of the default `./gradlew test` run.

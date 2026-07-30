@@ -9,6 +9,7 @@ import com.alarmcontrol.data.db.dao.DailyInsightDao
 import com.alarmcontrol.data.db.dao.LlmObservationDao
 import com.alarmcontrol.data.db.dao.NotificationEventDao
 import com.alarmcontrol.data.db.dao.NotificationRateStateDao
+import com.alarmcontrol.data.db.dao.PendingNotificationActionDao
 import com.alarmcontrol.data.db.dao.ProfileDao
 import com.alarmcontrol.data.db.dao.RuleDao
 import com.alarmcontrol.data.db.dao.RuleSuggestionDao
@@ -44,6 +45,7 @@ object DatabaseModule {
                 AppDatabase.MIGRATION_12_13,
                 AppDatabase.MIGRATION_13_14,
                 AppDatabase.MIGRATION_14_15,
+                AppDatabase.MIGRATION_15_16,
             ).build()
 
     @Provides
@@ -51,6 +53,10 @@ object DatabaseModule {
 
     @Provides
     fun provideNotificationEventDao(database: AppDatabase): NotificationEventDao = database.notificationEventDao()
+
+    @Provides
+    fun providePendingNotificationActionDao(database: AppDatabase): PendingNotificationActionDao =
+        database.pendingNotificationActionDao()
 
     @Provides
     fun provideNotificationRateStateDao(database: AppDatabase): NotificationRateStateDao =

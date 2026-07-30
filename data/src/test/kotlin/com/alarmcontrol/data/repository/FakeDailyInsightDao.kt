@@ -212,8 +212,10 @@ class FakeDailyInsightDao : DailyInsightDao {
                             it.packageName == entry.key.first &&
                                 it.channelId == entry.key.second &&
                                 it.inWindow(epochDay, startMillis, endMillis)
-                        }.mapNotNull { it.channelName }
-                        .lastOrNull()
+                        }.maxWithOrNull(
+                            compareBy<NotificationEventEntity> { it.postedAtMillis }
+                                .thenBy { it.id },
+                        )?.channelName
                 ChannelCountRow(entry.key.first, entry.key.second, channelName, entry.value)
             }
 
@@ -277,6 +279,15 @@ class FakeDailyInsightDao : DailyInsightDao {
                     rows.count { it.action == cancelAction || it.action == snoozeAction },
                 )
             }.sortedBy(HourCountRow::hour)
+
+    override suspend fun countMissingPostedMinuteBetween(
+        epochDay: Long,
+        startMillis: Long,
+        endMillis: Long,
+    ): Int =
+        events.count {
+            it.inWindow(epochDay, startMillis, endMillis) && it.postedMinuteOfDay == null
+        }
 
     override suspend fun semanticBreakdownBetween(
         epochDay: Long,

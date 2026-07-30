@@ -232,8 +232,9 @@ The **Insights** area has three tabs:
 - **Records:** searchable local decision records, action/source filters, and details.
 
 Records list metadata without decrypting notification content. Open **Details** for one record to
-read eligible encrypted title/text only when optional detail storage had already been enabled for
-that notification.
+read eligible encrypted title/text only when detail storage was enabled for that notification.
+App lists and statistics identify apps by installed-app name and icon. A raw package name appears
+only inside the explicit record **Details** dialog.
 
 From a record you can:
 
@@ -309,28 +310,31 @@ the [Automation Guide](automation.md).
 
 ## Notification detail history
 
-By default, AlarmControl stores content-free decision metadata only.
+AlarmControl enables eligible encrypted notification detail storage during safe first-run
+initialization. The default retention is seven days.
 
-To opt into encrypted details:
+To review or change encrypted details:
 
 1. Open **Settings → Data & privacy**.
-2. Enable **Store notification title and text**.
+2. Choose a retention period of **1, 3, 7, 14, or 30 days**.
 3. Select **Choose apps**. The button also shows how many apps AlarmControl has seen; turn storage
    off for any sensitive app.
+4. Turn off **Store notification title and text** if no notification content should be retained.
 
 This setting affects eligible future notifications only. Content is:
 
 - length-bounded and encrypted with an Android Keystore AES-256-GCM key;
 - unavailable to list and analytics queries;
 - never stored for Android `SECRET` notifications or excluded apps;
-- automatically removed after seven days;
+- automatically removed after the selected retention period, or sooner if its parent activity
+  record reaches the activity-history limit;
 - never included in portable backup.
 
 When turning the feature off succeeds, AlarmControl deletes all stored ciphertext and the
 non-exportable key before showing the setting as off. If deletion fails, the setting remains on and
-the app asks you to retry. Details may also be unavailable because storage was off when the
-notification arrived, the record expired, the app was excluded, Android marked it secret, or the
-local key was removed.
+the app asks you to retry. Turning storage back on applies only to future notifications. Details may
+also be unavailable because storage was off when the notification arrived, the selected retention
+period elapsed, the app was excluded, Android marked it secret, or the local key was removed.
 
 ## Retention and deletion
 
@@ -440,8 +444,8 @@ daily schedule. Review the battery status under Settings if timely summaries mat
 ### Notification details are missing
 
 Detail storage may have been off when the notification arrived, the app may be excluded, Android
-may have marked it `SECRET`, seven days may have elapsed, or the encryption key may have been
-deleted. Metadata can remain after content expires.
+may have marked it `SECRET`, the selected retention period may have elapsed, or the encryption key
+may have been deleted. Metadata can remain after content expires.
 
 ### An update will not install
 

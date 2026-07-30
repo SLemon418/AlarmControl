@@ -110,6 +110,18 @@ class CleanupCandidate:
         }
 
 
+@dataclass
+class _OpenedDirectory:
+    """Pinned directory tree used for no-follow deletion."""
+
+    descriptor: int
+    name: str
+    path: Path
+    metadata: os.stat_result
+    files: list[tuple[str, os.stat_result]]
+    directories: list["_OpenedDirectory"]
+
+
 def _canonical_root(root: Path | str) -> Path:
     raw = Path(root).expanduser()
     if not raw.exists():
@@ -302,17 +314,162 @@ def plan_cleanup(
     return selected, projected
 
 
-def _snapshot_for_deletion(candidate: Path) -> tuple[list[Path], list[Path]]:
-    files: list[Path] = []
-    directories: list[Path] = [candidate]
-    for path, _, is_directory in _walk_directory(candidate):
-        if _protected_name(path.name):
-            raise SafetyError(f"protected item rejected: {path}")
-        if is_directory:
-            directories.append(path)
-        else:
-            files.append(path)
-    return files, sorted(directories, key=lambda path: len(path.parts), reverse=True)
+def _directory_open_flags() -> int:
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_DIRECTORY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    return flags
+
+
+def _same_entry(
+    expected: os.stat_result,
+    actual: os.stat_result,
+    *,
+    directory: bool,
+) -> bool:
+    expected_kind = stat.S_ISDIR(expected.st_mode) if directory else stat.S_ISREG(expected.st_mode)
+    actual_kind = stat.S_ISDIR(actual.st_mode) if directory else stat.S_ISREG(actual.st_mode)
+    return (
+        expected_kind
+        and actual_kind
+        and expected.st_dev == actual.st_dev
+        and expected.st_ino == actual.st_ino
+    )
+
+
+def _open_directory_at(
+    parent_descriptor: int,
+    name: str,
+    display_path: Path,
+    opened_descriptors: list[int],
+) -> tuple[int, os.stat_result]:
+    try:
+        descriptor = os.open(
+            name,
+            _directory_open_flags(),
+            dir_fd=parent_descriptor,
+        )
+    except OSError as error:
+        raise SafetyError(f"cannot safely open directory: {display_path}") from error
+    opened_descriptors.append(descriptor)
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise SafetyError(f"path is no longer a directory: {display_path}")
+    return descriptor, metadata
+
+
+def _check_root_marker_at(root_descriptor: int, root: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    marker = root / ROOT_MARKER
+    try:
+        descriptor = os.open(ROOT_MARKER, flags, dir_fd=root_descriptor)
+    except OSError as error:
+        raise MarkerError(f"missing regular run-root marker: {marker}") from error
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise MarkerError(f"missing regular run-root marker: {marker}")
+        with os.fdopen(os.dup(descriptor), "r", encoding="utf-8") as stream:
+            content = json.load(stream)
+    except (OSError, json.JSONDecodeError) as error:
+        raise MarkerError(f"invalid run-root marker: {marker}") from error
+    finally:
+        os.close(descriptor)
+    if content != ROOT_MARKER_CONTENT:
+        raise MarkerError(f"unexpected run-root marker content: {marker}")
+
+
+def _snapshot_open_directory(
+    descriptor: int,
+    name: str,
+    path: Path,
+    metadata: os.stat_result,
+    opened_descriptors: list[int],
+) -> _OpenedDirectory:
+    """Pin and validate a complete tree before deleting any entry."""
+
+    try:
+        with os.scandir(descriptor) as iterator:
+            entries = sorted(iterator, key=lambda entry: entry.name)
+    except OSError as error:
+        raise SafetyError(f"cannot inspect directory: {path}") from error
+
+    files: list[tuple[str, os.stat_result]] = []
+    directories: list[_OpenedDirectory] = []
+    for entry in entries:
+        entry_path = path / entry.name
+        if _protected_name(entry.name):
+            raise SafetyError(f"protected item rejected: {entry_path}")
+        try:
+            entry_metadata = entry.stat(follow_symlinks=False)
+        except OSError as error:
+            raise SafetyError(f"cannot inspect path: {entry_path}") from error
+        if stat.S_ISLNK(entry_metadata.st_mode):
+            raise SafetyError(f"symlink rejected: {entry_path}")
+        if stat.S_ISREG(entry_metadata.st_mode):
+            files.append((entry.name, entry_metadata))
+            continue
+        if not stat.S_ISDIR(entry_metadata.st_mode):
+            raise SafetyError(f"non-regular path rejected: {entry_path}")
+        child_descriptor, child_metadata = _open_directory_at(
+            descriptor,
+            entry.name,
+            entry_path,
+            opened_descriptors,
+        )
+        if not _same_entry(entry_metadata, child_metadata, directory=True):
+            raise SafetyError(f"directory changed while opening: {entry_path}")
+        directories.append(
+            _snapshot_open_directory(
+                child_descriptor,
+                entry.name,
+                entry_path,
+                child_metadata,
+                opened_descriptors,
+            )
+        )
+    return _OpenedDirectory(
+        descriptor=descriptor,
+        name=name,
+        path=path,
+        metadata=metadata,
+        files=files,
+        directories=directories,
+    )
+
+
+def _current_entry(
+    parent_descriptor: int,
+    name: str,
+    display_path: Path,
+) -> os.stat_result:
+    try:
+        return os.stat(
+            name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+    except OSError as error:
+        raise SafetyError(f"path changed before deletion: {display_path}") from error
+
+
+def _delete_open_directory(tree: _OpenedDirectory) -> int:
+    deleted_bytes = 0
+    for child in tree.directories:
+        deleted_bytes += _delete_open_directory(child)
+        current = _current_entry(tree.descriptor, child.name, child.path)
+        if not _same_entry(child.metadata, current, directory=True):
+            raise SafetyError(f"directory changed before deletion: {child.path}")
+        os.rmdir(child.name, dir_fd=tree.descriptor)
+    for name, metadata in tree.files:
+        path = tree.path / name
+        current = _current_entry(tree.descriptor, name, path)
+        if not _same_entry(metadata, current, directory=False):
+            raise SafetyError(f"path changed before deletion: {path}")
+        os.unlink(name, dir_fd=tree.descriptor)
+        deleted_bytes += metadata.st_size
+    return deleted_bytes
 
 
 def delete_candidate(root: Path | str, candidate: Path | str) -> int:
@@ -334,22 +491,74 @@ def delete_candidate(root: Path | str, candidate: Path | str) -> int:
     if _contains_protected_item(resolved, resolved_candidate):
         raise SafetyError(f"candidate contains a protected item: {resolved_candidate}")
 
-    size_bytes = tree_bytes(resolved_candidate)
-    files, directories = _snapshot_for_deletion(resolved_candidate)
-    for path in files:
-        metadata = path.lstat()
-        if not stat.S_ISREG(metadata.st_mode):
-            raise SafetyError(f"path changed before deletion: {path}")
-    for path in directories:
-        metadata = path.lstat()
-        if not stat.S_ISDIR(metadata.st_mode):
-            raise SafetyError(f"directory changed before deletion: {path}")
+    relative = resolved_candidate.relative_to(resolved)
+    if any(_protected_name(part) for part in relative.parts[1:]):
+        raise SafetyError(f"protected candidate path rejected: {resolved_candidate}")
 
-    for path in files:
-        path.unlink()
-    for path in directories:
-        path.rmdir()
-    return size_bytes
+    opened_descriptors: list[int] = []
+    try:
+        try:
+            root_descriptor = os.open(resolved, _directory_open_flags())
+        except OSError as error:
+            raise SafetyError(f"cannot safely open run root: {resolved}") from error
+        opened_descriptors.append(root_descriptor)
+        _check_root_marker_at(root_descriptor, resolved)
+
+        parent_descriptor = root_descriptor
+        parent_path = resolved
+        candidate_descriptor = -1
+        candidate_metadata: os.stat_result | None = None
+        for part in relative.parts:
+            parent_path /= part
+            candidate_descriptor, candidate_metadata = _open_directory_at(
+                parent_descriptor,
+                part,
+                parent_path,
+                opened_descriptors,
+            )
+            if part != relative.parts[-1]:
+                parent_descriptor = candidate_descriptor
+
+        if candidate_metadata is None:
+            raise SafetyError(f"candidate is the run root: {resolved_candidate}")
+        tree = _snapshot_open_directory(
+            candidate_descriptor,
+            relative.parts[-1],
+            resolved_candidate,
+            candidate_metadata,
+            opened_descriptors,
+        )
+        marker = next(
+            (
+                metadata
+                for name, metadata in tree.files
+                if name == DISPOSABLE_MARKER
+            ),
+            None,
+        )
+        if marker is None:
+            raise SafetyError(
+                f"candidate lacks regular {DISPOSABLE_MARKER}: {resolved_candidate}"
+            )
+
+        size_bytes = _delete_open_directory(tree)
+        current = _current_entry(
+            parent_descriptor,
+            tree.name,
+            resolved_candidate,
+        )
+        if not _same_entry(tree.metadata, current, directory=True):
+            raise SafetyError(
+                f"candidate changed before deletion: {resolved_candidate}"
+            )
+        os.rmdir(tree.name, dir_fd=parent_descriptor)
+        return size_bytes
+    finally:
+        for descriptor in reversed(opened_descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 def _hard_reasons(run_bytes: int, free_bytes: int, policy: StoragePolicy) -> list[str]:

@@ -194,6 +194,7 @@ class NotificationRateLifecycleActorTest {
             val firstEvaluation = fixture.counts(at = 100_000L)
             val secondOutcome = CompletableDeferred<RatePostOutcome>(parent = null)
 
+            fixture.clock.setMillis(100_001L)
             fixture.actor.tryPost(
                 fixture.generation,
                 "raw-b",
@@ -247,6 +248,128 @@ class NotificationRateLifecycleActorTest {
                     true
                 },
             )
+        }
+
+    @Test
+    fun `committed history clear revokes captured counts and starts an empty rate baseline`() =
+        runTest {
+            val fixture =
+                fixture(
+                    backgroundScope,
+                    seed =
+                        listOf(
+                            occurrence(1, at = 99_000L),
+                            occurrence(2, at = 100_000L),
+                        ),
+                )
+            fixture.actor.connected()
+            runCurrent()
+            val captured = fixture.counts(at = 100_000L)
+            val generationBeforeClear = fixture.generation
+            assertEquals(2, captured.counts[packageMinute])
+
+            fixture.lifecycleGate.markStateCleared(resetAtMillis = 100_001L)
+            val generationAfterClear = fixture.generation
+
+            assertFalse(
+                fixture.actor.commitIfRateCountsCurrent(
+                    snapshot = fixture.snapshot(at = 100_000L),
+                    expectation = expectation(captured, packageMinute),
+                ) {
+                    true
+                },
+            )
+            assertTrue(generationAfterClear > generationBeforeClear)
+            assertFalse(fixture.counts(at = 100_001L).counts.containsKey(packageMinute))
+
+            fixture.clock.setMillis(100_002L)
+            val outcome = CompletableDeferred<RatePostOutcome>(parent = null)
+            fixture.actor.tryPost(
+                generation = generationAfterClear,
+                rawListenerKey = "after-clear",
+                postedAtMillis = 100_002L,
+                outcome = outcome,
+            )
+            runCurrent()
+
+            assertEquals(RatePostOutcome.Proceed, outcome.await())
+            fixture.clock.setMillis(160_001L)
+            assertFalse(fixture.counts(at = 160_001L).counts.containsKey(packageMinute))
+            fixture.clock.setMillis(160_002L)
+            assertEquals(1, fixture.counts(at = 160_002L).counts[packageMinute])
+        }
+
+    @Test
+    fun `committed history clear releases a saturated seed retry barrier`() =
+        runTest {
+            val fixture =
+                fixture(
+                    scope = backgroundScope,
+                    respectPersistedIncompleteWindow = true,
+                )
+            fixture.repository.persistedIncompleteUntilMillis = Long.MAX_VALUE
+            fixture.actor.connected()
+            runCurrent()
+            assertTrue(fixture.counts(at = 100_000L).counts.isEmpty())
+            val seedCallsBeforeClear = fixture.repository.callOrder.count { it == "seed" }
+
+            fixture.repository.persistedIncompleteUntilMillis =
+                100_001L + MAX_RATE_WINDOW_MILLIS + 1L
+            fixture.clock.setMillis(100_001L)
+            fixture.lifecycleGate.markStateCleared(resetAtMillis = 100_001L)
+            fixture.actor.currentLifecycleGeneration
+            fixture.actor.requestReseed(anchorMillis = 100_001L)
+            runCurrent()
+
+            assertEquals(
+                seedCallsBeforeClear + 1,
+                fixture.repository.callOrder.count { it == "seed" },
+            )
+            assertFalse(fixture.counts(at = 100_001L).counts.containsKey(packageMinute))
+        }
+
+    @Test
+    fun `history clear at saturated time leaves every rate window unknown`() =
+        runTest {
+            val fixture = fixture(backgroundScope)
+            fixture.lifecycleGate.markStateCleared(resetAtMillis = Long.MAX_VALUE)
+            val generation = fixture.actor.currentLifecycleGeneration
+            fixture.clock.setMillis(Long.MAX_VALUE)
+            val outcome = CompletableDeferred<RatePostOutcome>(parent = null)
+
+            fixture.actor.tryPost(
+                generation = generation,
+                rawListenerKey = "saturated-clear",
+                postedAtMillis = Long.MAX_VALUE,
+                outcome = outcome,
+            )
+            runCurrent()
+
+            assertEquals(RatePostOutcome.Proceed, outcome.await())
+            assertFalse(fixture.counts(at = Long.MAX_VALUE).counts.containsKey(packageMinute))
+        }
+
+    @Test
+    fun `history clear baseline stays unknown across rollback until the window refills`() =
+        runTest {
+            val fixture = fixture(backgroundScope)
+            fixture.lifecycleGate.markStateCleared(resetAtMillis = 100_000L)
+            val generation = fixture.actor.currentLifecycleGeneration
+            fixture.clock.setMillis(90_000L)
+            val outcome = CompletableDeferred<RatePostOutcome>(parent = null)
+
+            fixture.actor.tryPost(
+                generation = generation,
+                rawListenerKey = "after-rollback",
+                postedAtMillis = 90_000L,
+                outcome = outcome,
+            )
+            runCurrent()
+
+            assertEquals(RatePostOutcome.Proceed, outcome.await())
+            assertFalse(fixture.counts(at = 90_000L).counts.containsKey(packageMinute))
+            fixture.clock.setMillis(160_001L)
+            assertEquals(0, fixture.counts(at = 160_001L).counts[packageMinute])
         }
 
     @Test
@@ -445,6 +568,51 @@ class NotificationRateLifecycleActorTest {
         }
 
     @Test
+    fun `linkage and memory failures complete the post and do not stop the worker`() =
+        runTest {
+            listOf(
+                LinkageError("synthetic linkage failure"),
+                OutOfMemoryError("synthetic allocation failure"),
+            ).forEachIndexed { index, failure ->
+                val fixture =
+                    fixture(
+                        backgroundScope,
+                        seed = listOf(occurrence(1, at = 100_000L)),
+                    )
+                fixture.actor.connected()
+                runCurrent()
+                fixture.hasher.failure = failure
+                val failed = CompletableDeferred<RatePostOutcome>(parent = null)
+                val following = CompletableDeferred<RatePostOutcome>(parent = null)
+                var unavailableWhenFailureCompleted = false
+                failed.invokeOnCompletion {
+                    unavailableWhenFailureCompleted =
+                        fixture.counts(at = 100_001L).counts.isEmpty()
+                }
+
+                fixture.actor.tryPost(
+                    fixture.generation,
+                    "raw-failed-$index",
+                    postedAtMillis = 100_001L,
+                    outcome = failed,
+                )
+                fixture.actor.tryPost(
+                    fixture.generation,
+                    "raw-following-$index",
+                    postedAtMillis = 100_002L,
+                    outcome = following,
+                )
+                runCurrent()
+
+                assertEquals(RatePostOutcome.Proceed, failed.await())
+                assertEquals(RatePostOutcome.Proceed, following.await())
+                assertEquals(1, fixture.repository.recordCalls)
+                assertTrue(fixture.repository.extendedAnchors.isNotEmpty())
+                assertTrue(unavailableWhenFailureCompleted)
+            }
+        }
+
+    @Test
     fun `disconnect makes already queued post stale`() =
         runTest {
             val fixture = fixture(backgroundScope)
@@ -471,6 +639,109 @@ class NotificationRateLifecycleActorTest {
 
             assertEquals(listOf("gap", "seed"), fixture.repository.callOrder.take(2))
             assertEquals(123_000L, fixture.repository.extendedAnchors.first())
+        }
+
+    @Test
+    fun `future occurrence stays unknown and reseeds when wall clock catches up`() =
+        runTest {
+            val futurePostedAtMillis = 120_000L
+            val fixture =
+                fixture(
+                    scope = backgroundScope,
+                    seed = listOf(occurrence(1, at = futurePostedAtMillis)),
+                )
+            fixture.actor.connected()
+            runCurrent()
+
+            assertTrue(fixture.counts(at = 100_000L).counts.isEmpty())
+            assertEquals(1, fixture.repository.callOrder.count { it == "seed" })
+
+            fixture.clock.setMillis(futurePostedAtMillis - 1)
+            fixture.actor.requestReseed()
+            runCurrent()
+            assertEquals(1, fixture.repository.callOrder.count { it == "seed" })
+
+            fixture.clock.setMillis(futurePostedAtMillis)
+            val outcome = CompletableDeferred<RatePostOutcome>(parent = null)
+            fixture.actor.tryPost(
+                generation = fixture.generation,
+                rawListenerKey = "raw-current",
+                postedAtMillis = futurePostedAtMillis,
+                outcome = outcome,
+            )
+            runCurrent()
+
+            assertEquals(RatePostOutcome.Proceed, outcome.await())
+            assertEquals(2, fixture.counts(at = futurePostedAtMillis).counts[packageMinute])
+            assertEquals(2, fixture.repository.callOrder.count { it == "seed" })
+        }
+
+    @Test
+    fun `wall clock rollback after seeding keeps rate counts unknown until catch up`() =
+        runTest {
+            val fixture = fixture(backgroundScope)
+            fixture.actor.connected()
+            runCurrent()
+
+            fixture.clock.setMillis(200_000L)
+            val newerOutcome = CompletableDeferred<RatePostOutcome>(parent = null)
+            fixture.actor.tryPost(
+                generation = fixture.generation,
+                rawListenerKey = "raw-newer",
+                postedAtMillis = 200_000L,
+                outcome = newerOutcome,
+            )
+            runCurrent()
+            assertEquals(RatePostOutcome.Proceed, newerOutcome.await())
+
+            fixture.clock.setMillis(100_000L)
+            val rollbackOutcome = CompletableDeferred<RatePostOutcome>(parent = null)
+            fixture.actor.tryPost(
+                generation = fixture.generation,
+                rawListenerKey = "raw-after-rollback",
+                postedAtMillis = 100_000L,
+                outcome = rollbackOutcome,
+            )
+            runCurrent()
+
+            assertEquals(RatePostOutcome.Proceed, rollbackOutcome.await())
+            assertTrue(fixture.counts(at = 100_000L).counts.isEmpty())
+
+            fixture.clock.setMillis(200_000L)
+            assertEquals(1, fixture.counts(at = 100_000L).counts[packageMinute])
+        }
+
+    @Test
+    fun `pre rollback post time cannot bypass current wall clock barrier`() =
+        runTest {
+            val fixture = fixture(backgroundScope)
+            fixture.actor.connected()
+            runCurrent()
+
+            fixture.clock.setMillis(200_000L)
+            val outcome = CompletableDeferred<RatePostOutcome>(parent = null)
+            fixture.actor.tryPost(
+                generation = fixture.generation,
+                rawListenerKey = "raw-before-rollback",
+                postedAtMillis = 200_000L,
+                outcome = outcome,
+            )
+            runCurrent()
+            assertEquals(RatePostOutcome.Proceed, outcome.await())
+            val captured = fixture.counts(at = 200_000L)
+            assertEquals(1, captured.counts[packageMinute])
+
+            fixture.clock.setMillis(100_000L)
+
+            assertTrue(fixture.counts(at = 200_000L).counts.isEmpty())
+            assertFalse(
+                fixture.actor.commitIfRateCountsCurrent(
+                    snapshot = fixture.snapshot(at = 200_000L),
+                    expectation = expectation(captured, packageMinute),
+                ) {
+                    true
+                },
+            )
         }
 
     @Test
@@ -737,6 +1008,86 @@ class NotificationRateLifecycleActorTest {
             }
         }
 
+    @Test
+    fun `overflow gap cannot publish ahead of tracker invalidation during a platform commit`() =
+        runTest {
+            val fixture =
+                fixture(
+                    scope = backgroundScope,
+                    seed = listOf(occurrence(1, at = 100_000L)),
+                    commandCapacity = 1,
+                )
+            runCurrent()
+            fixture.actor.connected()
+            runCurrent()
+            fixture.repository.extendedAnchors.clear()
+
+            val removeHashStarted = CompletableDeferred<Unit>()
+            val releaseRemoveHash = CompletableDeferred<Unit>()
+            fixture.hasher.hashStarted = removeHashStarted
+            fixture.hasher.hashGate = releaseRemoveHash
+            assertTrue(
+                fixture.actor.tryRemove(
+                    generation = fixture.generation,
+                    rawListenerKey = "remove",
+                    removedPostTimeMillis = 100_000L,
+                ),
+            )
+            runCurrent()
+            removeHashStarted.await()
+
+            val captured = fixture.counts(at = 100_000L)
+            val actionStarted = CountDownLatch(1)
+            val releaseAction = CountDownLatch(1)
+            val overflowStarted = CountDownLatch(1)
+            val overflowReturned = CountDownLatch(1)
+            val commitThread =
+                thread(name = "rate-gap-commit") {
+                    fixture.actor.commitIfRateCountsCurrent(
+                        snapshot = fixture.snapshot(at = 100_000L),
+                        expectation = expectation(captured, packageMinute),
+                    ) {
+                        actionStarted.countDown()
+                        check(releaseAction.await(TEST_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+                        true
+                    }
+                }
+            assertTrue(actionStarted.await(TEST_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+            val overflowOutcome = CompletableDeferred<RatePostOutcome>(parent = null)
+            val overflowThread =
+                thread(name = "rate-gap-overflow") {
+                    overflowStarted.countDown()
+                    fixture.actor.tryPost(
+                        generation = fixture.generation,
+                        rawListenerKey = "overflow",
+                        postedAtMillis = 200_000L,
+                        outcome = overflowOutcome,
+                    )
+                    overflowReturned.countDown()
+                }
+
+            try {
+                assertTrue(overflowStarted.await(TEST_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+                assertFalse(overflowReturned.await(100L, TimeUnit.MILLISECONDS))
+                releaseRemoveHash.complete(Unit)
+                runCurrent()
+
+                assertTrue(fixture.repository.extendedAnchors.isEmpty())
+
+                releaseAction.countDown()
+                assertTrue(overflowReturned.await(TEST_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+                commitThread.join(TimeUnit.SECONDS.toMillis(TEST_TIMEOUT_SECONDS))
+                overflowThread.join(TimeUnit.SECONDS.toMillis(TEST_TIMEOUT_SECONDS))
+                assertEquals(RatePostOutcome.Proceed, overflowOutcome.await())
+                assertTrue(fixture.counts(at = 100_000L).counts.isEmpty())
+            } finally {
+                releaseRemoveHash.complete(Unit)
+                releaseAction.countDown()
+                commitThread.join(TimeUnit.SECONDS.toMillis(TEST_TIMEOUT_SECONDS))
+                overflowThread.join(TimeUnit.SECONDS.toMillis(TEST_TIMEOUT_SECONDS))
+            }
+        }
+
     private fun fixture(
         scope: kotlinx.coroutines.CoroutineScope,
         seed: List<PersistedRateOccurrence> = emptyList(),
@@ -804,10 +1155,15 @@ class NotificationRateLifecycleActorTest {
         var hashStarted: CompletableDeferred<Unit>? = null
         var hashGate: CompletableDeferred<Unit>? = null
         var result: RateListenerKeyHashResult = RateListenerKeyHashResult.Success(DIGEST)
+        var failure: Throwable? = null
 
         override suspend fun hash(rawListenerKey: String): RateListenerKeyHashResult {
             hashStarted?.complete(Unit)
             hashGate?.await()
+            failure?.let { error ->
+                failure = null
+                throw error
+            }
             return result
         }
     }
@@ -842,6 +1198,16 @@ class NotificationRateLifecycleActorTest {
             callOrder += "seed"
             seedStarted?.complete(Unit)
             seedGate?.await()
+            val futureOccurrenceRetryAtMillis =
+                seedOccurrences
+                    .maxOfOrNull(PersistedRateOccurrence::postedAtMillis)
+                    ?.takeIf { it > nowMillis }
+            if (futureOccurrenceRetryAtMillis != null) {
+                return RateOccurrenceSeed.Incomplete(
+                    reason = RateOccurrenceIncompleteReason.FUTURE_OCCURRENCE,
+                    retryAtMillis = futureOccurrenceRetryAtMillis,
+                )
+            }
             val incompleteUntilMillis =
                 persistedIncompleteUntilMillis
                     ?.takeIf {

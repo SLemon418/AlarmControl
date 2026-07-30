@@ -26,6 +26,10 @@ private const val ALIASED_EVENT_DAY_FILTER =
     "((event.posted_epoch_day = :epochDay) OR " +
         "(event.posted_epoch_day IS NULL AND event.posted_at_millis >= :startMillis " +
         "AND event.posted_at_millis < :endMillis))"
+private const val LATEST_EVENT_DAY_FILTER =
+    "((latest.posted_epoch_day = :epochDay) OR " +
+        "(latest.posted_epoch_day IS NULL AND latest.posted_at_millis >= :startMillis " +
+        "AND latest.posted_at_millis < :endMillis))"
 
 /**
  * Aggregates the decision log into per-day rollups and persists them (CLAUDE.md §5). The summarising
@@ -148,11 +152,15 @@ interface DailyInsightDao {
     ): List<CategoryCountRow>
 
     @Query(
-        "SELECT package_name, channel_id, MAX(channel_name) AS channel_name, COUNT(*) AS count " +
-            "FROM notification_events " +
-            "WHERE " + EVENT_DAY_FILTER + " AND undone = 0 AND channel_id IS NOT NULL " +
-            "GROUP BY package_name, channel_id ORDER BY count DESC, package_name ASC, channel_id ASC " +
-            "LIMIT :limit",
+        "SELECT event.package_name, event.channel_id, " +
+            "(SELECT latest.channel_name FROM notification_events AS latest " +
+            "WHERE latest.package_name = event.package_name AND latest.channel_id = event.channel_id " +
+            "AND " + LATEST_EVENT_DAY_FILTER + " AND latest.undone = 0 " +
+            "ORDER BY latest.posted_at_millis DESC, latest.id DESC LIMIT 1) AS channel_name, " +
+            "COUNT(*) AS count FROM notification_events AS event " +
+            "WHERE " + ALIASED_EVENT_DAY_FILTER + " AND event.undone = 0 AND event.channel_id IS NOT NULL " +
+            "GROUP BY event.package_name, event.channel_id " +
+            "ORDER BY count DESC, event.package_name ASC, event.channel_id ASC LIMIT :limit",
     )
     suspend fun channelBreakdownBetween(
         epochDay: Long,
@@ -212,6 +220,20 @@ interface DailyInsightDao {
         cancelAction: StoredRuleAction,
         snoozeAction: StoredRuleAction,
     ): List<HourCountRow>
+
+    /**
+     * Legacy events migrated before the posted-local-time fields existed cannot contribute to a
+     * trustworthy local-hour breakdown. Their presence must mark the rollup source incomplete.
+     */
+    @Query(
+        "SELECT COUNT(*) FROM notification_events WHERE " + EVENT_DAY_FILTER + " " +
+            "AND undone = 0 AND posted_minute_of_day IS NULL",
+    )
+    suspend fun countMissingPostedMinuteBetween(
+        epochDay: Long,
+        startMillis: Long,
+        endMillis: Long,
+    ): Int
 
     @Query(
         "SELECT COALESCE(llm.corrected_intent, llm.predicted_intent) AS intent, COUNT(*) AS count " +

@@ -15,6 +15,7 @@ class FakeRuleRepository(
         private set
     var bulkUpdateCount = 0
         private set
+    var beforeBulkUpdate: suspend () -> Unit = { yield() }
 
     override fun observeRules(): Flow<List<Rule>> = rules
 
@@ -33,7 +34,7 @@ class FakeRuleRepository(
         enabled: Boolean,
     ): Int {
         bulkUpdateCount++
-        yield()
+        beforeBulkUpdate()
         var changed = 0
         rules.value =
             rules.value.map { rule ->

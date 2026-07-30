@@ -42,7 +42,7 @@ data class NotificationEventEntity(
     @ColumnInfo(name = "importance") val importance: String? = null,
     @ColumnInfo(name = "is_conversation") val isConversation: Boolean? = null,
     @ColumnInfo(name = "is_foreground_service") val isForegroundService: Boolean? = null,
-    /** What the engine did. [StoredRuleAction.KEEP] means the notification was left untouched. */
+    /** The committed action attempt. [StoredRuleAction.KEEP] means no platform call was requested. */
     @ColumnInfo(name = "action") val action: StoredRuleAction,
     /** The rule that produced the decision; `null` when no rule matched (default keep). */
     @ColumnInfo(name = "matched_rule_id") val matchedRuleId: Long?,

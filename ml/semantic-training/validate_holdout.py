@@ -14,6 +14,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from atomic_generation import _fsync_directory
+
 HOLDOUT_SCHEMA_VERSION = "semantic-sealed-holdout-v1"
 MANIFEST_SCHEMA_VERSION = "semantic-sealed-holdout-manifest-v1"
 CATALOG_SCHEMA_VERSION = "semantic-family-v1"
@@ -520,6 +522,7 @@ def _write_manifest(manifest: Mapping[str, Any], path: Path) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary_path, path)
+        _fsync_directory(path.parent)
     except BaseException:
         temporary_path.unlink(missing_ok=True)
         raise

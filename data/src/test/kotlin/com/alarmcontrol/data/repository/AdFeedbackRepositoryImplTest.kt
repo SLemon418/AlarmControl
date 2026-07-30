@@ -184,6 +184,29 @@ class AdFeedbackRepositoryImplTest {
         }
 
     @Test
+    fun `clock rollback cannot make future semantic votes evict a new correction`() =
+        runTest {
+            dao.seedLocalSemanticFeedback(
+                List(25_000) { index ->
+                    com.alarmcontrol.data.db.entity.LocalSemanticFeedbackEntity(
+                        sourceEventId = index.toLong() + 1,
+                        packageName = "com.future",
+                        correctedIntent = "OTHER",
+                        recordedAtMillis = 1_000L + index,
+                    )
+                },
+            )
+            repository.recordObservation(observation("30000", "com.current", isAd = false))
+
+            assertTrue(repository.recordCorrection("30000", SemanticIntent.SECURITY))
+
+            val retained = dao.getLocalSemanticFeedback()
+            assertEquals(25_000, retained.size)
+            assertTrue(retained.any { it.sourceEventId == 30_000L && it.recordedAtMillis == 500L })
+            assertTrue(retained.none { it.sourceEventId == 1L })
+        }
+
+    @Test
     fun `delayed prediction update preserves an existing semantic correction`() =
         runTest {
             repository.recordObservation(observation("10", "com.shop", isAd = true))

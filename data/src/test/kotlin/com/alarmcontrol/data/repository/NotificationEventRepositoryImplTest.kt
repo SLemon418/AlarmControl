@@ -34,6 +34,7 @@ import java.util.concurrent.TimeUnit
 
 class NotificationEventRepositoryImplTest {
     private val dao = FakeNotificationEventDao()
+    private val pendingActions = FakePendingNotificationActionDao()
     private val cipher = FakeNotificationContentCipher()
     private val contentAccessGuard = NotificationContentAccessGuard()
     private val settings = FakeContentSettingsRepository(contentAccessGuard = contentAccessGuard)
@@ -41,13 +42,14 @@ class NotificationEventRepositoryImplTest {
     private val repository =
         NotificationEventRepositoryImpl(
             dao,
+            pendingActions,
             cipher,
             Clock.fixed(Instant.ofEpochMilli(10_000), ZoneOffset.UTC),
             settings,
             contentAccessGuard,
             dailyInsights,
             ImmediateTransactionRunner(),
-            Dispatchers.Unconfined,
+            ioDispatcher = Dispatchers.Unconfined,
         )
 
     private fun event(
@@ -100,7 +102,7 @@ class NotificationEventRepositoryImplTest {
         }
 
     @Test
-    fun `record hard caps raw history and returns an id when the inserted old row is trimmed`() =
+    fun `record hard caps raw history by insertion order and returns the retained id`() =
         runTest {
             repeat(10_000) {
                 dao.insert(
@@ -136,9 +138,9 @@ class NotificationEventRepositoryImplTest {
 
             assertEquals("10001", id)
             assertEquals(10_000, dao.countAll())
-            assertEquals(null, repository.getDetail(id))
-            assertEquals(0, dao.countEncryptedContents())
-            assertEquals(setOf(1L), dao.sourceGapDays)
+            assertTrue(repository.getDetail(id) != null)
+            assertEquals(1, dao.countEncryptedContents())
+            assertEquals(setOf(2L), dao.sourceGapDays)
 
             repository.enrichRecordedDecision(
                 id,
@@ -151,7 +153,36 @@ class NotificationEventRepositoryImplTest {
                 ),
             )
             assertEquals(10_000, dao.countAll())
-            assertEquals(emptyList<Long>(), dao.invalidatedRollupEventIds)
+            assertEquals(listOf(10_001L), dao.invalidatedRollupEventIds)
+        }
+
+    @Test
+    fun `future dated rows cannot evict a current event after clock rollback`() =
+        runTest {
+            repeat(10_000) { index ->
+                dao.insert(
+                    NotificationEventEntity(
+                        packageName = "com.example.future",
+                        category = null,
+                        postedAtMillis = 20_000L + index,
+                        action = StoredRuleAction.KEEP,
+                        matchedRuleId = null,
+                        recordedAtMillis = 20_000L + index,
+                    ),
+                )
+            }
+
+            val currentId =
+                repository.record(
+                    event(
+                        recordedAtMillis = 10_000,
+                        postedAtMillis = 10_000,
+                    ),
+                )
+
+            assertEquals(10_000, dao.countAll())
+            assertTrue(repository.getDetail(currentId) != null)
+            assertEquals(9_999, dao.inserted.count { it.postedAtMillis > 10_000 })
         }
 
     @Test
@@ -195,18 +226,24 @@ class NotificationEventRepositoryImplTest {
         }
 
     @Test
-    fun `content older than seven days is rejected before decryption`() =
+    fun `content read follows the configured retention period immediately`() =
         runTest {
+            val configurableSettings =
+                FakeContentSettingsRepository(
+                    contentRetentionDays = 14,
+                    contentAccessGuard = contentAccessGuard,
+                )
             val expiringRepository =
                 NotificationEventRepositoryImpl(
                     dao,
+                    pendingActions,
                     cipher,
                     Clock.fixed(Instant.ofEpochMilli(8L * 24 * 60 * 60 * 1_000), ZoneOffset.UTC),
-                    settings,
+                    configurableSettings,
                     contentAccessGuard,
                     dailyInsights,
                     ImmediateTransactionRunner(),
-                    Dispatchers.Unconfined,
+                    ioDispatcher = Dispatchers.Unconfined,
                 )
             val id =
                 expiringRepository.record(
@@ -214,7 +251,32 @@ class NotificationEventRepositoryImplTest {
                     NotificationContent("old title", "old body"),
                 )
 
+            assertEquals(
+                NotificationContentState.Available("old title", "old body"),
+                expiringRepository.getDetail(id)?.content,
+            )
+
+            configurableSettings.setNotificationContentRetentionDays(7)
+
             assertEquals(NotificationContentState.Expired, expiringRepository.getDetail(id)?.content)
+        }
+
+    @Test
+    fun `future dated content expires and is purged after clock rollback`() =
+        runTest {
+            val id =
+                repository.record(
+                    event(
+                        recordedAtMillis = 20_000,
+                        postedAtMillis = 20_000,
+                    ),
+                    NotificationContent("future title", "future body"),
+                )
+
+            assertEquals(NotificationContentState.Expired, repository.getDetail(id)?.content)
+            assertEquals(1, dao.countEncryptedContents())
+            assertEquals(1, repository.purgeEncryptedContentOlderThan(cutoffMillis = 0))
+            assertEquals(0, dao.countEncryptedContents())
         }
 
     @Test
@@ -300,6 +362,28 @@ class NotificationEventRepositoryImplTest {
             assertTrue(runCatching { repository.trimToMostRecent(-1) }.isFailure)
             assertTrue(runCatching { repository.trimDecisionTracesToMostRecent(-1) }.isFailure)
             assertTrue(runCatching { repository.mutedCountsByPackageBetween(2, 1) }.isFailure)
+        }
+
+    @Test
+    fun `notification sources use the name from the latest posted event`() =
+        runTest {
+            repository.record(
+                event(postedAtMillis = 1_000).copy(
+                    channelId = "offers",
+                    channelName = "Zulu",
+                ),
+            )
+            repository.record(
+                event(postedAtMillis = 2_000).copy(
+                    channelId = "offers",
+                    channelName = "Alerts",
+                ),
+            )
+
+            val source = repository.observeSources(10).first().single()
+
+            assertEquals("Alerts", source.channelName)
+            assertEquals(2_000L, source.lastSeenMillis)
         }
 
     @Test
@@ -433,9 +517,22 @@ class NotificationEventRepositoryImplTest {
         runTest {
             val id = repository.record(event())
 
-            repository.undo(id)
+            assertTrue(repository.undo(id))
 
             assertEquals(listOf(id.toLong()), dailyInsights.invalidatedEventIds)
+        }
+
+    @Test
+    fun `undo of a missing or already undone event does not invalidate a rollup`() =
+        runTest {
+            val id = repository.record(event())
+
+            assertFalse(repository.undo("999999"))
+            assertTrue(repository.undo(id))
+            dailyInsights.invalidatedEventIds.clear()
+            assertFalse(repository.undo(id))
+
+            assertTrue(dailyInsights.invalidatedEventIds.isEmpty())
         }
 
     @Test

@@ -100,6 +100,38 @@ class RateOccurrenceRepositoryImplTest {
         }
 
     @Test
+    fun futurePersistedOccurrenceKeepsSeedIncompleteUntilClockCatchesUp() =
+        runTest {
+            recordPost('a', "occurrence-a", postedAtMillis = 150)
+            recordPost('b', "occurrence-b", postedAtMillis = 200)
+
+            assertEquals(
+                RateOccurrenceSeed.Incomplete(
+                    RateOccurrenceIncompleteReason.FUTURE_OCCURRENCE,
+                    retryAtMillis = 200,
+                ),
+                repository.loadSeed(sinceMillis = 0, nowMillis = 100),
+            )
+            assertEquals(
+                RateOccurrenceSeed.Incomplete(
+                    RateOccurrenceIncompleteReason.FUTURE_OCCURRENCE,
+                    retryAtMillis = 200,
+                ),
+                repository.loadSeed(sinceMillis = 0, nowMillis = 150),
+            )
+
+            val recovered =
+                repository.loadSeed(
+                    sinceMillis = 0,
+                    nowMillis = 200,
+                ) as RateOccurrenceSeed.Available
+            assertEquals(
+                setOf(occurrence("occurrence-a"), occurrence("occurrence-b")),
+                recovered.occurrences.map { it.occurrenceId }.toSet(),
+            )
+        }
+
+    @Test
     fun stalePostCannotMoveActiveOrHistoryBackward() =
         runTest {
             recordPost('a', "occurrence-a", postedAtMillis = 200, channelId = "new")
@@ -344,13 +376,16 @@ class RateOccurrenceRepositoryImplTest {
                 current.activeOccurrence,
                 repository.activeOccurrence(digest('b')).successValue(),
             )
-            val rolledBack =
+            assertEquals(
+                RateOccurrenceSeed.Incomplete(
+                    RateOccurrenceIncompleteReason.FUTURE_OCCURRENCE,
+                    retryAtMillis = MAX_RATE_WINDOW_MILLIS + 1,
+                ),
                 repository.loadSeed(
                     sinceMillis = 0,
                     nowMillis = MAX_RATE_WINDOW_MILLIS,
-                ) as RateOccurrenceSeed.Available
-            assertEquals(1L, rolledBack.coverageStartMillis)
-            assertTrue(rolledBack.occurrences.isEmpty())
+                ),
+            )
             assertTrue(
                 repository.loadSeed(
                     sinceMillis = 1,

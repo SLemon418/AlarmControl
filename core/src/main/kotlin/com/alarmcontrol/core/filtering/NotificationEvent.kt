@@ -7,7 +7,8 @@ package com.alarmcontrol.core.filtering
  * Privacy (HARD RULE §3/§6): this carries **no notification content** — no title or body, only the
  * metadata those features need. Do not add content fields here.
  *
- * @property action the action that was applied ([RuleAction.Keep] when no rule matched).
+ * @property action the committed action. Cancel/snooze means the listener durably authorized and
+ *   attempted its void Binder call; Android provides no success acknowledgement.
  * @property matchedRuleId the rule that produced the decision, or `null` when none matched.
  * @property id persisted row id; blank for a not-yet-recorded event (the engine never sets it).
  * @property undone legacy storage name for whether the user excluded this entry from statistics.

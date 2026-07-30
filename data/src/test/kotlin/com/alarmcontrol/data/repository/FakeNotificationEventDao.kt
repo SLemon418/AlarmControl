@@ -170,12 +170,17 @@ class FakeNotificationEventDao : NotificationEventDao {
             events
                 .groupBy { it.packageName to it.channelId }
                 .map { (key, rows) ->
+                    val latest =
+                        rows.maxWithOrNull(
+                            compareBy<NotificationEventEntity> { it.postedAtMillis }
+                                .thenBy { it.id },
+                        )
                     NotificationSourceRow(
                         packageName = key.first,
                         channelId = key.second,
-                        channelName = rows.mapNotNull { it.channelName }.lastOrNull(),
+                        channelName = latest?.channelName,
                         eventCount = rows.size,
-                        lastSeenMillis = rows.maxOf(NotificationEventEntity::recordedAtMillis),
+                        lastSeenMillis = requireNotNull(latest).postedAtMillis,
                     )
                 }.sortedByDescending(NotificationSourceRow::lastSeenMillis)
                 .take(limit)
@@ -230,10 +235,12 @@ class FakeNotificationEventDao : NotificationEventDao {
                 .map { (action, count) -> ActionCountRow(action, count) }
         }
 
-    override suspend fun markUndone(id: Long) {
+    override suspend fun markUndone(id: Long): Int {
         val index = events.indexOfFirst { it.id == id }
-        if (index >= 0) events[index] = events[index].copy(undone = true)
+        if (index < 0 || events[index].undone) return 0
+        events[index] = events[index].copy(undone = true)
         revision.value++
+        return 1
     }
 
     override suspend fun getRetentionDeletionCandidates(
@@ -241,8 +248,8 @@ class FakeNotificationEventDao : NotificationEventDao {
         limit: Int,
     ): List<EventDeletionCandidateRow> =
         events
-            .filter { it.postedAtMillis < cutoffMillis }
-            .sortedWith(compareBy<NotificationEventEntity> { it.postedAtMillis }.thenBy { it.id })
+            .filter { it.recordedAtMillis < cutoffMillis }
+            .sortedBy(NotificationEventEntity::id)
             .take(limit)
             .map(NotificationEventEntity::toDeletionCandidate)
 
@@ -252,14 +259,12 @@ class FakeNotificationEventDao : NotificationEventDao {
     ): List<EventDeletionCandidateRow> {
         val retainedIds =
             events
-                .sortedWith(
-                    compareByDescending<NotificationEventEntity> { it.postedAtMillis }
-                        .thenByDescending { it.id },
-                ).take(max)
+                .sortedByDescending(NotificationEventEntity::id)
+                .take(max)
                 .mapTo(mutableSetOf(), NotificationEventEntity::id)
         return events
             .filterNot { it.id in retainedIds }
-            .sortedWith(compareBy<NotificationEventEntity> { it.postedAtMillis }.thenBy { it.id })
+            .sortedBy(NotificationEventEntity::id)
             .take(limit)
             .map(NotificationEventEntity::toDeletionCandidate)
     }
@@ -311,8 +316,14 @@ class FakeNotificationEventDao : NotificationEventDao {
 
     override suspend fun countEncryptedContents(): Int = encryptedContents.size
 
-    override suspend fun deleteEncryptedContentsOlderThan(cutoffMillis: Long): Int {
-        val oldIds = events.filter { it.recordedAtMillis < cutoffMillis }.mapTo(mutableSetOf()) { it.id }
+    override suspend fun deleteEncryptedContentsOlderThan(
+        cutoffMillis: Long,
+        nowMillis: Long,
+    ): Int {
+        val oldIds =
+            encryptedContents
+                .filter { it.createdAtMillis < cutoffMillis || it.createdAtMillis > nowMillis }
+                .mapTo(mutableSetOf()) { it.eventId }
         val before = encryptedContents.size
         encryptedContents.removeAll { it.eventId in oldIds }
         events.indices.forEach { index ->
@@ -341,10 +352,8 @@ class FakeNotificationEventDao : NotificationEventDao {
     override suspend fun deleteTracesOutsideMostRecent(max: Int): Int {
         val retainedIds =
             events
-                .sortedWith(
-                    compareByDescending<NotificationEventEntity> { it.postedAtMillis }
-                        .thenByDescending { it.id },
-                ).take(max)
+                .sortedByDescending(NotificationEventEntity::id)
+                .take(max)
                 .mapTo(mutableSetOf(), NotificationEventEntity::id)
         val before = traces.size
         traces.removeAll { it.eventId !in retainedIds }

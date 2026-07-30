@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify that a tagged APK versionCode increases across release tags."""
+"""Verify strict SemVer tag/Gradle parity and monotonic versionName plus versionCode."""
 
 from __future__ import annotations
 
@@ -12,7 +12,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-RELEASE_TAG = re.compile(r"^v([0-9]+)\.([0-9]+)\.([0-9]+)$")
+RELEASE_TAG = re.compile(
+    r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
+)
 VERSION_FILE = "app/version.json"
 
 
@@ -24,6 +26,17 @@ class VerificationError(RuntimeError):
 class AppVersion:
     code: int
     name: str
+
+
+def semantic_version(tag: str) -> tuple[int, int, int]:
+    """Return a strict MAJOR.MINOR.PATCH tuple without accepting leading zeroes."""
+
+    match = RELEASE_TAG.fullmatch(tag)
+    if match is None:
+        raise VerificationError(
+            "Release tag must use strict vMAJOR.MINOR.PATCH without leading zeroes"
+        )
+    return tuple(int(component) for component in match.groups())
 
 
 def git(repo: Path, *arguments: str) -> str:
@@ -72,7 +85,10 @@ def parse_version(raw: str, source: str) -> AppVersion:
     if isinstance(code, bool) or not isinstance(code, int) or code <= 0:
         raise VerificationError(f"{source} versionCode must be a positive integer")
     if not isinstance(name, str) or RELEASE_TAG.fullmatch(f"v{name}") is None:
-        raise VerificationError(f"{source} versionName must be MAJOR.MINOR.PATCH")
+        raise VerificationError(
+            f"{source} versionName must be strict MAJOR.MINOR.PATCH "
+            "without leading zeroes"
+        )
     return AppVersion(code=code, name=name)
 
 
@@ -85,10 +101,7 @@ def version_at_tag(repo: Path, tag: str) -> AppVersion:
 
 
 def verify(repo: Path, current_tag: str, history_ref: str) -> str:
-    if RELEASE_TAG.fullmatch(current_tag) is None:
-        raise VerificationError(
-            "Release tag must use the stable vMAJOR.MINOR.PATCH format"
-        )
+    current_semantic_version = semantic_version(current_tag)
 
     current_commit = git(repo, "rev-parse", "--verify", f"{current_tag}^{{commit}}").strip()
     history_commit = git(
@@ -109,7 +122,7 @@ def verify(repo: Path, current_tag: str, history_ref: str) -> str:
     if not previous_tags:
         return (
             f"{current_tag} is the first reachable SemVer release; "
-            f"versionCode {current.code} accepted"
+            f"versionName {current.name} and versionCode {current.code} accepted"
         )
 
     previous_versions = [(tag, version_at_tag(repo, tag)) for tag in previous_tags]
@@ -122,10 +135,17 @@ def verify(repo: Path, current_tag: str, history_ref: str) -> str:
             f"{current_tag} versionCode {current.code} must be greater than "
             f"{previous_tag} versionCode {previous.code}"
         )
+    highest_semantic_tag = max(previous_tags, key=semantic_version)
+    if current_semantic_version <= semantic_version(highest_semantic_tag):
+        raise VerificationError(
+            f"{current_tag} versionName must be greater than prior release "
+            f"{highest_semantic_tag}"
+        )
     return (
-        f"{current_tag} versionCode {current.code} is greater than all "
+        f"{current_tag} versionName and versionCode {current.code} are greater than all "
         f"{len(previous_versions)} prior SemVer release tag(s); "
-        f"previous maximum was {previous.code} at {previous_tag}"
+        f"previous maximum was {previous.code} at {previous_tag} and "
+        f"previous versionName maximum was {highest_semantic_tag}"
     )
 
 

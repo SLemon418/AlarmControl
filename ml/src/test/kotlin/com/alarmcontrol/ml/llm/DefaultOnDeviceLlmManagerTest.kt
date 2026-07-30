@@ -18,18 +18,22 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.ByteArrayInputStream
+import java.io.IOException
 import java.io.InputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 @OptIn(ExperimentalCoroutinesApi::class)
+@Suppress("LargeClass") // One serialized-engine fixture covers lifecycle, installation, and rollback races.
 class DefaultOnDeviceLlmManagerTest {
     @get:Rule
     val temporaryFolder = TemporaryFolder()
@@ -514,6 +518,33 @@ class DefaultOnDeviceLlmManagerTest {
         }
 
     @Test
+    fun `replacement oom restores the previous ready engine`() =
+        runTest {
+            val model = temporaryFolder.root.resolve("replacement-oom.task")
+            val store = LocalLlmModelStore(model)
+            store.install(byteArrayOf(1).inputStream())
+            val engine =
+                FileErrorEngine(model) { firstByte ->
+                    if (firstByte == 2.toByte()) OutOfMemoryError("replacement too large") else null
+                }
+            val manager =
+                DefaultOnDeviceLlmManager(
+                    engine,
+                    UnconfinedTestDispatcher(testScheduler),
+                    store,
+                )
+            manager.initialize()
+
+            val result = manager.installModel(byteArrayOf(2).inputStream(), expectedBytes = 1)
+
+            assertTrue(result is DataResult.Failure)
+            assertEquals(listOf<Byte>(1), model.readBytes().toList())
+            assertEquals(LlmInitState.Ready, manager.initState.value)
+            assertEquals(1L, manager.modelInfo.value?.sizeBytes)
+            assertEquals(3, engine.loadCalls)
+        }
+
+    @Test
     fun `staging failure keeps idle ttl for the existing ready model`() =
         runTest {
             val model = temporaryFolder.root.resolve("staging-failure.task")
@@ -542,6 +573,35 @@ class DefaultOnDeviceLlmManagerTest {
         }
 
     @Test
+    fun `staging oom preserves the existing ready engine and model`() =
+        runTest {
+            val model = temporaryFolder.root.resolve("staging-oom-ready.task")
+            val store = LocalLlmModelStore(model)
+            store.install(byteArrayOf(1).inputStream())
+            val engine = FakeLlmEngine(available = true)
+            val manager =
+                DefaultOnDeviceLlmManager(
+                    engine,
+                    UnconfinedTestDispatcher(testScheduler),
+                    store,
+                )
+            manager.initialize()
+            val failingSource =
+                object : InputStream() {
+                    override fun read(): Int = throw OutOfMemoryError("copy failed")
+                }
+
+            val result = manager.installModel(failingSource, expectedBytes = 1)
+
+            assertTrue(result is DataResult.Failure)
+            assertEquals(LlmInitState.Ready, manager.initState.value)
+            assertEquals(1, engine.loadCalls)
+            assertFalse(engine.closed)
+            assertEquals(listOf<Byte>(1), model.readBytes().toList())
+            assertEquals(1L, manager.modelInfo.value?.sizeBytes)
+        }
+
+    @Test
     fun `failed rollback reload closes the partially restored native engine`() =
         runTest {
             val model = temporaryFolder.root.resolve("failed-rollback-reload.task")
@@ -559,6 +619,9 @@ class DefaultOnDeviceLlmManagerTest {
             val result = manager.installModel(byteArrayOf(2).inputStream(), expectedBytes = 1)
 
             assertTrue(result is DataResult.Failure)
+            val failure = (result as DataResult.Failure).throwable
+            assertEquals(1, failure.suppressed.size)
+            assertEquals("model cannot be loaded", failure.suppressed.single().message)
             assertEquals(listOf<Byte>(1), model.readBytes().toList())
             assertEquals(
                 LlmInitState.Unavailable(LlmFailure.LOAD_FAILED),
@@ -566,6 +629,65 @@ class DefaultOnDeviceLlmManagerTest {
             )
             assertEquals(3, engine.loadCalls)
             assertEquals(3, engine.closeCalls)
+        }
+
+    @Test
+    fun `rollback storage failure never reports a closed engine ready and preserves both failures`() =
+        runTest {
+            val model = temporaryFolder.root.resolve("rollback-storage-failure.task")
+            var failDirectorySync = false
+            val rollbackFailure = IOException("rollback directory sync failed")
+            val store =
+                LocalLlmModelStore(
+                    modelFile = model,
+                    directorySync =
+                        ModelDirectorySync {
+                            if (failDirectorySync) throw rollbackFailure
+                        },
+                )
+            store.install(byteArrayOf(1).inputStream())
+            val replacementFailure = IllegalStateException("replacement incompatible")
+            val engine =
+                object : LlmEngine {
+                    var closed = false
+
+                    override fun isModelAvailable(): Boolean = model.isFile && model.length() > 0
+
+                    override fun load() {
+                        closed = false
+                        if (model.readBytes().first() == 2.toByte()) {
+                            failDirectorySync = true
+                            throw replacementFailure
+                        }
+                    }
+
+                    override suspend fun analyze(text: String): LlmAnalysisResult = LlmAnalysisResult.UNAVAILABLE
+
+                    override fun close() {
+                        closed = true
+                    }
+                }
+            val manager =
+                DefaultOnDeviceLlmManager(
+                    engine,
+                    UnconfinedTestDispatcher(testScheduler),
+                    store,
+                )
+            manager.initialize()
+
+            val result = manager.installModel(byteArrayOf(2).inputStream(), expectedBytes = 1)
+
+            assertTrue(result is DataResult.Failure)
+            val failure = (result as DataResult.Failure).throwable
+            assertSame(replacementFailure, failure)
+            assertEquals(listOf(rollbackFailure), failure.suppressed.toList())
+            assertEquals(
+                LlmInitState.Unavailable(LlmFailure.STORAGE_FAILURE),
+                manager.initState.value,
+            )
+            assertNull(manager.modelInfo.value)
+            assertTrue(engine.closed)
+            assertEquals(listOf<Byte>(1), model.readBytes().toList())
         }
 
     @Test
@@ -620,6 +742,111 @@ class DefaultOnDeviceLlmManagerTest {
             assertEquals(listOf<Byte>(1), model.readBytes().toList())
             assertEquals(1L, manager.modelInfo.value?.sizeBytes)
             assertEquals(2, engine.loadCalls)
+        }
+
+    @Test
+    fun `direct failed reimport after interrupted activation preserves previous model`() =
+        runTest {
+            val model = temporaryFolder.root.resolve("interrupted-direct-reimport.task")
+            val store = LocalLlmModelStore(model)
+            store.install(byteArrayOf(1).inputStream())
+            store.stage(byteArrayOf(2).inputStream()).activate()
+            val engine =
+                FileErrorEngine(model) { firstByte ->
+                    if (firstByte == 3.toByte()) IllegalStateException("replacement incompatible") else null
+                }
+            val manager =
+                DefaultOnDeviceLlmManager(
+                    engine,
+                    UnconfinedTestDispatcher(testScheduler),
+                    store,
+                )
+
+            val result = manager.installModel(byteArrayOf(3).inputStream(), expectedBytes = 1)
+
+            assertTrue(result is DataResult.Failure)
+            assertEquals(listOf<Byte>(1), model.readBytes().toList())
+            assertEquals(1L, store.verifyInstalledModel()?.sizeBytes)
+        }
+
+    @Test
+    fun `initialize recovers the previous model after replacement linkage error`() =
+        runTest {
+            val model = temporaryFolder.root.resolve("interrupted-linkage.task")
+            val store = LocalLlmModelStore(model)
+            store.install(byteArrayOf(1).inputStream())
+            store.stage(byteArrayOf(2).inputStream()).activate()
+            val engine =
+                FileErrorEngine(model) { firstByte ->
+                    if (firstByte == 2.toByte()) UnsatisfiedLinkError("replacement incompatible") else null
+                }
+            val manager =
+                DefaultOnDeviceLlmManager(
+                    engine,
+                    UnconfinedTestDispatcher(testScheduler),
+                    store,
+                )
+
+            manager.initialize()
+
+            assertEquals(LlmInitState.Ready, manager.initState.value)
+            assertEquals(listOf<Byte>(1), model.readBytes().toList())
+            assertEquals(1L, manager.modelInfo.value?.sizeBytes)
+            assertEquals(2, engine.loadCalls)
+        }
+
+    @Test
+    fun `initialize recovers the previous model after replacement oom`() =
+        runTest {
+            val model = temporaryFolder.root.resolve("interrupted-oom.task")
+            val store = LocalLlmModelStore(model)
+            store.install(byteArrayOf(1).inputStream())
+            store.stage(byteArrayOf(2).inputStream()).activate()
+            val engine =
+                FileErrorEngine(model) { firstByte ->
+                    if (firstByte == 2.toByte()) OutOfMemoryError("replacement too large") else null
+                }
+            val manager =
+                DefaultOnDeviceLlmManager(
+                    engine,
+                    UnconfinedTestDispatcher(testScheduler),
+                    store,
+                )
+
+            manager.initialize()
+
+            assertEquals(LlmInitState.Ready, manager.initState.value)
+            assertEquals(listOf<Byte>(1), model.readBytes().toList())
+            assertEquals(1L, manager.modelInfo.value?.sizeBytes)
+            assertEquals(2, engine.loadCalls)
+        }
+
+    @Test
+    fun `failed fatal rollback load stays unavailable with verified previous model live`() =
+        runTest {
+            val model = temporaryFolder.root.resolve("fatal-rollback-failure.task")
+            val store = LocalLlmModelStore(model)
+            store.install(byteArrayOf(1).inputStream())
+            store.stage(byteArrayOf(2).inputStream()).activate()
+            val engine = FileErrorEngine(model) { UnsatisfiedLinkError("native runtime unavailable") }
+            val manager =
+                DefaultOnDeviceLlmManager(
+                    engine,
+                    UnconfinedTestDispatcher(testScheduler),
+                    store,
+                )
+
+            manager.initialize()
+
+            assertEquals(
+                LlmInitState.Unavailable(LlmFailure.LOAD_FAILED),
+                manager.initState.value,
+            )
+            assertNull(manager.modelInfo.value)
+            assertEquals(listOf<Byte>(1), model.readBytes().toList())
+            assertEquals(1L, store.verifyInstalledModel()?.sizeBytes)
+            assertEquals(2, engine.loadCalls)
+            assertTrue(engine.closeCalls >= 2)
         }
 
     @Test
@@ -759,6 +986,27 @@ class DefaultOnDeviceLlmManagerTest {
         override suspend fun analyze(text: String): LlmAnalysisResult = LlmAnalysisResult.UNAVAILABLE
 
         override fun close() = Unit
+    }
+
+    private class FileErrorEngine(
+        private val model: java.io.File,
+        private val errorFor: (Byte) -> Throwable?,
+    ) : LlmEngine {
+        var loadCalls = 0
+        var closeCalls = 0
+
+        override fun isModelAvailable(): Boolean = model.isFile && model.length() > 0
+
+        override fun load() {
+            loadCalls++
+            errorFor(model.readBytes().first())?.let { throw it }
+        }
+
+        override suspend fun analyze(text: String): LlmAnalysisResult = LlmAnalysisResult.UNAVAILABLE
+
+        override fun close() {
+            closeCalls++
+        }
     }
 
     private class GateEngine : LlmEngine {

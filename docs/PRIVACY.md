@@ -35,11 +35,14 @@ Depending on enabled features, app-private Room/DataStore/files storage may cont
 - a random per-install automation authentication token in app-private Preferences when external
   automation is enabled. It is never logged, included in the audit, or backed up;
 - the optional quantized LLM model the user explicitly imports into app-private storage.
-- only after explicit opt-in, a separate title/body payload that is length-bounded and encrypted
-  with AES-256-GCM under a non-exportable Android Keystore key. `SECRET` notifications and
-  user-excluded packages are never stored; ciphertext expires after seven days.
+- by default after safe first-run initialization, a separate title/body payload that is
+  length-bounded and encrypted with AES-256-GCM under a non-exportable Android Keystore key.
+  `SECRET` notifications and user-excluded packages are never stored; users can turn storage off
+  or choose 1, 3, 7, 14, or 30 days of retention.
 
 Installed-app names and icons are resolved at display time and are not notification content.
+Insights lists and aggregates show that name and icon; the raw package name is rendered only in an
+explicit notification-detail dialog.
 
 ## Data never exported or stored as plaintext notification content
 
@@ -84,8 +87,9 @@ for the app.
 Retention settings independently bound activity and daily history. Raw activity is additionally
 capped at the newest 10,000 rows and condition traces at the newest 1,000 events. Daily/today
 analytics use the local day captured at notification post time, falling back to timestamps only for
-legacy rows. Optional notification detail history has a fixed seven-day maximum and supports
-per-package exclusion. Settings can clear
+legacy rows. Notification detail history defaults to seven days, supports user-selected 1–30 day
+retention and per-package exclusion, and may be removed sooner with its parent activity row.
+Settings can clear
 encrypted details, activity, feedback, insights, or all local data; full deletion also removes
 suggestion dismissals, imported model files, keys, and preferences.
 

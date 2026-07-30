@@ -15,6 +15,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject
 
 /**
@@ -34,6 +36,7 @@ class MasterSwitchTileService : TileService() {
     lateinit var dispatcher: CoroutineDispatcher
 
     private val scope by lazy { CoroutineScope(SupervisorJob() + dispatcher) }
+    private val operationGate = TileOperationGate()
 
     override fun onStartListening() {
         super.onStartListening()
@@ -74,12 +77,20 @@ class MasterSwitchTileService : TileService() {
 
     private fun launchSafely(block: suspend () -> Unit) {
         scope.launch {
-            runCatchingPreservingCancellation { block() }
-                .onFailure { Log.w(TAG, "Quick Settings update failed") }
+            runCatchingPreservingCancellation {
+                operationGate.run(block)
+            }.onFailure { Log.w(TAG, "Quick Settings update failed") }
         }
     }
 
     private companion object {
         const val TAG = "AlarmControlTile"
     }
+}
+
+/** Keeps a settings snapshot and its tile publication ordered with every toggle and refresh. */
+internal class TileOperationGate {
+    private val mutex = Mutex()
+
+    suspend fun <T> run(block: suspend () -> T): T = mutex.withLock { block() }
 }

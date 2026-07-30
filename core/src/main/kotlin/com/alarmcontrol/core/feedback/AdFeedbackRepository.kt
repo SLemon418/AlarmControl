@@ -13,15 +13,16 @@ interface AdFeedbackRepository {
     suspend fun recordCorrection(
         notificationEventId: String,
         correctedIntent: SemanticIntent,
-    )
+    ): Boolean
 
     suspend fun recordCorrection(
         notificationEventId: String,
         correctedIsAdvertisement: Boolean,
-    ) = recordCorrection(
-        notificationEventId,
-        if (correctedIsAdvertisement) SemanticIntent.MARKETING else SemanticIntent.TRANSACTIONAL,
-    )
+    ): Boolean =
+        recordCorrection(
+            notificationEventId,
+            if (correctedIsAdvertisement) SemanticIntent.MARKETING else SemanticIntent.TRANSACTIONAL,
+        )
 
     /** Latest observation keyed by activity event id, for the local activity feed. */
     fun observeByEvent(): Flow<Map<String, AdObservation>>

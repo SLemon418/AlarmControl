@@ -11,6 +11,7 @@ import com.alarmcontrol.data.db.dao.DailyInsightDao
 import com.alarmcontrol.data.db.dao.LlmObservationDao
 import com.alarmcontrol.data.db.dao.NotificationEventDao
 import com.alarmcontrol.data.db.dao.NotificationRateStateDao
+import com.alarmcontrol.data.db.dao.PendingNotificationActionDao
 import com.alarmcontrol.data.db.dao.ProfileDao
 import com.alarmcontrol.data.db.dao.RuleDao
 import com.alarmcontrol.data.db.dao.RuleSuggestionDao
@@ -31,10 +32,14 @@ import com.alarmcontrol.data.db.entity.EncryptedNotificationContentEntity
 import com.alarmcontrol.data.db.entity.FilteringProfileEntity
 import com.alarmcontrol.data.db.entity.LlmObservationEntity
 import com.alarmcontrol.data.db.entity.LocalSemanticFeedbackEntity
+import com.alarmcontrol.data.db.entity.NotificationActionPromotionReceiptEntity
 import com.alarmcontrol.data.db.entity.NotificationDecisionTraceEntity
 import com.alarmcontrol.data.db.entity.NotificationEventEntity
 import com.alarmcontrol.data.db.entity.NotificationRateOccurrenceHistoryEntity
 import com.alarmcontrol.data.db.entity.NotificationRateStateEntity
+import com.alarmcontrol.data.db.entity.PendingNotificationActionContentEntity
+import com.alarmcontrol.data.db.entity.PendingNotificationActionEntity
+import com.alarmcontrol.data.db.entity.PendingNotificationActionTraceEntity
 import com.alarmcontrol.data.db.entity.ProfileRuleEntity
 import com.alarmcontrol.data.db.entity.RuleConditionEntity
 import com.alarmcontrol.data.db.entity.RuleEntity
@@ -73,8 +78,12 @@ import com.alarmcontrol.data.db.entity.SemanticFeedbackPriorEntity
         NotificationRateStateEntity::class,
         LocalSemanticFeedbackEntity::class,
         DailyInsightSourceGapEntity::class,
+        PendingNotificationActionEntity::class,
+        PendingNotificationActionTraceEntity::class,
+        PendingNotificationActionContentEntity::class,
+        NotificationActionPromotionReceiptEntity::class,
     ],
-    version = 15,
+    version = 16,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -82,6 +91,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun ruleDao(): RuleDao
 
     abstract fun notificationEventDao(): NotificationEventDao
+
+    abstract fun pendingNotificationActionDao(): PendingNotificationActionDao
 
     abstract fun notificationRateStateDao(): NotificationRateStateDao
 
@@ -369,7 +380,7 @@ abstract class AppDatabase : RoomDatabase() {
                 }
             }
 
-        /** Encrypted opt-in content history plus richer content-free daily analytics. */
+        /** Encrypted configurable-retention content history plus richer content-free daily analytics. */
         val MIGRATION_11_12 =
             object : Migration(11, 12) {
                 override fun migrate(db: SupportSQLiteDatabase) {
@@ -496,6 +507,63 @@ abstract class AppDatabase : RoomDatabase() {
                     db.execSQL(
                         "ALTER TABLE daily_insights ADD COLUMN source_complete " +
                             "INTEGER NOT NULL DEFAULT 0",
+                    )
+                }
+            }
+
+        /**
+         * Adds a durable two-phase action outbox. Pending rows contain only content-free metadata,
+         * condition traces, and an optional already-encrypted detail payload.
+         */
+        val MIGRATION_15_16 =
+            object : Migration(15, 16) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    db.execSQL(
+                        "CREATE TABLE IF NOT EXISTS pending_notification_actions (" +
+                            "token TEXT NOT NULL, armed INTEGER NOT NULL, package_name TEXT NOT NULL, " +
+                            "channel_id TEXT, channel_name TEXT, ml_category TEXT, ml_confidence REAL, " +
+                            "category TEXT, posted_at_millis INTEGER NOT NULL, posted_epoch_day INTEGER, " +
+                            "posted_minute_of_day INTEGER, importance TEXT, is_conversation INTEGER, " +
+                            "is_foreground_service INTEGER, action TEXT NOT NULL, matched_rule_id INTEGER, " +
+                            "monitored_rule_id INTEGER, monitored_action TEXT, " +
+                            "recorded_at_millis INTEGER NOT NULL, created_at_millis INTEGER NOT NULL, " +
+                            "PRIMARY KEY(token))",
+                    )
+                    db.execSQL(
+                        "CREATE INDEX IF NOT EXISTS index_pending_notification_actions_armed " +
+                            "ON pending_notification_actions (armed)",
+                    )
+                    db.execSQL(
+                        "CREATE INDEX IF NOT EXISTS index_pending_notification_actions_created_at_millis " +
+                            "ON pending_notification_actions (created_at_millis)",
+                    )
+                    db.execSQL(
+                        "CREATE TABLE IF NOT EXISTS pending_notification_action_traces (" +
+                            "outbox_token TEXT NOT NULL, sequence INTEGER NOT NULL, lane TEXT NOT NULL, " +
+                            "position INTEGER NOT NULL, depth INTEGER NOT NULL, " +
+                            "condition_kind TEXT NOT NULL, result TEXT NOT NULL, " +
+                            "PRIMARY KEY(outbox_token, sequence), " +
+                            "FOREIGN KEY(outbox_token) REFERENCES pending_notification_actions(token) " +
+                            "ON UPDATE NO ACTION ON DELETE CASCADE)",
+                    )
+                    db.execSQL(
+                        "CREATE TABLE IF NOT EXISTS pending_notification_action_contents (" +
+                            "outbox_token TEXT NOT NULL, format_version INTEGER NOT NULL, " +
+                            "aad_id TEXT NOT NULL, nonce BLOB NOT NULL, ciphertext BLOB NOT NULL, " +
+                            "created_at_millis INTEGER NOT NULL, PRIMARY KEY(outbox_token), " +
+                            "FOREIGN KEY(outbox_token) REFERENCES pending_notification_actions(token) " +
+                            "ON UPDATE NO ACTION ON DELETE CASCADE)",
+                    )
+                    db.execSQL(
+                        "CREATE TABLE IF NOT EXISTS notification_action_promotion_receipts (" +
+                            "token TEXT NOT NULL, event_id INTEGER NOT NULL, PRIMARY KEY(token), " +
+                            "FOREIGN KEY(event_id) REFERENCES notification_events(id) " +
+                            "ON UPDATE NO ACTION ON DELETE CASCADE)",
+                    )
+                    db.execSQL(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS " +
+                            "index_notification_action_promotion_receipts_event_id " +
+                            "ON notification_action_promotion_receipts (event_id)",
                     )
                 }
             }

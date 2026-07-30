@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from atomic_generation import _fsync_directory
 from semantic_contract import (
     ContractError,
     DEFAULT_SEMANTIC_THRESHOLDS,
@@ -22,6 +23,7 @@ from semantic_contract import (
     RELEASE_CONFIDENCE_THRESHOLD_FLOOR,
     SemanticThresholds,
     load_jsonl,
+    parse_jsonl,
 )
 
 LOCALES = ("ko", "en", "mixed")
@@ -130,6 +132,9 @@ class BoundPredictionSet:
 
     rows: list[dict[str, Any]]
     provenance: dict[str, Any]
+    selected_split: str | None
+    prediction_sha256: str | None
+    prediction_manifest_sha256: str | None
 
 
 def _nonempty_identifier(value: Any, context: str) -> str:
@@ -327,6 +332,21 @@ def load_predictions(path: Path) -> list[dict[str, Any]]:
     return validate_prediction_records(records)
 
 
+def _jsonl_snapshot(path: Path) -> tuple[list[dict[str, Any]], str]:
+    try:
+        content = path.read_bytes()
+        text = content.decode("utf-8")
+        records = parse_jsonl(text, path)
+    except (ContractError, OSError, UnicodeError) as error:
+        raise EvaluationError(str(error)) from error
+    return records, hashlib.sha256(content).hexdigest()
+
+
+def _prediction_snapshot(path: Path) -> tuple[list[dict[str, Any]], str]:
+    records, digest = _jsonl_snapshot(path)
+    return validate_prediction_records(records), digest
+
+
 def load_prediction_files(paths: Sequence[Path]) -> list[dict[str, Any]]:
     """Load one logical evaluation set from one or more strict JSONL files."""
 
@@ -349,7 +369,10 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _load_json_object(path: Path, context: str) -> dict[str, Any]:
+def _load_json_object_snapshot(
+    path: Path,
+    context: str,
+) -> tuple[dict[str, Any], str]:
     def strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for key, value in pairs:
@@ -361,15 +384,20 @@ def _load_json_object(path: Path, context: str) -> dict[str, Any]:
         return result
 
     try:
+        content = path.read_bytes()
         value = json.loads(
-            path.read_text(encoding="utf-8"),
+            content.decode("utf-8"),
             object_pairs_hook=strict_object,
         )
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise EvaluationError(f"{context}: invalid JSON: {error}") from error
     if not isinstance(value, dict):
         raise EvaluationError(f"{context}: must contain one JSON object")
-    return value
+    return value, hashlib.sha256(content).hexdigest()
+
+
+def _load_json_object(path: Path, context: str) -> dict[str, Any]:
+    return _load_json_object_snapshot(path, context)[0]
 
 
 def _require_sha256(value: Any, context: str) -> str:
@@ -488,9 +516,10 @@ def _source_file_entries(
 def _validate_prediction_manifest(
     prediction_path: Path,
     prediction_rows: Sequence[Mapping[str, Any]],
-) -> tuple[dict[str, Any], Path]:
+    prediction_sha256: str,
+) -> tuple[dict[str, Any], Path, str]:
     manifest_path = _prediction_manifest_path(prediction_path)
-    manifest = _load_json_object(
+    manifest, manifest_sha256 = _load_json_object_snapshot(
         manifest_path,
         f"prediction manifest {manifest_path}",
     )
@@ -526,16 +555,11 @@ def _validate_prediction_manifest(
         raise EvaluationError(
             f"{manifest_path}: input file does not exist: {input_path}"
         )
-    if _sha256_file(prediction_path) != _require_sha256(
+    if prediction_sha256 != _require_sha256(
         manifest["output_sha256"],
         f"{manifest_path}.output_sha256",
     ):
         raise EvaluationError(f"{manifest_path}: output SHA-256 mismatch")
-    if _sha256_file(input_path) != _require_sha256(
-        manifest["input_sha256"],
-        f"{manifest_path}.input_sha256",
-    ):
-        raise EvaluationError(f"{manifest_path}: input SHA-256 mismatch")
     model_artifact_sha256 = _require_sha256(
         manifest["model_artifact_sha256"],
         f"{manifest_path}.model_artifact_sha256",
@@ -599,17 +623,21 @@ def _validate_prediction_manifest(
         raise EvaluationError(
             f"{manifest_path}: selected_split must be validation, test, or null"
         )
-    return manifest, input_path
+    return manifest, input_path, manifest_sha256
 
 
 def _selected_source_rows(
     input_path: Path,
     selected_split: str | None,
+    records: Sequence[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    try:
-        rows = load_jsonl(input_path)
-    except (ContractError, OSError, UnicodeError) as error:
-        raise EvaluationError(str(error)) from error
+    if records is None:
+        try:
+            rows = load_jsonl(input_path)
+        except (ContractError, OSError, UnicodeError) as error:
+            raise EvaluationError(str(error)) from error
+    else:
+        rows = list(records)
     if selected_split is not None:
         rows = [
             row for row in rows if row.get("split") == selected_split
@@ -647,7 +675,7 @@ def load_bound_prediction_set(
             "--source-manifest must be a non-symlink regular file"
         )
     source_manifest_path = source_manifest_path.resolve(strict=True)
-    source_manifest = _load_json_object(
+    source_manifest, source_manifest_sha256 = _load_json_object_snapshot(
         source_manifest_path,
         f"source manifest {source_manifest_path}",
     )
@@ -665,12 +693,18 @@ def load_bound_prediction_set(
     model_artifact_hashes: set[str] = set()
     vocab_hashes: set[str] = set()
     vocab_presence: set[bool] = set()
+    prediction_snapshots: list[dict[str, str]] = []
     for prediction_path in prediction_paths:
         prediction_path = prediction_path.resolve()
-        file_predictions = load_predictions(prediction_path)
-        manifest, input_path = _validate_prediction_manifest(
-            prediction_path,
-            file_predictions,
+        file_predictions, prediction_sha256 = _prediction_snapshot(
+            prediction_path
+        )
+        manifest, input_path, prediction_manifest_sha256 = (
+            _validate_prediction_manifest(
+                prediction_path,
+                file_predictions,
+                prediction_sha256,
+            )
         )
         selected_split = manifest["selected_split"]
         if (
@@ -710,15 +744,25 @@ def load_bound_prediction_set(
             raise EvaluationError(
                 f"{input_path}: input hash does not match source manifest"
             )
-        try:
-            unfiltered_source_rows = load_jsonl(input_path)
-        except (ContractError, OSError, UnicodeError) as error:
-            raise EvaluationError(str(error)) from error
+        unfiltered_source_rows, input_sha256 = _jsonl_snapshot(input_path)
+        if input_sha256 != _require_sha256(
+            manifest["input_sha256"],
+            f"{_prediction_manifest_path(prediction_path)}.input_sha256",
+        ):
+            raise EvaluationError(f"{input_path}: input SHA-256 mismatch")
+        if input_sha256 != source_entry["sha256"]:
+            raise EvaluationError(
+                f"{input_path}: input hash does not match source manifest"
+            )
         if len(unfiltered_source_rows) != source_entry["row_count"]:
             raise EvaluationError(
                 f"{input_path}: source row count does not match source manifest"
             )
-        source_rows = _selected_source_rows(input_path, selected_split)
+        source_rows = _selected_source_rows(
+            input_path,
+            selected_split,
+            unfiltered_source_rows,
+        )
         expected_output_split = selected_split or "holdout"
         if any(
             row.get("split") != expected_output_split
@@ -730,6 +774,12 @@ def load_bound_prediction_set(
             )
         all_predictions.extend(file_predictions)
         all_sources.extend(source_rows)
+        prediction_snapshots.append(
+            {
+                "manifest_sha256": prediction_manifest_sha256,
+                "output_sha256": prediction_sha256,
+            }
+        )
 
     if represented_sources != set(source_entries):
         missing = sorted(set(source_entries) - represented_sources)
@@ -783,15 +833,23 @@ def load_bound_prediction_set(
             )
     provenance = {
         "schema_version": PROVENANCE_SCHEMA_VERSION,
-        "source_manifest_sha256": _sha256_file(source_manifest_path),
+        "source_manifest_sha256": source_manifest_sha256,
         "backend": next(iter(backends)),
         "model_artifact_sha256": next(iter(model_artifact_hashes)),
     }
     if vocab_hashes:
         provenance["vocab_sha256"] = next(iter(vocab_hashes))
+    snapshot = prediction_snapshots[0] if len(prediction_snapshots) == 1 else None
     return BoundPredictionSet(
         rows=predictions,
         provenance=provenance,
+        selected_split=selected_split,
+        prediction_sha256=(
+            snapshot["output_sha256"] if snapshot is not None else None
+        ),
+        prediction_manifest_sha256=(
+            snapshot["manifest_sha256"] if snapshot is not None else None
+        ),
     )
 
 
@@ -1258,6 +1316,7 @@ def _write_json(path: Path, value: Mapping[str, Any]) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary_path, path)
+        _fsync_directory(path.parent)
     except BaseException:
         temporary_path.unlink(missing_ok=True)
         raise

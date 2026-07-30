@@ -426,6 +426,7 @@ private fun SettingsSnapshot.toJson(): JSONObject =
         .put("semanticAnalysisScope", semanticAnalysisScope.name)
         .put("eventRetentionDays", eventRetentionDays)
         .put("dailyInsightRetentionDays", dailyInsightRetentionDays)
+        .put("notificationContentRetentionDays", notificationContentRetentionDays)
 
 private fun JSONObject.toSettings(): SettingsSnapshot =
     SettingsSnapshot(
@@ -442,6 +443,11 @@ private fun JSONObject.toSettings(): SettingsSnapshot =
             optInt(
                 "dailyInsightRetentionDays",
                 RetentionDefaults.DAILY_INSIGHT_DAYS,
+            ),
+        notificationContentRetentionDays =
+            optInt(
+                "notificationContentRetentionDays",
+                RetentionDefaults.ENCRYPTED_CONTENT_DAYS,
             ),
     )
 

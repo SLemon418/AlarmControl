@@ -21,7 +21,7 @@ import java.util.Locale
 /** Domain decision record -> activity-log row. Past-tense labels; snooze duration isn't logged. */
 internal fun NotificationEvent.toListItem(
     correctedCategory: String? = null,
-    identity: AppIdentityUi = AppIdentityUi(packageName, null),
+    identity: AppIdentityUi = AppIdentityUi(packageName, null, isPackageFallback = true),
     ruleNames: Map<String, String> = emptyMap(),
 ): EventListItem =
     EventListItem(
@@ -29,6 +29,7 @@ internal fun NotificationEvent.toListItem(
         packageName = packageName,
         appName = identity.label,
         appIcon = identity.icon,
+        appNameIsPackageFallback = identity.isPackageFallback,
         predictedCategory = mlCategory,
         category = correctedCategory ?: mlCategory ?: category,
         actionLabel = action.eventLabel(),
@@ -51,14 +52,18 @@ internal fun NotificationEvent.toListItem(
     )
 
 /** Domain insights headline -> stable UI model (no domain type crosses into Compose). */
-internal fun InsightsSummary.toUiModel(appIdentityResolver: AppIdentityResolver): InsightsSummaryUi =
-    InsightsSummaryUi(
+internal fun InsightsSummary.toUiModel(appIdentityResolver: AppIdentityResolver): InsightsSummaryUi {
+    val identity = mostMutedPackage?.let(appIdentityResolver::resolve)
+    return InsightsSummaryUi(
         mostMutedPackage = mostMutedPackage,
-        mostMutedAppName = mostMutedPackage?.let { appIdentityResolver.resolve(it).label },
+        mostMutedAppName = identity?.label,
         mostMutedCount = mostMutedCount,
         anomalyCount = anomalyCount,
         generatedAtMillis = generatedAtMillis,
+        mostMutedAppIcon = identity?.icon,
+        mostMutedAppNameIsPackageFallback = identity?.isPackageFallback == true,
     )
+}
 
 private fun RuleAction.eventLabel(): UiText =
     when (this) {
@@ -83,7 +88,7 @@ private fun RuleAction.toEventAction(): EventActionUi =
  */
 internal fun DailyInsight.toUiModel(
     ruleNames: Map<String, String>,
-    appIdentityResolver: AppIdentityResolver? = null,
+    appIdentityResolver: AppIdentityResolver,
 ): DailyInsightUi =
     DailyInsightUi(
         epochDay = epochDay,
@@ -121,21 +126,27 @@ internal fun DailyInsight.toUiModel(
                 channelBreakdownComplete,
         channels =
             channelBreakdown.map {
+                val identity = appIdentityResolver.resolve(it.packageName)
                 ChannelShareUi(
                     packageName = it.packageName,
-                    appName = appIdentityResolver?.resolve(it.packageName)?.label ?: it.packageName,
+                    appName = identity.label,
                     channelId = it.channelId,
                     count = it.count,
                     channelName = it.channelName,
+                    appIcon = identity.icon,
+                    appNameIsPackageFallback = identity.isPackageFallback,
                 )
             },
         apps =
             appBreakdown.map {
+                val identity = appIdentityResolver.resolve(it.packageName)
                 AppAnalysisUi(
                     packageName = it.packageName,
-                    appName = appIdentityResolver?.resolve(it.packageName)?.label ?: it.packageName,
+                    appName = identity.label,
                     totalCount = it.totalCount,
                     silencedCount = it.silencedCount,
+                    appIcon = identity.icon,
+                    appNameIsPackageFallback = identity.isPackageFallback,
                 )
             },
         hours = hourBreakdown.map { HourAnalysisUi(it.hour, it.totalCount, it.silencedCount) },
@@ -163,11 +174,14 @@ internal fun InsightsAnalytics.toUiModel(
         monitoredActions = monitoredActionBreakdown.toUiModel(),
         apps =
             apps.map {
+                val identity = appIdentityResolver.resolve(it.packageName)
                 AppAnalysisUi(
                     packageName = it.packageName,
-                    appName = appIdentityResolver.resolve(it.packageName).label,
+                    appName = identity.label,
                     totalCount = it.totalCount,
                     silencedCount = it.silencedCount,
+                    appIcon = identity.icon,
+                    appNameIsPackageFallback = identity.isPackageFallback,
                 )
             },
         rules =
@@ -181,12 +195,15 @@ internal fun InsightsAnalytics.toUiModel(
         categories = categories.map { CategoryShareUi(it.category.categoryLabel(), it.count) },
         channels =
             channels.map {
+                val identity = appIdentityResolver.resolve(it.packageName)
                 ChannelShareUi(
                     packageName = it.packageName,
-                    appName = appIdentityResolver.resolve(it.packageName).label,
+                    appName = identity.label,
                     channelId = it.channelId,
                     count = it.count,
                     channelName = it.channelName,
+                    appIcon = identity.icon,
+                    appNameIsPackageFallback = identity.isPackageFallback,
                 )
             },
         hours = hours.map { HourAnalysisUi(it.hour, it.totalCount, it.silencedCount) },
@@ -225,6 +242,8 @@ internal fun NotificationEventDetail.toUiModel(identity: AppIdentityUi): Notific
                 NotificationContentState.Expired -> NotificationDetailContentUi.EXPIRED
                 NotificationContentState.Unreadable -> NotificationDetailContentUi.UNREADABLE
             },
+        appIcon = identity.icon,
+        appNameIsPackageFallback = identity.isPackageFallback,
     )
 }
 

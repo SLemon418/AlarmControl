@@ -44,9 +44,18 @@ class RateOccurrenceRepositoryImpl
                         snapshot.rateState
                             ?.incompleteUntilMillis
                             ?.takeIf { it == Long.MAX_VALUE || it > nowMillis }
+                    val futureOccurrenceRetryAtMillis =
+                        snapshot.newestPersistedPostedAtMillis
+                            ?.takeIf { it > nowMillis }
                     val rows = snapshot.occurrences
 
                     when {
+                        futureOccurrenceRetryAtMillis != null ->
+                            RateOccurrenceSeed.Incomplete(
+                                RateOccurrenceIncompleteReason.FUTURE_OCCURRENCE,
+                                futureOccurrenceRetryAtMillis,
+                            )
+
                         snapshot.coverageStartMillis == null ->
                             RateOccurrenceSeed.Incomplete(
                                 RateOccurrenceIncompleteReason.PERSISTED_GAP,

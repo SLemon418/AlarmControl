@@ -1,5 +1,6 @@
 package com.alarmcontrol.core.filtering
 
+import com.alarmcontrol.core.privacy.LocalDataResetWriteFence
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -24,6 +25,16 @@ interface RuleRepository {
         ruleIds: Set<String>,
         enabled: Boolean,
     ): Int
+
+    /**
+     * Same mutation, but tied to the caller's operation-entry reset generation. Orchestrators use
+     * this to prevent a request started before a whole-data reset from recapturing the new epoch.
+     */
+    suspend fun setRulesEnabledIfCurrent(
+        ruleIds: Set<String>,
+        enabled: Boolean,
+        resetEpoch: LocalDataResetWriteFence.Epoch,
+    ): Int = setRulesEnabled(ruleIds, enabled)
 
     /** Removes the rule with [ruleId]; a no-op if it does not exist. */
     suspend fun deleteRule(ruleId: String)

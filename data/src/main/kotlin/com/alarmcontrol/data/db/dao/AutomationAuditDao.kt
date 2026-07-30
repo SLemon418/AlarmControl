@@ -17,7 +17,7 @@ interface AutomationAuditDao {
 
     @Query(
         "DELETE FROM automation_audit WHERE id NOT IN (" +
-            "SELECT id FROM automation_audit ORDER BY requested_at_millis DESC, id DESC LIMIT :maxRows)",
+            "SELECT id FROM automation_audit ORDER BY id DESC LIMIT :maxRows)",
     )
     suspend fun trim(maxRows: Int): Int
 

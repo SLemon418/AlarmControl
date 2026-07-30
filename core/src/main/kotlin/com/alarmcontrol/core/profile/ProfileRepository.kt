@@ -8,7 +8,10 @@ interface ProfileRepository {
     /** Observes profiles alphabetically, including profiles whose rules were later deleted. */
     fun observeProfiles(): Flow<List<FilteringProfile>>
 
-    /** Inserts or updates [profile] and returns its local id. */
+    /**
+     * Inserts or updates [profile] and returns its local id. If a whole-data reset linearizes before
+     * this write, the save is rejected rather than reporting an id for a row that does not exist.
+     */
     suspend fun save(profile: FilteringProfile): String
 
     /** Deletes one profile without deleting any member rule. */

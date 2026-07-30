@@ -119,6 +119,7 @@ class BackupCodecTest {
                     semanticClassifierEnabled = false,
                     eventRetentionDays = 90,
                     dailyInsightRetentionDays = 730,
+                    notificationContentRetentionDays = 14,
                     semanticAnalysisScope = SemanticAnalysisScope.ALL_NOTIFICATIONS,
                 ),
             categoryFeedback =
@@ -152,6 +153,16 @@ class BackupCodecTest {
         val restored = BackupCodec.decode(root.toString())
 
         assertEquals(true, restored.settings?.semanticClassifierEnabled)
+    }
+
+    @Test
+    fun `backup without content retention restores the seven day default`() {
+        val root = JSONObject(BackupCodec.encode(sample))
+        root.getJSONObject("settings").remove("notificationContentRetentionDays")
+
+        val restored = BackupCodec.decode(root.toString())
+
+        assertEquals(7, restored.settings?.notificationContentRetentionDays)
     }
 
     @Test

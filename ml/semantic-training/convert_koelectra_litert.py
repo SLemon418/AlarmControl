@@ -22,7 +22,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from semantic_contract import LABELS, MAX_SEQUENCE_LENGTH, model_bundle_hashes
+from semantic_contract import (
+    LABELS,
+    MAX_SEQUENCE_LENGTH,
+    model_bundle_hashes,
+    resolve_training_model_bundle,
+)
 
 GIB = 1024**3
 MIB = 1024**2
@@ -122,11 +127,19 @@ def validate_local_model_dir(path: Path) -> tuple[Path, dict[str, Any]]:
     """Require a local ElectraForSequenceClassification bundle."""
 
     expanded = path.expanduser()
-    if not expanded.is_dir():
+    if expanded.is_symlink():
+        raise ConversionError(f"--model-dir must not be a symlink: {expanded}")
+    try:
+        selected = resolve_training_model_bundle(expanded)
+    except (OSError, ValueError) as error:
+        raise ConversionError(
+            f"--model-dir has no valid committed generation: {expanded}"
+        ) from error
+    if selected.is_symlink() or not selected.is_dir():
         raise ConversionError(
             f"--model-dir must be an existing local directory: {expanded}"
         )
-    resolved = expanded.resolve(strict=True)
+    resolved = selected.resolve(strict=True)
     config_path = resolved / "config.json"
     if config_path.is_symlink() or not config_path.is_file():
         raise ConversionError(f"local model is missing regular config.json: {resolved}")
@@ -692,6 +705,7 @@ def _source_manifest_hash(model_dir: Path) -> str | None:
     for path in (
         model_dir / "training_manifest.json",
         model_dir.parent / "training_manifest.json",
+        model_dir.parent.parent / "training_manifest.json",
     ):
         if path.is_file() and not path.is_symlink():
             return _sha256_file(path)
@@ -704,6 +718,14 @@ def _write_json(path: Path, value: Mapping[str, Any]) -> None:
         stream.write("\n")
         stream.flush()
         os.fsync(stream.fileno())
+
+
+def _fsync_directory(directory: Path) -> None:
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def atomic_output_directory(
@@ -724,7 +746,9 @@ def atomic_output_directory(
     )
     try:
         result = writer(temporary)
+        _fsync_directory(temporary)
         os.replace(temporary, output_dir)
+        _fsync_directory(output_dir.parent)
         return result
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)

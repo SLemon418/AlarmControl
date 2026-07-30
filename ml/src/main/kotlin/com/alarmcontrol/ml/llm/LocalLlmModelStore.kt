@@ -10,13 +10,29 @@ import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 
 /** Stages user-selected models in app-private storage without exposing a partial target file. */
-@Suppress("TooGenericExceptionCaught")
+@Suppress("TooGenericExceptionCaught", "TooManyFunctions") // One storage transaction owns every crash-safe state.
 internal class LocalLlmModelStore(
     private val modelFile: File,
     private val storageGuard: ModelStorageGuard = defaultModelStorageGuard(),
+    private val directorySync: ModelDirectorySync = defaultModelDirectorySync(),
 ) {
     private val metadataFile: File
         get() = relatedFile(METADATA_SUFFIX)
+    private val deletionTransaction =
+        LocalModelDeletion(
+            directory = requireNotNull(modelFile.parentFile) { "Model path has no parent directory" },
+            marker = relatedFile(DELETING_SUFFIX),
+            dataFiles =
+                listOf(
+                    modelFile,
+                    metadataFile,
+                    relatedFile(INSTALLING_SUFFIX),
+                    relatedFile(PREVIOUS_SUFFIX),
+                    relatedFile("$METADATA_SUFFIX$INSTALLING_SUFFIX"),
+                    relatedFile("$METADATA_SUFFIX$PREVIOUS_SUFFIX"),
+                ),
+            directorySync = directorySync,
+        )
 
     /** Copies to a temporary file. The caller activates it only when ready to verify native loading. */
     fun stage(
@@ -25,7 +41,19 @@ internal class LocalLlmModelStore(
         onProgress: (Long) -> Unit = {},
     ): StagedModel {
         val directory = requireNotNull(modelFile.parentFile) { "Model path has no parent directory" }
-        check(directory.isDirectory || directory.mkdirs()) { "Couldn't create the model directory" }
+        val directoryCreated = !directory.isDirectory
+        check(!directoryCreated || directory.mkdirs() || directory.isDirectory) {
+            "Couldn't create the model directory"
+        }
+        if (directoryCreated) {
+            directorySync.sync(
+                requireNotNull(directory.parentFile) {
+                    "Model directory has no parent directory"
+                },
+            )
+        }
+        check(!deletionTransaction.isPending) { "Previous model deletion is incomplete" }
+        prepareForStaging()
         expectedBytes?.let {
             require(it in 1..MAX_MODEL_BYTES) { "Model file is too large" }
         }
@@ -34,16 +62,21 @@ internal class LocalLlmModelStore(
         try {
             val modelInfo = copyToTemporaryFile(source, temporary, expectedBytes, onProgress)
             writeMetadata(temporaryMetadata, modelInfo)
+            directorySync.sync(directory)
+            val previous = relatedFile(PREVIOUS_SUFFIX)
+            val previousMetadata = relatedFile("$METADATA_SUFFIX$PREVIOUS_SUFFIX")
             return StagedModel(
                 temporary = temporary,
-                previous = relatedFile(PREVIOUS_SUFFIX),
+                previous = previous,
                 temporaryMetadata = temporaryMetadata,
-                previousMetadata = relatedFile("$METADATA_SUFFIX$PREVIOUS_SUFFIX"),
+                previousMetadata = previousMetadata,
                 modelInfo = modelInfo,
+                retainRollback = LocalModelIntegrity.verifyOrNull(previous, previousMetadata) != null,
             )
-        } catch (error: Exception) {
+        } catch (error: Throwable) {
             temporary.delete()
             temporaryMetadata.delete()
+            syncDirectoryBestEffort(directory)
             throw error
         }
     }
@@ -57,16 +90,7 @@ internal class LocalLlmModelStore(
     }
 
     fun delete() {
-        listOf(
-            modelFile,
-            metadataFile,
-            relatedFile(INSTALLING_SUFFIX),
-            relatedFile(PREVIOUS_SUFFIX),
-            relatedFile("$METADATA_SUFFIX$INSTALLING_SUFFIX"),
-            relatedFile("$METADATA_SUFFIX$PREVIOUS_SUFFIX"),
-        ).forEach { file ->
-            check(!file.exists() || file.delete()) { "Couldn't delete local model data" }
-        }
+        deletionTransaction.delete()
     }
 
     /**
@@ -75,8 +99,11 @@ internal class LocalLlmModelStore(
      * Live and rollback pairs are deliberately preserved for [verifyInstalledModel] recovery.
      */
     fun recoverStaleStagingAtStartup() {
-        relatedFile(INSTALLING_SUFFIX).delete()
-        relatedFile("$METADATA_SUFFIX$INSTALLING_SUFFIX").delete()
+        if (deletionTransaction.completeIfPending()) return
+        val changed =
+            deleteBestEffort(relatedFile(INSTALLING_SUFFIX)) or
+                deleteBestEffort(relatedFile("$METADATA_SUFFIX$INSTALLING_SUFFIX"))
+        if (changed) syncDirectoryBestEffort()
     }
 
     /**
@@ -84,6 +111,7 @@ internal class LocalLlmModelStore(
      * A model without a sidecar predates integrity support and must be re-imported.
      */
     fun verifyInstalledModel(): LlmModelInfo? {
+        if (deletionTransaction.completeIfPending()) return null
         recoverInterruptedActivation()
         if (!modelFile.isFile || modelFile.length() <= 0) return null
         return LocalModelIntegrity.verify(modelFile, metadataFile)
@@ -94,6 +122,7 @@ internal class LocalLlmModelStore(
      * loading. The rollback pair is fully verified before the current model is touched.
      */
     fun restorePreviousModel(): LlmModelInfo? {
+        if (deletionTransaction.completeIfPending()) return null
         val previous = relatedFile(PREVIOUS_SUFFIX)
         val previousMetadata = relatedFile("$METADATA_SUFFIX$PREVIOUS_SUFFIX")
         val restored = LocalModelIntegrity.verifyOrNull(previous, previousMetadata) ?: return null
@@ -104,13 +133,13 @@ internal class LocalLlmModelStore(
         moveReplacing(previousMetadata, metadataFile)
         check(!modelFile.exists() || modelFile.delete()) { "Couldn't replace the local model" }
         moveReplacing(previous, modelFile)
+        directorySync.sync(requireModelDirectory())
         return restored
     }
 
     /** Best-effort cleanup after the live model has passed native loading. */
     fun discardRollbackArtifacts() {
-        relatedFile(PREVIOUS_SUFFIX).delete()
-        relatedFile("$METADATA_SUFFIX$PREVIOUS_SUFFIX").delete()
+        deleteRollbackArtifacts()
     }
 
     inner class StagedModel internal constructor(
@@ -119,24 +148,42 @@ internal class LocalLlmModelStore(
         private val temporaryMetadata: File,
         private val previousMetadata: File,
         val modelInfo: LlmModelInfo,
+        private val retainRollback: Boolean,
     ) {
         private var active = false
+        private var activationStarted = false
 
         /** Replaces the live path while retaining the previous model for rollback. */
         fun activate() {
-            previous.delete()
-            previousMetadata.delete()
-            if (modelFile.exists()) moveReplacing(modelFile, previous)
-            if (metadataFile.exists()) moveReplacing(metadataFile, previousMetadata)
+            activationStarted = true
             try {
+                if (retainRollback) {
+                    check(!modelFile.exists() || modelFile.delete()) {
+                        "Couldn't replace the interrupted local model"
+                    }
+                    check(!metadataFile.exists() || metadataFile.delete()) {
+                        "Couldn't replace the interrupted model integrity record"
+                    }
+                } else {
+                    previous.delete()
+                    previousMetadata.delete()
+                    if (modelFile.exists()) moveReplacing(modelFile, previous)
+                    if (metadataFile.exists()) moveReplacing(metadataFile, previousMetadata)
+                }
                 moveReplacing(temporary, modelFile)
                 moveReplacing(temporaryMetadata, metadataFile)
+                directorySync.sync(requireModelDirectory())
                 active = true
             } catch (error: Exception) {
                 modelFile.delete()
                 metadataFile.delete()
-                if (previous.exists()) moveReplacing(previous, modelFile)
                 if (previousMetadata.exists()) moveReplacing(previousMetadata, metadataFile)
+                if (previous.exists()) moveReplacing(previous, modelFile)
+                try {
+                    directorySync.sync(requireModelDirectory())
+                } catch (recoveryError: Exception) {
+                    error.addSuppressed(recoveryError)
+                }
                 throw error
             }
         }
@@ -146,23 +193,51 @@ internal class LocalLlmModelStore(
          * must not turn a successfully loaded replacement into a destructive rollback.
          */
         fun commit() {
-            previous.delete()
-            previousMetadata.delete()
-            temporary.delete()
-            temporaryMetadata.delete()
+            active = false
+            activationStarted = false
+            val changed =
+                deleteBestEffort(previous) or
+                    deleteBestEffort(previousMetadata) or
+                    deleteBestEffort(temporary) or
+                    deleteBestEffort(temporaryMetadata)
+            if (changed) syncDirectoryBestEffort()
         }
 
         /** Restores the model that existed before [activate], if any. */
         fun rollback() {
+            if (!activationStarted) {
+                val changed =
+                    deleteBestEffort(temporary) or
+                        deleteBestEffort(temporaryMetadata)
+                if (changed) syncDirectoryBestEffort()
+                return
+            }
             if (active) {
                 modelFile.delete()
                 metadataFile.delete()
             }
-            if (previous.exists()) moveReplacing(previous, modelFile)
             if (previousMetadata.exists()) moveReplacing(previousMetadata, metadataFile)
+            if (previous.exists()) moveReplacing(previous, modelFile)
             temporary.delete()
             temporaryMetadata.delete()
             active = false
+            activationStarted = false
+            directorySync.sync(requireModelDirectory())
+        }
+    }
+
+    /**
+     * Normalizes a torn activation before a new import can reuse the single rollback slot. A fully
+     * moved but not yet committed activation keeps its verified previous pair; [StagedModel] then
+     * replaces only the uncommitted live pair so a failed re-import still has known rollback data.
+     */
+    private fun prepareForStaging() {
+        val previous = relatedFile(PREVIOUS_SUFFIX)
+        val previousMetadata = relatedFile("$METADATA_SUFFIX$PREVIOUS_SUFFIX")
+        if (previous.exists() || previousMetadata.exists()) {
+            recoverInterruptedActivation()
+        } else {
+            recoverStaleStagingAtStartup()
         }
     }
 
@@ -299,25 +374,50 @@ internal class LocalLlmModelStore(
     }
 
     private fun recoverInterruptedActivation() {
+        if (deletionTransaction.isPending) return
         val previous = relatedFile(PREVIOUS_SUFFIX)
         val previousMetadata = relatedFile("$METADATA_SUFFIX$PREVIOUS_SUFFIX")
         val currentValid = LocalModelIntegrity.verifyOrNull(modelFile, metadataFile) != null
+        var recovered = false
         if (!currentValid) {
             when {
                 LocalModelIntegrity.verifyOrNull(previous, previousMetadata) != null -> {
                     modelFile.delete()
                     metadataFile.delete()
-                    moveReplacing(previous, modelFile)
                     moveReplacing(previousMetadata, metadataFile)
+                    moveReplacing(previous, modelFile)
+                    recovered = true
                 }
                 LocalModelIntegrity.verifyOrNull(previous, metadataFile) != null -> {
                     modelFile.delete()
                     moveReplacing(previous, modelFile)
+                    recovered = true
                 }
             }
         }
+        if (recovered) directorySync.sync(requireModelDirectory())
         recoverStaleStagingAtStartup()
     }
+
+    private fun deleteRollbackArtifacts() {
+        val changed =
+            deleteBestEffort(relatedFile(PREVIOUS_SUFFIX)) or
+                deleteBestEffort(relatedFile("$METADATA_SUFFIX$PREVIOUS_SUFFIX"))
+        if (changed) syncDirectoryBestEffort()
+    }
+
+    private fun deleteBestEffort(file: File): Boolean = file.exists() && file.delete()
+
+    private fun syncDirectoryBestEffort(directory: File = requireModelDirectory()) {
+        try {
+            directorySync.sync(directory)
+        } catch (_: Exception) {
+            // The verified live pair remains durable; cleanup can be retried after restart.
+        }
+    }
+
+    private fun requireModelDirectory(): File =
+        requireNotNull(modelFile.parentFile) { "Model path has no parent directory" }
 
     private fun relatedFile(suffix: String): File =
         File(requireNotNull(modelFile.parentFile) { "Model path has no parent directory" }, "${modelFile.name}$suffix")
@@ -332,6 +432,7 @@ internal class LocalLlmModelStore(
         const val METADATA_SUFFIX = ".sha256"
         const val INSTALLING_SUFFIX = ".installing"
         const val PREVIOUS_SUFFIX = ".previous"
+        const val DELETING_SUFFIX = ".deleting"
         const val COPY_BUFFER_BYTES = 64 * 1_024
         const val PROGRESS_STEP_BYTES = 4L * 1_024 * 1_024
         const val STORAGE_CHECK_STEP_BYTES = 64L * 1_024 * 1_024

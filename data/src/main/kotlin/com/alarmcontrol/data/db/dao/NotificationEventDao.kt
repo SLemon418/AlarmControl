@@ -67,8 +67,9 @@ interface NotificationEventDao {
      * Persists one complete decision, invalidates any retained rollup for its posted day, and
      * enforces [max] plus [maxTraceEvents] before commit.
      *
-     * The generated id is returned even when an out-of-order, older event is the row removed by the
-     * cap. Callers may still safely attempt post-commit enrichment because a missing row is a no-op.
+     * The cap follows durable insertion order rather than wall-clock post time, so a future-dated
+     * row cannot evict newly processed history after clock rollback. The generated id is still
+     * returned when a zero cap removes it; post-commit enrichment of a missing row remains a no-op.
      */
     @Transaction
     suspend fun insertWithTraceAndTrim(
@@ -78,6 +79,7 @@ interface NotificationEventDao {
         max: Int,
         maxTraceEvents: Int,
         legacyZoneId: ZoneId,
+        nowMillis: Long = Long.MAX_VALUE,
     ): Long {
         require(max >= 0) { "Recent event maximum must not be negative" }
         require(maxTraceEvents >= 0) { "Trace event maximum must not be negative" }
@@ -132,6 +134,7 @@ interface NotificationEventDao {
         monitoredAction: StoredRuleAction?,
         trace: List<NotificationDecisionTraceEntity>,
         maxTraceEvents: Int,
+        nowMillis: Long = Long.MAX_VALUE,
     ) {
         require(maxTraceEvents >= 0) { "Trace event maximum must not be negative" }
         if (
@@ -226,9 +229,15 @@ interface NotificationEventDao {
     ): List<NotificationEventDetailRelation>
 
     @Query(
-        "SELECT package_name, channel_id, MAX(channel_name) AS channel_name, COUNT(*) AS event_count, " +
-            "MAX(posted_at_millis) AS last_seen_millis FROM notification_events " +
-            "GROUP BY package_name, channel_id ORDER BY last_seen_millis DESC LIMIT :limit",
+        "SELECT event.package_name, event.channel_id, " +
+            "(SELECT latest.channel_name FROM notification_events AS latest " +
+            "WHERE latest.package_name = event.package_name AND " +
+            "((latest.channel_id = event.channel_id) OR " +
+            "(latest.channel_id IS NULL AND event.channel_id IS NULL)) " +
+            "ORDER BY latest.posted_at_millis DESC, latest.id DESC LIMIT 1) AS channel_name, " +
+            "COUNT(*) AS event_count, MAX(event.posted_at_millis) AS last_seen_millis " +
+            "FROM notification_events AS event GROUP BY event.package_name, event.channel_id " +
+            "ORDER BY last_seen_millis DESC LIMIT :limit",
     )
     fun observeSources(limit: Int): Flow<List<NotificationSourceRow>>
 
@@ -275,13 +284,13 @@ interface NotificationEventDao {
     ): Flow<List<ActionCountRow>>
 
     /** Excludes a logged event from insight counts; it cannot restore a dismissed notification. */
-    @Query("UPDATE notification_events SET undone = 1 WHERE id = :id")
-    suspend fun markUndone(id: Long)
+    @Query("UPDATE notification_events SET undone = 1 WHERE id = :id AND undone = 0")
+    suspend fun markUndone(id: Long): Int
 
     @Query(
         "SELECT id, posted_at_millis, posted_epoch_day, undone FROM notification_events " +
-            "WHERE posted_at_millis < :cutoffMillis " +
-            "ORDER BY posted_at_millis ASC, id ASC LIMIT :limit",
+            "WHERE recorded_at_millis < :cutoffMillis " +
+            "ORDER BY id ASC LIMIT :limit",
     )
     suspend fun getRetentionDeletionCandidates(
         cutoffMillis: Long,
@@ -291,8 +300,8 @@ interface NotificationEventDao {
     @Query(
         "SELECT id, posted_at_millis, posted_epoch_day, undone FROM notification_events " +
             "WHERE id NOT IN (SELECT id FROM notification_events " +
-            "ORDER BY posted_at_millis DESC, id DESC LIMIT :max) " +
-            "ORDER BY posted_at_millis ASC, id ASC LIMIT :limit",
+            "ORDER BY id DESC LIMIT :max) " +
+            "ORDER BY id ASC LIMIT :limit",
     )
     suspend fun getOverflowDeletionCandidates(
         max: Int,
@@ -366,10 +375,13 @@ interface NotificationEventDao {
     suspend fun countEncryptedContents(): Int
 
     @Query(
-        "DELETE FROM encrypted_notification_contents WHERE event_id IN " +
-            "(SELECT id FROM notification_events WHERE recorded_at_millis < :cutoffMillis)",
+        "DELETE FROM encrypted_notification_contents WHERE " +
+            "created_at_millis < :cutoffMillis OR created_at_millis > :nowMillis",
     )
-    suspend fun deleteEncryptedContentsOlderThan(cutoffMillis: Long): Int
+    suspend fun deleteEncryptedContentsOlderThan(
+        cutoffMillis: Long,
+        nowMillis: Long,
+    ): Int
 
     @Query("DELETE FROM encrypted_notification_contents")
     suspend fun deleteAllEncryptedContents(): Int
@@ -382,7 +394,8 @@ interface NotificationEventDao {
 
     @Query(
         "DELETE FROM notification_decision_traces WHERE event_id NOT IN " +
-            "(SELECT id FROM notification_events ORDER BY posted_at_millis DESC, id DESC LIMIT :max)",
+            "(SELECT id FROM notification_events " +
+            "ORDER BY id DESC LIMIT :max)",
     )
     suspend fun deleteTracesOutsideMostRecent(max: Int): Int
 

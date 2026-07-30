@@ -4,7 +4,10 @@ import kotlinx.coroutines.flow.Flow
 
 /** Local SQL-derived suggestions. Nothing is saved or activated without an explicit user action. */
 interface RuleSuggestionRepository {
-    fun observeSuggestions(sinceMillis: Long): Flow<List<RuleSuggestion>>
+    fun observeSuggestions(
+        sinceMillis: Long,
+        nowMillis: Long,
+    ): Flow<List<RuleSuggestion>>
 
     suspend fun dismiss(
         suggestionKey: String,

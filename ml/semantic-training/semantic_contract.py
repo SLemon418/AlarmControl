@@ -6,11 +6,15 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import stat
 import struct
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
+
+from atomic_generation import PENDING_MARKER, resolve_generation
 
 LABELS = (
     "MARKETING",
@@ -32,6 +36,29 @@ RELEASE_CONFIDENCE_THRESHOLD_FLOOR = struct.unpack(
     struct.pack(">f", 0.95),
 )[0]
 SEMANTIC_THRESHOLD_KEYS = frozenset({"general", "marketing"})
+CONVERSION_MODEL_FILENAME = "semantic_notification_classifier.tflite"
+CONVERSION_VOCAB_FILENAME = "semantic_vocab.txt"
+CONVERSION_LABELS_FILENAME = "semantic_labels.txt"
+CONVERSION_MANIFEST_FILENAME = "training_manifest.json"
+CONVERSION_BUNDLE_FILES = (
+    CONVERSION_MODEL_FILENAME,
+    CONVERSION_VOCAB_FILENAME,
+    CONVERSION_LABELS_FILENAME,
+    CONVERSION_MANIFEST_FILENAME,
+)
+CONVERSION_POINTER_FILENAME = ".current-generation"
+CONVERSION_GENERATIONS_DIRECTORY = ".generations"
+TRAINING_GENERATION_REQUIRED_FILES = (
+    "config.json",
+    "checkpoint.json",
+    "optimizer.pt",
+)
+TRAINING_WEIGHT_FILENAMES = (
+    "model.safetensors",
+    "model.safetensors.index.json",
+    "pytorch_model.bin",
+    "pytorch_model.bin.index.json",
+)
 
 
 class ContractError(ValueError):
@@ -115,16 +142,111 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def model_bundle_hashes(model_dir: Path) -> tuple[dict[str, str], str]:
-    """Hash every regular bundle file and derive one stable bundle digest."""
+def regular_file_evidence(
+    path: Path,
+) -> tuple[str, tuple[int, int, int, int, int]]:
+    """Hash one stable regular-file identity without following its leaf."""
 
+    if path.is_symlink():
+        raise ContractError(f"file symlink is not allowed: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise ContractError(f"cannot safely open regular file: {path}") from error
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise ContractError(f"expected one regular file: {path}")
+        digest = hashlib.sha256()
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+
+    def identity(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
+        return (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        )
+
+    selected_identity = identity(after)
+    if identity(before) != selected_identity:
+        raise ContractError(f"regular file changed while hashing: {path}")
+    try:
+        current = path.lstat()
+    except OSError as error:
+        raise ContractError(f"regular file disappeared while hashing: {path}") from error
+    if (
+        not stat.S_ISREG(current.st_mode)
+        or identity(current) != selected_identity
+    ):
+        raise ContractError(f"regular file identity changed while hashing: {path}")
+    return digest.hexdigest(), selected_identity
+
+
+def resolve_conversion_bundle(output: Path) -> Path:
+    """Resolve one complete committed Conv1D conversion bundle."""
+
+    return resolve_generation(
+        output,
+        pointer_name=CONVERSION_POINTER_FILENAME,
+        generations_name=CONVERSION_GENERATIONS_DIRECTORY,
+        required_files=CONVERSION_BUNDLE_FILES,
+        legacy=output,
+    )
+
+
+def training_generation_names(target: Path) -> tuple[str, str]:
+    """Return the hidden pointer and immutable-generation directory names."""
+
+    name = target.name
+    if not name or name in {".", ".."}:
+        raise ContractError(f"invalid training model selector: {target}")
+    return f".{name}.current-generation", f".{name}.generations"
+
+
+def resolve_training_model_bundle(model_dir: Path) -> Path:
+    """Resolve a logical training selector to one committed model generation."""
+
+    expanded = model_dir.expanduser()
+    pointer_name, generations_name = training_generation_names(expanded)
+    return resolve_generation(
+        expanded.parent,
+        pointer_name=pointer_name,
+        generations_name=generations_name,
+        required_files=TRAINING_GENERATION_REQUIRED_FILES,
+        legacy=expanded,
+    )
+
+
+def model_bundle_evidence(
+    model_dir: Path,
+) -> tuple[
+    dict[str, str],
+    str,
+    dict[str, tuple[int, int, int, int, int]],
+]:
+    """Hash and identify every stable regular file in one model bundle."""
+
+    model_dir = resolve_training_model_bundle(model_dir)
     file_hashes: dict[str, str] = {}
+    identities: dict[str, tuple[int, int, int, int, int]] = {}
     for path in sorted(model_dir.rglob("*")):
         if path.is_symlink():
             raise ContractError(f"model bundle symlink is not allowed: {path}")
         if path.is_file():
             relative = path.relative_to(model_dir).as_posix()
-            file_hashes[relative] = sha256_file(path)
+            if relative == PENDING_MARKER:
+                continue
+            digest, identity = regular_file_evidence(path)
+            file_hashes[relative] = digest
+            identities[relative] = identity
     if not file_hashes:
         raise ContractError("model bundle contains no regular files")
     digest = hashlib.sha256()
@@ -133,7 +255,14 @@ def model_bundle_hashes(model_dir: Path) -> tuple[dict[str, str], str]:
         digest.update(b"\0")
         digest.update(file_hash.encode("ascii"))
         digest.update(b"\n")
-    return file_hashes, digest.hexdigest()
+    return file_hashes, digest.hexdigest(), identities
+
+
+def model_bundle_hashes(model_dir: Path) -> tuple[dict[str, str], str]:
+    """Hash every regular bundle file and derive one stable bundle digest."""
+
+    file_hashes, digest, _ = model_bundle_evidence(model_dir)
+    return file_hashes, digest
 
 
 def notification_text(title: str, body: str) -> str:
@@ -143,8 +272,8 @@ def notification_text(title: str, body: str) -> str:
     return unicodedata.normalize("NFC", joined)
 
 
-def load_jsonl(path: Path) -> list[dict[str, Any]]:
-    """Load non-blank JSON objects and reject duplicate keys."""
+def parse_jsonl(text: str, context: object) -> list[dict[str, Any]]:
+    """Parse non-blank JSON objects from one immutable text snapshot."""
 
     def strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         value: dict[str, Any] = {}
@@ -155,23 +284,51 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
         return value
 
     records: list[dict[str, Any]] = []
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    for line_number, line in enumerate(text.splitlines(), 1):
         if not line.strip():
-            raise ContractError(f"{path}:{line_number}: blank JSONL line")
+            raise ContractError(f"{context}:{line_number}: blank JSONL line")
         try:
             value = json.loads(line, object_pairs_hook=strict_object)
         except (json.JSONDecodeError, ContractError) as error:
-            raise ContractError(f"{path}:{line_number}: invalid JSON: {error}") from error
+            raise ContractError(
+                f"{context}:{line_number}: invalid JSON: {error}"
+            ) from error
         if not isinstance(value, dict):
-            raise ContractError(f"{path}:{line_number}: expected a JSON object")
+            raise ContractError(
+                f"{context}:{line_number}: expected a JSON object"
+            )
         records.append(value)
     return records
+
+
+def load_jsonl(path: Path) -> list[dict[str, Any]]:
+    """Load non-blank JSON objects and reject duplicate keys."""
+
+    return load_jsonl_snapshot(path)[0]
+
+
+def load_jsonl_snapshot(path: Path) -> tuple[list[dict[str, Any]], str]:
+    """Parse and hash one immutable byte snapshot of a JSONL file."""
+
+    content = path.read_bytes()
+    return (
+        parse_jsonl(content.decode("utf-8"), path),
+        hashlib.sha256(content).hexdigest(),
+    )
 
 
 def validated_training_rows(path: Path) -> list[dict[str, Any]]:
     """Load the builder output and validate fields consumed by trainers."""
 
-    records = load_jsonl(path)
+    return validated_training_rows_snapshot(path)[0]
+
+
+def validated_training_rows_snapshot(
+    path: Path,
+) -> tuple[list[dict[str, Any]], str]:
+    """Validate and hash training rows from one immutable byte snapshot."""
+
+    records, digest = load_jsonl_snapshot(path)
     ids: set[str] = set()
     for index, record in enumerate(records, 1):
         context = f"{path}:{index}"
@@ -189,7 +346,7 @@ def validated_training_rows(path: Path) -> list[dict[str, Any]]:
             raise ContractError(f"{context}: title and body must be strings")
         if not notification_text(record["title"], record["body"]):
             raise ContractError(f"{context}: empty notification text")
-    return records
+    return records, digest
 
 
 @dataclass(frozen=True)

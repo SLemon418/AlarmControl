@@ -14,7 +14,13 @@ TRAINING_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TRAINING_DIR))
 
 import convert_koelectra_litert as converter
-from semantic_contract import LABELS, MAX_SEQUENCE_LENGTH
+from atomic_generation import publish_generation
+from semantic_contract import (
+    LABELS,
+    MAX_SEQUENCE_LENGTH,
+    TRAINING_GENERATION_REQUIRED_FILES,
+    training_generation_names,
+)
 
 
 def write_model_config(path: Path) -> Path:
@@ -170,6 +176,32 @@ class KoElectraLiteRtConversionTest(unittest.TestCase):
             (model_dir / "vocab.txt").unlink()
             with self.assertRaises(converter.ConversionError):
                 converter.validate_local_model_dir(model_dir)
+
+    def test_logical_selector_resolves_one_committed_training_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = write_model_config(root / "source")
+            target = root / "best"
+            pointer_name, generations_name = training_generation_names(target)
+
+            def writer(generation: Path) -> None:
+                for path in source.iterdir():
+                    (generation / path.name).write_bytes(path.read_bytes())
+                (generation / "checkpoint.json").write_text("{}")
+                (generation / "optimizer.pt").write_bytes(b"optimizer")
+                (generation / "model.safetensors").write_bytes(b"weights")
+
+            generation = publish_generation(
+                root,
+                pointer_name=pointer_name,
+                generations_name=generations_name,
+                required_files=TRAINING_GENERATION_REQUIRED_FILES,
+                writer=writer,
+            )
+
+            resolved, _ = converter.validate_local_model_dir(target)
+
+            self.assertEqual(generation.resolve(), resolved)
 
     def test_enforces_small_injected_size_limit_without_large_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -519,16 +551,23 @@ class KoElectraLiteRtConversionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "final"
 
-            result = converter.atomic_output_directory(
-                output,
-                lambda temporary: (
-                    (temporary / "model.tflite").write_bytes(b"model"),
-                    "written",
-                )[1],
-            )
+            with mock.patch.object(
+                converter,
+                "_fsync_directory",
+                wraps=converter._fsync_directory,
+            ) as sync_directory:
+                result = converter.atomic_output_directory(
+                    output,
+                    lambda temporary: (
+                        (temporary / "model.tflite").write_bytes(b"model"),
+                        "written",
+                    )[1],
+                )
 
             self.assertEqual("written", result)
             self.assertEqual(b"model", (output / "model.tflite").read_bytes())
+            self.assertEqual(2, sync_directory.call_count)
+            self.assertEqual(output.parent, sync_directory.call_args_list[-1].args[0])
             self.assertFalse(
                 any(path.name.endswith(".tmp") for path in output.parent.iterdir())
             )

@@ -22,6 +22,7 @@ from semantic_contract import (
     RELEASE_CONFIDENCE_THRESHOLD_FLOOR,
     WordPieceTokenizer,
     model_bundle_hashes,
+    resolve_training_model_bundle,
 )
 
 MIB = 1024**2
@@ -868,7 +869,15 @@ def _validate_conversion(
 
 
 def _validate_vocab(model_dir: Path) -> tuple[Path, int, str]:
-    directory = _require_directory(model_dir, "--model-dir")
+    if model_dir.expanduser().is_symlink():
+        raise PackagingError("--model-dir must not be a symlink")
+    try:
+        selected = resolve_training_model_bundle(model_dir)
+    except (OSError, ValueError) as error:
+        raise PackagingError(
+            f"--model-dir has no valid committed generation: {model_dir}"
+        ) from error
+    directory = _require_directory(selected, "--model-dir")
     vocab_path = _require_regular_file(
         directory / SOURCE_VOCAB_FILENAME,
         "trained WordPiece vocabulary",
@@ -1834,6 +1843,14 @@ def _write_json(path: Path, value: Mapping[str, Any]) -> None:
     _write_bytes(path, content)
 
 
+def _fsync_directory(directory: Path) -> None:
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def atomic_output_directory(
     output_dir: Path,
     writer: Callable[[Path], Any],
@@ -1859,7 +1876,9 @@ def atomic_output_directory(
             for path in temporary.iterdir()
         ):
             raise PackagingError("asset package entries must be regular files")
+        _fsync_directory(temporary)
         os.replace(temporary, output_dir)
+        _fsync_directory(output_dir.parent)
         return result
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)

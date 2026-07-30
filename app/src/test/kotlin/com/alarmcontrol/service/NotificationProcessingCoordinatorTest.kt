@@ -353,6 +353,72 @@ class NotificationProcessingCoordinatorTest {
         }
 
     @Test
+    fun `capacity rejected older callback cannot invalidate fresher same key work`() =
+        runTest {
+            val coordinator = NotificationProcessingCoordinator(this)
+            val newerStarted = CompletableDeferred<Unit>()
+            val releaseNewer = CompletableDeferred<Unit>()
+            val committed = mutableListOf<String>()
+
+            coordinator.submit("same", freshness = 20) { token ->
+                newerStarted.complete(Unit)
+                releaseNewer.await()
+                token.commit { committed += "newer" }
+            }
+            newerStarted.await()
+
+            coordinator.invalidateIfAtLeastAsFresh("same", freshness = 10)
+            releaseNewer.complete(Unit)
+            advanceUntilIdle()
+
+            assertEquals(listOf("newer"), committed)
+        }
+
+    @Test
+    fun `capacity rejected newer callback invalidates older same key work`() =
+        runTest {
+            val coordinator = NotificationProcessingCoordinator(this)
+            val olderStarted = CompletableDeferred<Unit>()
+            val releaseOlder = CompletableDeferred<Unit>()
+            val committed = mutableListOf<String>()
+
+            coordinator.submit("same", freshness = 10) { token ->
+                olderStarted.complete(Unit)
+                releaseOlder.await()
+                token.commit { committed += "older" }
+            }
+            olderStarted.await()
+
+            coordinator.invalidateIfAtLeastAsFresh("same", freshness = 20)
+            releaseOlder.complete(Unit)
+            advanceUntilIdle()
+
+            assertTrue(committed.isEmpty())
+        }
+
+    @Test
+    fun `capacity rejected equal time callback invalidates earlier same key work`() =
+        runTest {
+            val coordinator = NotificationProcessingCoordinator(this)
+            val earlierStarted = CompletableDeferred<Unit>()
+            val releaseEarlier = CompletableDeferred<Unit>()
+            val committed = mutableListOf<String>()
+
+            coordinator.submit("same", freshness = 20) { token ->
+                earlierStarted.complete(Unit)
+                releaseEarlier.await()
+                token.commit { committed += "earlier" }
+            }
+            earlierStarted.await()
+
+            coordinator.invalidateIfAtLeastAsFresh("same", freshness = 20)
+            releaseEarlier.complete(Unit)
+            advanceUntilIdle()
+
+            assertTrue(committed.isEmpty())
+        }
+
+    @Test
     fun `overflow never evicts work that is already running`() =
         runTest {
             val coordinator =

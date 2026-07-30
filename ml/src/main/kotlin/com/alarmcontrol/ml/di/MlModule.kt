@@ -55,11 +55,12 @@ object MlModule {
         // Vocab and labels are loaded from the bundled assets the trainer emits next to the model,
         // so their order always matches the .tflite. Missing assets -> empty lists -> the backend
         // also finds no model -> classification degrades to rule-only filtering (§5).
-        val vocabulary = ModelAssets.readLines(context, MlConfig.VOCAB_ASSET)
-        val labels = ModelAssets.readLines(context, MlConfig.LABELS_ASSET)
+        val assets = ModelAssets.classifierAssetSet(context)
+        val vocabulary = ModelAssets.readLines(context, assets.vocabulary)
+        val labels = ModelAssets.readLines(context, assets.labels)
         return LiteRTNotificationClassifier(
             featureExtractor = BagOfWordsFeatureExtractor(vocabulary),
-            backend = BundledTfLiteBackend(context, MlConfig.MODEL_ASSET, labels.size),
+            backend = BundledTfLiteBackend(context, assets.model, labels.size),
             labels = labels,
             confidenceThreshold = MlConfig.CONFIDENCE_THRESHOLD,
             feedbackBlender = RepositoryFeedbackBlender.from(feedbackRepository, applicationScope),
@@ -118,7 +119,10 @@ object MlModule {
     @Singleton
     fun provideNotificationCategories(
         @ApplicationContext context: Context,
-    ): NotificationCategories = NotificationCategories(ModelAssets.readLines(context, MlConfig.LABELS_ASSET))
+    ): NotificationCategories {
+        val labelsAsset = ModelAssets.classifierAssetSet(context).labels
+        return NotificationCategories(ModelAssets.readLines(context, labelsAsset))
+    }
 
     /**
      * The on-device LLM context analyzer (Milestone 4). Loads a LOCAL MediaPipe model on the IO

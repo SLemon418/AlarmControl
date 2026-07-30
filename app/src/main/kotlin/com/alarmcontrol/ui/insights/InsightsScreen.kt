@@ -53,6 +53,7 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.pluralStringResource
@@ -343,6 +344,12 @@ private fun SuggestionCard(
     onOpenDraft: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val appName =
+        insightsAppName(
+            suggestion.appName,
+            suggestion.packageName,
+            suggestion.appNameIsPackageFallback,
+        )
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
@@ -358,11 +365,22 @@ private fun SuggestionCard(
                 ),
                 style = MaterialTheme.typography.titleSmall,
             )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AppIdentityIcon(
+                    appName = appName,
+                    appIcon = suggestion.appIcon,
+                    modifier = Modifier.size(32.dp),
+                )
+                Text(appName, style = MaterialTheme.typography.labelLarge)
+            }
             Text(
                 if (suggestion.type == RuleSuggestionTypeUi.QUIET_CHANNEL) {
                     stringResource(
                         R.string.suggestion_quiet_channel_body,
-                        suggestion.appName,
+                        appName,
                         suggestion.channelId.orEmpty(),
                         suggestion.numerator,
                         suggestion.denominator,
@@ -370,7 +388,7 @@ private fun SuggestionCard(
                 } else {
                     stringResource(
                         R.string.suggestion_marketing_body,
-                        suggestion.appName,
+                        appName,
                         suggestion.numerator,
                         suggestion.denominator,
                     )
@@ -537,17 +555,31 @@ private fun InsightsSummaryCard(
                 style = MaterialTheme.typography.bodyMedium,
             )
         } else {
-            val headline =
-                if (summary.mostMutedPackage == null) {
-                    stringResource(R.string.insights_none_muted)
-                } else {
-                    stringResource(
-                        R.string.insights_most_muted,
-                        summary.mostMutedAppName ?: summary.mostMutedPackage,
-                        summary.mostMutedCount,
+            val mostMutedPackage = summary.mostMutedPackage
+            if (mostMutedPackage == null) {
+                Text(stringResource(R.string.insights_none_muted), style = MaterialTheme.typography.bodyMedium)
+            } else {
+                val appName =
+                    insightsAppName(
+                        summary.mostMutedAppName.orEmpty(),
+                        mostMutedPackage,
+                        summary.mostMutedAppNameIsPackageFallback,
+                    )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    AppIdentityIcon(
+                        appName = appName,
+                        appIcon = summary.mostMutedAppIcon,
+                        modifier = Modifier.size(32.dp),
+                    )
+                    Text(
+                        stringResource(R.string.insights_most_muted, appName, summary.mostMutedCount),
+                        style = MaterialTheme.typography.bodyMedium,
                     )
                 }
-            Text(headline, style = MaterialTheme.typography.bodyMedium)
+            }
             if (summary.anomalyCount > 0) {
                 Text(
                     text =
@@ -709,15 +741,22 @@ private fun DailyInsightSignalDetails(day: DailyInsightUi) {
     if (day.apps.isNotEmpty()) {
         Text(stringResource(R.string.insights_analysis_apps), style = MaterialTheme.typography.labelLarge)
         day.apps.take(DAILY_APP_DISPLAY_LIMIT).forEach { app ->
-            Text(
-                stringResource(
-                    R.string.insights_daily_app_count,
-                    app.appName,
-                    app.totalCount,
-                    app.silencedCount,
-                ),
-                style = MaterialTheme.typography.bodySmall,
-            )
+            val appName = insightsAppName(app.appName, app.packageName, app.appNameIsPackageFallback)
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AppIdentityIcon(appName, app.appIcon, Modifier.size(28.dp))
+                Text(
+                    stringResource(
+                        R.string.insights_daily_app_count,
+                        appName,
+                        app.totalCount,
+                        app.silencedCount,
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
         }
     }
     if (day.semanticIntents.isNotEmpty()) {
@@ -738,14 +777,21 @@ private fun DailyInsightChannelDetails(
     if (channels.isEmpty()) return
     Text(stringResource(R.string.insights_top_channels), style = MaterialTheme.typography.labelLarge)
     channels.forEach { channel ->
+        val appName =
+            insightsAppName(
+                channel.appName,
+                channel.packageName,
+                channel.appNameIsPackageFallback,
+            )
         TextButton(
             onClick = { onOpenNotificationSettings(channel.packageName, channel.channelId) },
             modifier = Modifier.fillMaxWidth(),
         ) {
+            AppIdentityIcon(appName, channel.appIcon, Modifier.padding(end = 8.dp).size(28.dp))
             Text(
                 stringResource(
                     R.string.insights_channel_count,
-                    channel.appName,
+                    appName,
                     channel.channelName ?: channel.channelId,
                     channel.count,
                 ),
@@ -971,24 +1017,12 @@ internal fun EventRow(
 
 @Composable
 private fun EventIdentity(event: EventListItem) {
-    Box(
+    val appName = insightsAppName(event.appName, event.packageName, event.appNameIsPackageFallback)
+    AppIdentityIcon(
+        appName = appName,
+        appIcon = event.appIcon,
         modifier = Modifier.padding(end = 12.dp).size(40.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        val icon = event.appIcon
-        if (icon == null) {
-            Surface(
-                shape = MaterialTheme.shapes.medium,
-                color = MaterialTheme.colorScheme.secondaryContainer,
-            ) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text(event.appName.firstOrNull()?.uppercase() ?: "?")
-                }
-            }
-        } else {
-            Image(bitmap = icon, contentDescription = null, modifier = Modifier.fillMaxSize())
-        }
-    }
+    )
 }
 
 @Composable
@@ -996,20 +1030,13 @@ private fun EventDetails(
     event: EventListItem,
     modifier: Modifier = Modifier,
 ) {
+    val appName = insightsAppName(event.appName, event.packageName, event.appNameIsPackageFallback)
     Column(modifier) {
         Text(
-            text = event.appName,
+            text = appName,
             style = MaterialTheme.typography.titleSmall,
             textDecoration = if (event.undone) TextDecoration.LineThrough else null,
         )
-        if (event.appName != event.packageName) {
-            Text(
-                text = event.packageName,
-                style = MaterialTheme.typography.labelSmall,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
         Text(event.subtitle(), style = MaterialTheme.typography.bodySmall)
         event.channelId?.let { channelId ->
             Text(
@@ -1027,6 +1054,41 @@ private fun EventDetails(
             )
         }
         event.adObservation?.let { observation -> AdObservationLabel(observation) }
+    }
+}
+
+@Composable
+internal fun insightsAppName(
+    appName: String,
+    packageName: String,
+    isPackageFallback: Boolean,
+): String =
+    if (isPackageFallback || appName.isBlank() || appName == packageName) {
+        stringResource(R.string.insights_unknown_app)
+    } else {
+        appName
+    }
+
+@Composable
+internal fun AppIdentityIcon(
+    appName: String,
+    appIcon: ImageBitmap?,
+    modifier: Modifier = Modifier.size(40.dp),
+) {
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        if (appIcon == null) {
+            Surface(
+                modifier = Modifier.fillMaxSize(),
+                shape = MaterialTheme.shapes.medium,
+                color = MaterialTheme.colorScheme.secondaryContainer,
+            ) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(appName.firstOrNull()?.uppercase() ?: "?")
+                }
+            }
+        } else {
+            Image(bitmap = appIcon, contentDescription = null, modifier = Modifier.fillMaxSize())
+        }
     }
 }
 

@@ -21,6 +21,7 @@ import kotlin.math.roundToInt
 data class AppIdentityUi(
     val label: String,
     val icon: ImageBitmap?,
+    val isPackageFallback: Boolean = false,
 )
 
 /** Resolves package metadata outside Composables so PackageManager I/O never runs during layout. */
@@ -57,15 +58,22 @@ class AndroidAppIdentityResolver
             try {
                 val packageManager = context.packageManager
                 val info = packageManager.applicationInfo(packageName)
-                val label = packageManager.getApplicationLabel(info).toString().safeAppLabel(packageName)
+                val safeLabel = packageManager.getApplicationLabel(info).toString().safeAppLabel("")
+                val usesPackageFallback = safeLabel.isBlank()
+                val label = safeLabel.ifBlank { packageName }
                 val iconSize = (ICON_DP * context.resources.displayMetrics.density).roundToInt().coerceAtLeast(1)
-                val icon = packageManager.getApplicationIcon(info).toBitmap(iconSize, iconSize).asImageBitmap()
-                AppIdentityUi(label = label, icon = icon)
+                val icon =
+                    try {
+                        packageManager.getApplicationIcon(info).toBitmap(iconSize, iconSize).asImageBitmap()
+                    } catch (_: RuntimeException) {
+                        null
+                    }
+                AppIdentityUi(label = label, icon = icon, isPackageFallback = usesPackageFallback)
             } catch (_: PackageManager.NameNotFoundException) {
-                AppIdentityUi(label = packageName, icon = null)
+                AppIdentityUi(label = packageName, icon = null, isPackageFallback = true)
             } catch (_: RuntimeException) {
                 // OEM PackageManager/icon decoding failures must not break an entire UI flow.
-                AppIdentityUi(label = packageName, icon = null)
+                AppIdentityUi(label = packageName, icon = null, isPackageFallback = true)
             }
 
         @Suppress("DEPRECATION")

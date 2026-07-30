@@ -1,5 +1,6 @@
 package com.alarmcontrol.data.backup
 
+import com.alarmcontrol.core.backup.BackupCategoryFeedback
 import com.alarmcontrol.core.backup.BackupData
 import com.alarmcontrol.core.backup.BackupSemanticFeedback
 import com.alarmcontrol.core.filtering.Condition
@@ -14,6 +15,7 @@ import com.alarmcontrol.core.insights.MAX_SUPPORTED_INSIGHT_EPOCH_DAY
 import com.alarmcontrol.core.insights.RuleTriggerCount
 import com.alarmcontrol.core.insights.SemanticIntentCount
 import com.alarmcontrol.core.profile.FilteringProfile
+import com.alarmcontrol.core.settings.SettingsSnapshot
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Test
@@ -85,16 +87,69 @@ class BackupValidatorTest {
         }
     }
 
+    @Test
+    fun `small future feedback skew is normalized to validation time`() {
+        val normalized =
+            BackupValidator.validate(
+                backupWith(
+                    categoryFeedback =
+                        listOf(
+                            BackupCategoryFeedback("com.example", "promotion", "social", 1_001),
+                        ),
+                ),
+                nowMillis = 1_000,
+            )
+
+        assertEquals(1_000, normalized.categoryFeedback.single().recordedAtMillis)
+    }
+
+    @Test
+    fun `feedback timestamp beyond the accepted future skew is rejected`() {
+        val backup =
+            backupWith(
+                categoryFeedback =
+                    listOf(
+                        BackupCategoryFeedback(
+                            "com.example",
+                            "promotion",
+                            "social",
+                            1_000 + MAX_BACKUP_FEEDBACK_FUTURE_SKEW_MILLIS + 1,
+                        ),
+                    ),
+            )
+
+        assertThrows(IllegalArgumentException::class.java) {
+            BackupValidator.validate(backup, nowMillis = 1_000)
+        }
+    }
+
+    @Test
+    fun `content retention outside the privacy bound is rejected`() {
+        listOf(0, 31).forEach { days ->
+            assertThrows(IllegalArgumentException::class.java) {
+                BackupValidator.validate(
+                    backupWith(
+                        settings = SettingsSnapshot(notificationContentRetentionDays = days),
+                    ),
+                )
+            }
+        }
+    }
+
     private fun backupWith(
         insight: DailyInsight = validInsight(),
         profiles: List<FilteringProfile> = listOf(FilteringProfile("1", "Focus", setOf("1"))),
+        categoryFeedback: List<BackupCategoryFeedback> = emptyList(),
         semanticFeedback: List<BackupSemanticFeedback> = emptyList(),
+        settings: SettingsSnapshot? = null,
     ): BackupData =
         BackupData(
             rules = listOf(validRule),
             dailyInsights = listOf(insight),
             profiles = profiles,
+            categoryFeedback = categoryFeedback,
             semanticFeedback = semanticFeedback,
+            settings = settings,
         )
 
     private fun validInsight(): DailyInsight =

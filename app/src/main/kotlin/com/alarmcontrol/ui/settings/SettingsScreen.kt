@@ -58,6 +58,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -123,6 +124,7 @@ fun SettingsRoute(
         onSemanticAnalysisScopeChange = viewModel::setSemanticAnalysisScope,
         onEventRetentionChange = viewModel::setEventRetentionDays,
         onInsightRetentionChange = viewModel::setDailyInsightRetentionDays,
+        onContentRetentionChange = viewModel::setNotificationContentRetentionDays,
         onNotificationContentStorageChange = viewModel::setNotificationContentStorageEnabled,
         onContentPackageExcluded = viewModel::setContentPackageExcluded,
         onClearActivity = viewModel::clearActivityHistory,
@@ -173,6 +175,7 @@ fun SettingsScreen(
     onRemoveLlmModel: () -> Unit = {},
     onEventRetentionChange: (Int) -> Unit = {},
     onInsightRetentionChange: (Int) -> Unit = {},
+    onContentRetentionChange: (Int) -> Unit = {},
     onNotificationContentStorageChange: (Boolean) -> Unit = {},
     onContentPackageExcluded: (String, Boolean) -> Unit = { _, _ -> },
     onClearActivity: () -> Unit = {},
@@ -250,6 +253,7 @@ fun SettingsScreen(
         },
         onEventRetentionChange = onEventRetentionChange,
         onInsightRetentionChange = onInsightRetentionChange,
+        onContentRetentionChange = onContentRetentionChange,
         onNotificationContentStorageChange = onNotificationContentStorageChange,
         onContentPackageExcluded = onContentPackageExcluded,
         onOpenNotificationAccess = onOpenNotificationAccess,
@@ -312,6 +316,7 @@ private fun SettingsContent(
     onRestore: () -> Unit,
     onEventRetentionChange: (Int) -> Unit,
     onInsightRetentionChange: (Int) -> Unit,
+    onContentRetentionChange: (Int) -> Unit,
     onNotificationContentStorageChange: (Boolean) -> Unit,
     onContentPackageExcluded: (String, Boolean) -> Unit,
     onOpenNotificationAccess: () -> Unit,
@@ -387,18 +392,16 @@ private fun SettingsContent(
                                 onBackup,
                                 onRestore,
                             )
-                        SettingsDestination.DATA_PRIVACY -> {
-                            NotificationContentSettingsSection(
+                        SettingsDestination.DATA_PRIVACY ->
+                            DataPrivacySettings(
                                 state = state,
-                                onStorageChange = onNotificationContentStorageChange,
-                                onOpenExclusions = { onNavigate(SettingsDestination.CONTENT_EXCLUSIONS) },
-                                onRequestClear = { onRequestClear(ClearAction.CONTENT) },
+                                onNavigate = onNavigate,
+                                onEventRetentionChange = onEventRetentionChange,
+                                onInsightRetentionChange = onInsightRetentionChange,
+                                onContentRetentionChange = onContentRetentionChange,
+                                onNotificationContentStorageChange = onNotificationContentStorageChange,
+                                onRequestClear = onRequestClear,
                             )
-                            HorizontalDivider()
-                            RetentionSettingsSection(state, onEventRetentionChange, onInsightRetentionChange)
-                            HorizontalDivider()
-                            PrivacySettingsSection(onRequestClear)
-                        }
                         SettingsDestination.CONTENT_EXCLUSIONS -> Unit
                     }
                 }
@@ -408,9 +411,33 @@ private fun SettingsContent(
 }
 
 @Composable
+private fun DataPrivacySettings(
+    state: SettingsUiState,
+    onNavigate: (SettingsDestination) -> Unit,
+    onEventRetentionChange: (Int) -> Unit,
+    onInsightRetentionChange: (Int) -> Unit,
+    onContentRetentionChange: (Int) -> Unit,
+    onNotificationContentStorageChange: (Boolean) -> Unit,
+    onRequestClear: (ClearAction) -> Unit,
+) {
+    NotificationContentSettingsSection(
+        state = state,
+        onStorageChange = onNotificationContentStorageChange,
+        onRetentionChange = onContentRetentionChange,
+        onOpenExclusions = { onNavigate(SettingsDestination.CONTENT_EXCLUSIONS) },
+        onRequestClear = { onRequestClear(ClearAction.CONTENT) },
+    )
+    HorizontalDivider()
+    RetentionSettingsSection(state, onEventRetentionChange, onInsightRetentionChange)
+    HorizontalDivider()
+    PrivacySettingsSection(onRequestClear)
+}
+
+@Composable
 private fun NotificationContentSettingsSection(
     state: SettingsUiState,
     onStorageChange: (Boolean) -> Unit,
+    onRetentionChange: (Int) -> Unit,
     onOpenExclusions: () -> Unit,
     onRequestClear: () -> Unit,
 ) {
@@ -423,6 +450,18 @@ private fun NotificationContentSettingsSection(
     )
     Text(
         stringResource(R.string.settings_content_history_privacy),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    RetentionPicker(
+        label = stringResource(R.string.settings_content_retention),
+        selectedDays = state.notificationContentRetentionDays,
+        options = CONTENT_RETENTION_OPTIONS,
+        enabled = state.notificationContentStorageEnabled,
+        onSelect = onRetentionChange,
+    )
+    Text(
+        stringResource(R.string.settings_content_retention_event_limit),
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -1209,17 +1248,30 @@ private fun RetentionPicker(
     label: String,
     selectedDays: Int,
     options: List<Int>,
+    enabled: Boolean = true,
     onSelect: (Int) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
+    LaunchedEffect(enabled) {
+        if (!enabled) expanded = false
+    }
+    val selectedLabel = stringResource(R.string.settings_retention_days, selectedDays)
     Row(
         modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
         androidx.compose.foundation.layout.Box {
-            OutlinedButton(onClick = { expanded = true }) {
-                Text(stringResource(R.string.settings_retention_days, selectedDays))
+            OutlinedButton(
+                onClick = { expanded = true },
+                enabled = enabled,
+                modifier =
+                    Modifier.semantics {
+                        contentDescription = label
+                        stateDescription = selectedLabel
+                    },
+            ) {
+                Text(selectedLabel)
             }
             DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
                 options.forEach { days ->
@@ -1269,6 +1321,7 @@ private enum class ClearAction(
 
 private val EVENT_RETENTION_OPTIONS = listOf(7, 30, 90, 180)
 private val INSIGHT_RETENTION_OPTIONS = listOf(30, 90, 365, 730)
+private val CONTENT_RETENTION_OPTIONS = listOf(1, 3, 7, 14, 30)
 
 private fun String.toPassphrase(): CharArray? = takeIf { it.isNotEmpty() }?.toCharArray()
 

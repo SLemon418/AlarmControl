@@ -9,6 +9,7 @@ WORKFLOWS = Path(__file__).resolve().parents[2] / ".github" / "workflows"
 WORKFLOW = WORKFLOWS / "github-release.yml"
 ANDROID_WORKFLOW = WORKFLOWS / "android.yml"
 APP_BUILD = Path(__file__).resolve().parents[2] / "app" / "build.gradle.kts"
+ROOT_BUILD = Path(__file__).resolve().parents[2] / "build.gradle.kts"
 MANAGED_DEVICE_COMMAND = (
     "run: ./gradlew --dependency-verification strict "
     "-Pandroid.testoptions.manageddevices.emulator.gpu=swiftshader_indirect "
@@ -21,6 +22,7 @@ class GitHubReleaseWorkflowTest(unittest.TestCase):
         cls.workflow = WORKFLOW.read_text(encoding="utf-8")
         cls.android_workflow = ANDROID_WORKFLOW.read_text(encoding="utf-8")
         cls.app_build = APP_BUILD.read_text(encoding="utf-8")
+        cls.root_build = ROOT_BUILD.read_text(encoding="utf-8")
 
     def test_release_tests_the_checked_out_tag_commit(self) -> None:
         self.assertIn(
@@ -119,6 +121,79 @@ class GitHubReleaseWorkflowTest(unittest.TestCase):
         ]
 
         self.assertEqual([], unpinned)
+
+    def test_pin_scanner_includes_composite_actions_outside_dot_github(self) -> None:
+        self.assertIn("Files.walkFileTree(", self.root_build)
+        self.assertIn('file.name == "action.yml"', self.root_build)
+        self.assertIn('file.name == "action.yaml"', self.root_build)
+        for excluded in (".git", "build", "generated", "vendor"):
+            self.assertIn(f'"{excluded}"', self.root_build)
+
+    def test_pin_scanner_parses_yaml_and_rejects_parser_differentials(self) -> None:
+        for required_guard in (
+            "Load(loadSettings)",
+            "setAllowDuplicateKeys(false)",
+            "setAllowRecursiveKeys(false)",
+            "setMaxAliasesForCollections(50)",
+            "must normalize escaped YAML keys",
+            "must recognize explicit keys and block scalars",
+            "must resolve aliases used as keys",
+            "must safely resolve YAML merge keys",
+            "must honor explicit values over YAML merge defaults",
+            "must reject duplicate YAML keys",
+            "must reject unrecognized YAML tags",
+        ):
+            self.assertIn(required_guard, self.root_build)
+
+    def test_pin_scanner_does_not_follow_symbolic_links(self) -> None:
+        self.assertIn("Files.walkFileTree(", self.root_build)
+        self.assertIn("Files.isSymbolicLink(file)", self.root_build)
+        self.assertIn(
+            "must reject symbolic-link path components",
+            self.root_build,
+        )
+        self.assertIn(
+            "scan paths must not contain symbolic links",
+            self.root_build,
+        )
+
+    def test_local_docker_actions_require_all_external_images_to_be_pinned(self) -> None:
+        self.assertIn("pinnedDockerfileFailures.isEmpty()", self.root_build)
+        for external_source in (
+            "syntax frontend is not pinned",
+            "allowed docker/dockerfile repository",
+            "FROM image is not pinned",
+            "COPY has a malformed --from option",
+            "RUN mount has a malformed from entry",
+            "ADD is unsupported",
+            "ONBUILD external sources are unsupported",
+            "Dockerfile heredocs are unsupported",
+            "tokens split across continuations",
+            "parser-directive whitespace rules",
+            "normalize quoted and escaped builder flags and mount CSV",
+            "not treat an escaped trailing escape as a continuation",
+            "match BuildKit's current three-escape behavior",
+            "preserve whitespace on continuation lines",
+            "only trim Docker-supported continuation whitespace",
+            "not report non-continuation terminal escapes",
+            "alternate escape directives are unsupported",
+        ):
+            self.assertIn(external_source, self.root_build)
+
+        self.assertIn(
+            "must ignore inputs.image and with.image outside image schemas",
+            self.root_build,
+        )
+
+    def test_release_tag_uses_strict_semver_without_leading_zeroes(self) -> None:
+        self.assertIn(
+            r'^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$',
+            self.workflow,
+        )
+        self.assertIn(
+            "strict vMAJOR.MINOR.PATCH without leading zeroes",
+            self.workflow,
+        )
 
 
 if __name__ == "__main__":

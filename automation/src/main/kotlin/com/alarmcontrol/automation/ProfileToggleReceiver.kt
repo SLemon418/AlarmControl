@@ -16,6 +16,7 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -43,6 +44,8 @@ class ProfileToggleReceiver : BroadcastReceiver() {
 
         @ApplicationScope
         fun applicationScope(): CoroutineScope
+
+        fun externalAutomationAuthorizationGate(): ExternalAutomationAuthorizationGate
     }
 
     override fun onReceive(
@@ -50,14 +53,6 @@ class ProfileToggleReceiver : BroadcastReceiver() {
         intent: Intent,
     ) {
         val request = intent.toExternalAutomationRequestOrNull(context.packageName) ?: return
-        if (inFlight.incrementAndGet() > MAX_IN_FLIGHT_REQUESTS) {
-            inFlight.decrementAndGet()
-            return
-        }
-
-        // The DB write is async, so keep the broadcast alive until it finishes (goAsync) and never
-        // let a failure escape onReceive.
-        val pending = goAsync()
         val dependencies =
             try {
                 val entryPoint =
@@ -69,34 +64,54 @@ class ProfileToggleReceiver : BroadcastReceiver() {
                     controller = entryPoint.profileController(),
                     dispatcher = entryPoint.ioDispatcher(),
                     applicationScope = entryPoint.applicationScope(),
+                    authorizationGate = entryPoint.externalAutomationAuthorizationGate(),
                 )
             } catch (_: Exception) {
-                inFlight.decrementAndGet()
-                pending.finish()
                 Log.w(TAG, "Automation dependencies unavailable")
                 return
             }
+        val admission =
+            when (dependencies.authorizationGate.authorize(request.token).receiverLane()) {
+                ExternalAuthorizationLane.AUTHENTICATED ->
+                    ReceiverAdmission.Authenticated.takeIf {
+                        authenticatedInFlight.tryAcquire(MAX_AUTHENTICATED_IN_FLIGHT_REQUESTS)
+                    }
+                ExternalAuthorizationLane.AUTHORITATIVE_CHECK ->
+                    ReceiverAdmission.AuthoritativeCheck.takeIf {
+                        authoritativeCheckInFlight.compareAndSet(false, true)
+                    }
+            } ?: return
+
+        // The DB write is async, so keep the broadcast alive until it finishes (goAsync) and never
+        // let a failure escape onReceive.
+        val pending = goAsync()
         try {
             dependencies.applicationScope.launch(dependencies.dispatcher) {
                 try {
                     withTimeout(RECEIVER_TIMEOUT_MILLIS) {
-                        dependencies.controller.setEnabledFromExternalAutomation(
-                            request.profileId,
-                            request.enabled,
-                            request.token,
-                        )
+                        when (admission) {
+                            ReceiverAdmission.Authenticated,
+                            ReceiverAdmission.AuthoritativeCheck,
+                            -> {
+                                dependencies.controller.setEnabledFromExternalAutomation(
+                                    request.profileId,
+                                    request.enabled,
+                                    request.token,
+                                )
+                            }
+                        }
                     }
                 } catch (error: CancellationException) {
                     throw error
                 } catch (_: Exception) {
                     Log.w(TAG, "Failed to apply automation toggle")
                 } finally {
-                    inFlight.decrementAndGet()
+                    admission.release()
                     pending.finish()
                 }
             }
         } catch (_: Exception) {
-            inFlight.decrementAndGet()
+            admission.release()
             pending.finish()
             Log.w(TAG, "Couldn't start automation request")
         }
@@ -106,13 +121,39 @@ class ProfileToggleReceiver : BroadcastReceiver() {
         val controller: ProfileController,
         val dispatcher: CoroutineDispatcher,
         val applicationScope: CoroutineScope,
+        val authorizationGate: ExternalAutomationAuthorizationGate,
     )
+
+    private sealed interface ReceiverAdmission {
+        fun release()
+
+        data object Authenticated : ReceiverAdmission {
+            override fun release() {
+                authenticatedInFlight.decrementAndGet()
+            }
+        }
+
+        data object AuthoritativeCheck : ReceiverAdmission {
+            override fun release() {
+                authoritativeCheckInFlight.set(false)
+            }
+        }
+    }
 
     private companion object {
         const val TAG = "ProfileToggleReceiver"
         const val RECEIVER_TIMEOUT_MILLIS = 9_000L
-        const val MAX_IN_FLIGHT_REQUESTS = 4
-        val inFlight = AtomicInteger()
+        const val MAX_AUTHENTICATED_IN_FLIGHT_REQUESTS = 4
+        val authenticatedInFlight = AtomicInteger()
+        val authoritativeCheckInFlight = AtomicBoolean()
+    }
+}
+
+private fun AtomicInteger.tryAcquire(maximum: Int): Boolean {
+    while (true) {
+        val current = get()
+        if (current >= maximum) return false
+        if (compareAndSet(current, current + 1)) return true
     }
 }
 

@@ -4,9 +4,11 @@ Build-time dev tool only — it is never shipped and the app declares no INTERNE
 (CLAUDE.md sections 1/3). It trains a tiny bag-of-words softmax classifier and writes three
 bundled assets that the runtime loads locally:
 
-    ml/src/main/assets/notification_classifier.tflite   float32 [1, V] -> softmax [1, L]
-    ml/src/main/assets/vocab.txt                         one token per line (feature order)
-    ml/src/main/assets/labels.txt                        one label per line (output order)
+    ml/src/main/assets/classifier_generations/<id>/notification_classifier.tflite
+    ml/src/main/assets/classifier_generations/<id>/vocab.txt
+    ml/src/main/assets/classifier_generations/<id>/labels.txt
+
+The complete immutable generation is selected by ml/src/main/assets/classifier_current.txt.
 
 These assets are the single source of truth for vocab + labels, so the Kotlin runtime and this
 trainer can never drift. The feature contract is fixed by the existing, unit-tested
@@ -31,6 +33,8 @@ os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
+
+from asset_publisher import publish_asset_set
 
 # --- Configuration ---------------------------------------------------------------------------
 SEED = 1337
@@ -143,16 +147,33 @@ def main():
     export_model.set_weights(model.get_weights())
     tflite_model = convert_to_tflite(export_model, len(vocab))
 
-    os.makedirs(ASSETS_DIR, exist_ok=True)
-    model_path = os.path.join(ASSETS_DIR, "notification_classifier.tflite")
-    with open(model_path, "wb") as handle:
-        handle.write(tflite_model)
-    with open(os.path.join(ASSETS_DIR, "vocab.txt"), "w", encoding="utf-8") as handle:
-        handle.write("\n".join(vocab) + "\n")
-    with open(os.path.join(ASSETS_DIR, "labels.txt"), "w", encoding="utf-8") as handle:
-        handle.write("\n".join(LABELS) + "\n")
+    payloads = {
+        "notification_classifier.tflite": tflite_model,
+        "vocab.txt": ("\n".join(vocab) + "\n").encode("utf-8"),
+        "labels.txt": ("\n".join(LABELS) + "\n").encode("utf-8"),
+    }
+    publish_asset_set(
+        ASSETS_DIR,
+        payloads,
+        lambda staged: verify_staged_assets(staged, vocab, train_accuracy),
+    )
+    print("\nAssets written to ml/src/main/assets/.")
 
-    verify(tflite_model, vocab, index, train_accuracy)
+
+def verify_staged_assets(staged, expected_vocab, train_accuracy):
+    tflite_model = staged["notification_classifier.tflite"].read_bytes()
+    vocab = staged["vocab.txt"].read_text(encoding="utf-8").splitlines()
+    labels = staged["labels.txt"].read_text(encoding="utf-8").splitlines()
+    if vocab != expected_vocab:
+        raise SystemExit("staged vocabulary differs from the trained feature order")
+    if labels != LABELS:
+        raise SystemExit(f"unexpected staged labels {labels}, want {LABELS}")
+    verify(
+        tflite_model,
+        vocab,
+        {token: i for i, token in enumerate(vocab)},
+        train_accuracy,
+    )
 
 
 def verify(tflite_model, vocab, index, train_accuracy):
@@ -202,7 +223,7 @@ def verify(tflite_model, vocab, index, train_accuracy):
             failures.append(text)
     if failures:
         raise SystemExit(f"\n{len(failures)} fixture(s) failed — assets not bundled-ready")
-    print("\nAll fixtures passed. Assets written to ml/src/main/assets/.")
+    print("\nAll fixtures passed.")
 
 
 if __name__ == "__main__":

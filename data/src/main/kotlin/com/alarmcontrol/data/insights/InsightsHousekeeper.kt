@@ -11,9 +11,10 @@ import com.alarmcontrol.core.insights.InsightsReport
 import com.alarmcontrol.core.insights.InsightsSummary
 import com.alarmcontrol.core.insights.InsightsSummaryRepository
 import com.alarmcontrol.core.privacy.LocalDataRepository
+import com.alarmcontrol.core.privacy.LocalDataResetWriteFence
+import com.alarmcontrol.core.privacy.StaleLocalDataWriteException
 import com.alarmcontrol.core.result.DataResult
 import com.alarmcontrol.core.result.runCatchingPreservingCancellation
-import com.alarmcontrol.core.settings.RetentionDefaults
 import com.alarmcontrol.core.settings.SettingsRepository
 import com.alarmcontrol.data.security.MaintenancePolicyAccessGuard
 import kotlinx.coroutines.sync.Mutex
@@ -48,6 +49,7 @@ class InsightsHousekeeper
         private val rateOccurrenceRepository: RateOccurrenceRepository,
         private val maintenancePolicyAccessGuard: MaintenancePolicyAccessGuard =
             MaintenancePolicyAccessGuard(),
+        private val localDataResetWriteFence: LocalDataResetWriteFence = LocalDataResetWriteFence(),
     ) {
         private val runMutex = Mutex()
 
@@ -55,64 +57,69 @@ class InsightsHousekeeper
         suspend fun run(
             nowMillis: Long,
             zoneId: ZoneId = ZoneOffset.UTC,
-        ): DataResult<InsightsReport> =
-            runMutex.withLock {
-                runCatchingPreservingCancellation {
-                    val purged =
-                        maintenancePolicyAccessGuard.withLock {
-                            val settings = settingsRepository.maintenanceSnapshot()
-                            purgeExpiredRateHistory(nowMillis)
-                            val eventRetentionDays = settings.eventRetentionDays.toLong()
-                            val dailyRetentionDays = settings.dailyInsightRetentionDays.toLong()
-                            // Retry privacy cleanup after an earlier UI-triggered deletion failure.
-                            localDataRepository.reconcileStoredNotificationContentPolicy(settings)
-                            eventRepository.purgeEncryptedContentOlderThan(
-                                nowMillis - RetentionDefaults.ENCRYPTED_CONTENT_DAYS * DAY_MILLIS,
-                            )
-                            aggregateDailyHistory(
-                                nowMillis = nowMillis,
-                                zoneId = zoneId,
-                                eventRetentionDays = eventRetentionDays,
-                                dailyRetentionDays = dailyRetentionDays,
-                            )
+        ): DataResult<InsightsReport> {
+            val resetEpoch = localDataResetWriteFence.captureEpoch()
+            return runMutex.withLock {
+                maintenancePolicyAccessGuard.withLock {
+                    if (!localDataResetWriteFence.isCurrent(resetEpoch)) {
+                        return@withLock DataResult.Failure(StaleLocalDataWriteException())
+                    }
+                    runCatchingPreservingCancellation {
+                        val settings = settingsRepository.maintenanceSnapshot()
+                        purgeExpiredRateHistory(nowMillis)
+                        val eventRetentionDays = settings.eventRetentionDays.toLong()
+                        val dailyRetentionDays = settings.dailyInsightRetentionDays.toLong()
+                        // Retry privacy cleanup after an earlier UI-triggered deletion failure.
+                        localDataRepository.reconcileStoredNotificationContentPolicy(settings)
+                        eventRepository.purgeEncryptedContentOlderThan(
+                            nowMillis - settings.notificationContentRetentionDays.toLong() * DAY_MILLIS,
+                        )
+                        aggregateDailyHistory(
+                            nowMillis = nowMillis,
+                            zoneId = zoneId,
+                            eventRetentionDays = eventRetentionDays,
+                            dailyRetentionDays = dailyRetentionDays,
+                        )
+                        val purged =
                             eventRepository.purgeEventsOlderThan(
                                 nowMillis - eventRetentionDays * DAY_MILLIS,
                                 zoneId,
                             )
-                        }
 
-                    val windowMillis = WINDOW_DAYS * DAY_MILLIS
-                    val recent = eventRepository.mutedCountsByPackageBetween(nowMillis - windowMillis, nowMillis)
-                    val baseline =
-                        eventRepository.mutedCountsByPackageBetween(
-                            nowMillis - 2 * windowMillis,
-                            nowMillis - windowMillis,
-                        )
+                        val windowMillis = WINDOW_DAYS * DAY_MILLIS
+                        val recent = eventRepository.mutedCountsByPackageBetween(nowMillis - windowMillis, nowMillis)
+                        val baseline =
+                            eventRepository.mutedCountsByPackageBetween(
+                                nowMillis - 2 * windowMillis,
+                                nowMillis - windowMillis,
+                            )
 
-                    val report =
-                        InsightsAnalyzer
-                            .analyze(
-                                recentCounts = recent,
-                                baselineCounts = baseline,
-                                windowDays = WINDOW_DAYS.toInt(),
-                                topN = TOP_N,
-                                anomalyMinEvents = ANOMALY_MIN_EVENTS,
-                                anomalySpikeFactor = ANOMALY_SPIKE_FACTOR,
-                            ).copy(purgedEvents = purged)
+                        val report =
+                            InsightsAnalyzer
+                                .analyze(
+                                    recentCounts = recent,
+                                    baselineCounts = baseline,
+                                    windowDays = WINDOW_DAYS.toInt(),
+                                    topN = TOP_N,
+                                    anomalyMinEvents = ANOMALY_MIN_EVENTS,
+                                    anomalySpikeFactor = ANOMALY_SPIKE_FACTOR,
+                                ).copy(purgedEvents = purged)
 
-                    summaryRepository.save(report.toSummary(nowMillis))
+                        summaryRepository.save(report.toSummary(nowMillis))
 
-                    // Size guard after every aggregation. Every affected day is marked incomplete
-                    // in the same database transaction as deletion.
-                    eventRepository.trimToMostRecent(MAX_RETAINED_NOTIFICATION_EVENTS, zoneId)
-                    eventRepository.trimDecisionTracesToMostRecent(MAX_RETAINED_NOTIFICATION_TRACE_EVENTS)
+                        // Size guard after every aggregation. Every affected day is marked incomplete
+                        // in the same database transaction as deletion.
+                        eventRepository.trimToMostRecent(MAX_RETAINED_NOTIFICATION_EVENTS, zoneId)
+                        eventRepository.trimDecisionTracesToMostRecent(MAX_RETAINED_NOTIFICATION_TRACE_EVENTS)
 
-                    report
-                }.fold(
-                    onSuccess = { DataResult.Success(it) },
-                    onFailure = { DataResult.Failure(it) },
-                )
+                        report
+                    }.fold(
+                        onSuccess = { DataResult.Success(it) },
+                        onFailure = { DataResult.Failure(it) },
+                    )
+                }
             }
+        }
 
         private suspend fun purgeExpiredRateHistory(nowMillis: Long) {
             when (rateOccurrenceRepository.purgeExpiredHistory(nowMillis)) {

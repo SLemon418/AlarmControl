@@ -20,6 +20,7 @@ class NotificationRateTracker {
     private val channelOccurrences = mutableMapOf<ChannelKey, MutableList<TimedOccurrence>>()
     private var initialized = false
     private var coverageStartMillis = Long.MAX_VALUE
+    private var newestPostedAtMillis = Long.MIN_VALUE
 
     /**
      * Replaces current state with a bounded occurrence snapshot ending at [nowMillis].
@@ -34,6 +35,9 @@ class NotificationRateTracker {
         coverageStartMillis: Long = subtractSaturated(nowMillis, MAX_RATE_WINDOW_MILLIS),
     ): Boolean {
         clear()
+        if (occurrences.any { occurrence -> occurrence.postedAtMillis > nowMillis }) {
+            return false
+        }
         val cutoff =
             maxOf(
                 coverageStartMillis,
@@ -82,6 +86,10 @@ class NotificationRateTracker {
         packageOccurrences.prune(coverageStartMillis)
         channelOccurrences.prune(coverageStartMillis)
         occurrencesById.entries.removeAll { it.value.postedAtMillis < coverageStartMillis }
+        newestPostedAtMillis =
+            occurrencesById.values
+                .maxOfOrNull(PersistedRateOccurrence::postedAtMillis)
+                ?: Long.MIN_VALUE
         return RateTrackerRecordResult.CHANGED
     }
 
@@ -128,13 +136,25 @@ class NotificationRateTracker {
         return RateTrackerRecordResult.CHANGED
     }
 
-    /** Returns only counts backed by a complete retained window at the snapshot's post time. */
+    /**
+     * Returns only counts backed by a complete retained window at the snapshot's post time.
+     * [observationNowMillis] additionally fails open after a wall-clock rollback leaves retained
+     * occurrences in the future; late callbacks remain valid because their caller supplies current
+     * wall time rather than the callback's older post time.
+     */
     @Synchronized
     fun counts(
         snapshot: NotificationSnapshot,
         requestedSignals: Set<RateSignal>,
+        observationNowMillis: Long? = null,
     ): Map<RateSignal, Int> {
         if (!initialized) return emptyMap()
+        if (
+            observationNowMillis != null &&
+            newestPostedAtMillis > observationNowMillis
+        ) {
+            return emptyMap()
+        }
         return buildMap {
             requestedSignals.forEach { signal ->
                 val cutoff = subtractSaturated(snapshot.postedAtMillis, signal.windowMillis)
@@ -159,6 +179,7 @@ class NotificationRateTracker {
     }
 
     private fun append(occurrence: PersistedRateOccurrence) {
+        newestPostedAtMillis = maxOf(newestPostedAtMillis, occurrence.postedAtMillis)
         val timed = occurrence.toTimedOccurrence()
         packageOccurrences
             .getOrPut(occurrence.packageName, ::mutableListOf)
@@ -190,6 +211,7 @@ class NotificationRateTracker {
         channelOccurrences.clear()
         initialized = false
         coverageStartMillis = Long.MAX_VALUE
+        newestPostedAtMillis = Long.MIN_VALUE
     }
 
     private fun <K> MutableMap<K, MutableList<TimedOccurrence>>.prune(cutoffMillis: Long) {

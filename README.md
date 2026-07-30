@@ -84,9 +84,10 @@ The detailed condition and priority behavior is documented in the
 - Runtime modules contain no network client, analytics uploader, crash uploader, or remote model
   fetcher.
 - Ordinary activity records contain metadata, not notification title or body text.
-- Optional notification detail storage is off by default. When enabled, eligible future title/body
-  content is length-bounded, encrypted with an Android Keystore AES-256-GCM key, and removed after
-  seven days. Secret notifications and excluded apps are never stored.
+- Eligible notification detail storage is on by default with seven-day retention. Users can choose
+  1, 3, 7, 14, or 30 days, or turn storage off. Future title/body content is length-bounded and
+  encrypted with an Android Keystore AES-256-GCM key. Secret notifications and excluded apps are
+  never stored.
 - Notification content, LLM reasoning, automation tokens, passwords, and encryption keys are never
   included in portable backups.
 - Android OS cloud backup is disabled. User-directed backup and model pickers request local

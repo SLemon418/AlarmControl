@@ -56,7 +56,8 @@ sealed interface Condition {
         val channelId: String,
     ) : Condition {
         override fun evaluate(snapshot: NotificationSnapshot): ConditionResult =
-            ConditionResult.from(snapshot.channelId == channelId)
+            snapshot.channelId?.let { ConditionResult.from(it == channelId) }
+                ?: ConditionResult.UNKNOWN
     }
 
     /** Matches the ongoing/non-clearable flag. */

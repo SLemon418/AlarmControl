@@ -8,14 +8,22 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
+import com.alarmcontrol.core.filtering.NotificationContent
+import com.alarmcontrol.core.filtering.NotificationContentState
+import com.alarmcontrol.core.filtering.NotificationEvent
+import com.alarmcontrol.core.filtering.RuleAction
+import com.alarmcontrol.core.settings.ExternalAutomationAuthorizationFence
 import com.alarmcontrol.core.settings.FilteringActionGate
+import com.alarmcontrol.core.settings.SettingsMutationFence
 import com.alarmcontrol.core.settings.SettingsSnapshot
+import com.alarmcontrol.data.db.TransactionRunner
 import com.alarmcontrol.data.db.entity.EncryptedNotificationContentEntity
 import com.alarmcontrol.data.security.NotificationContentAccessGuard
 import com.alarmcontrol.data.security.StoredNotificationContentCleaner
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
@@ -30,9 +38,14 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
 import java.io.IOException
+import java.time.Clock
+import java.time.Instant
+import java.time.ZoneOffset
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
+@Suppress("LargeClass") // One repository fixture covers DataStore, policy locks, and privacy cleanup ordering.
+@OptIn(ExperimentalCoroutinesApi::class)
 class SettingsRepositoryImplTest {
     @get:Rule
     val tempFolder = TemporaryFolder()
@@ -47,15 +60,23 @@ class SettingsRepositoryImplTest {
             StoredNotificationContentCleaner(
                 ImmediateTransactionRunner(),
                 FakeNotificationEventDao(),
+                FakePendingNotificationActionDao(),
                 FakeNotificationContentCipher(),
             ),
         filteringActionGate: FilteringActionGate = FilteringActionGate(),
+        externalAutomationAuthorizationFence: ExternalAutomationAuthorizationFence =
+            ExternalAutomationAuthorizationFence(),
+        settingsMutationFence: SettingsMutationFence = SettingsMutationFence(),
+        clock: Clock = Clock.systemDefaultZone(),
     ): SettingsRepositoryImpl =
         SettingsRepositoryImpl(
             dataStore = dataStore,
             contentAccessGuard = contentAccessGuard,
             storedNotificationContentCleaner = storedNotificationContentCleaner,
+            clock = clock,
             filteringActionGate = filteringActionGate,
+            externalAutomationAuthorizationFence = externalAutomationAuthorizationFence,
+            settingsMutationFence = settingsMutationFence,
         )
 
     @Test
@@ -73,6 +94,44 @@ class SettingsRepositoryImplTest {
         }
 
     @Test
+    fun `all representative settings writes wait for the shared mutation fence`() =
+        runTest {
+            val mutationFence = SettingsMutationFence()
+            val repository = repository(settingsMutationFence = mutationFence)
+            val fenceHeld = CompletableDeferred<Unit>()
+            val releaseFence = CompletableDeferred<Unit>()
+            val holder =
+                async {
+                    mutationFence.withLock {
+                        fenceHeld.complete(Unit)
+                        releaseFence.await()
+                    }
+                }
+            fenceHeld.await()
+
+            val filtering = async { repository.setFilteringEnabled(false) }
+            val semantic = async { repository.setSemanticClassifierEnabled(false) }
+            val retention = async { repository.setEventRetentionDays(14) }
+            val automation = async { repository.setExternalAutomationEnabled(true) }
+            runCurrent()
+
+            assertFalse(filtering.isCompleted)
+            assertFalse(semantic.isCompleted)
+            assertFalse(retention.isCompleted)
+            assertFalse(automation.isCompleted)
+            releaseFence.complete(Unit)
+            filtering.await()
+            semantic.await()
+            retention.await()
+            automation.await()
+            holder.await()
+            assertFalse(repository.filteringEnabled.first())
+            assertFalse(repository.semanticClassifierEnabled.first())
+            assertEquals(14, repository.eventRetentionDays.first())
+            assertTrue(repository.externalAutomationEnabled.first())
+        }
+
+    @Test
     fun `enabling automation creates a per-install token and rotation invalidates it`() =
         runTest {
             val repository = repository()
@@ -85,6 +144,82 @@ class SettingsRepositoryImplTest {
             assertTrue(rotated.length >= 40)
             assertTrue(first != rotated)
             assertEquals(rotated, repository.externalAutomationToken.first())
+        }
+
+    @Test
+    fun `automation credential mutations wait for an authoritative external operation`() =
+        runTest {
+            val authorizationFence = ExternalAutomationAuthorizationFence()
+            val repository =
+                repository(
+                    externalAutomationAuthorizationFence = authorizationFence,
+                )
+            repository.setExternalAutomationEnabled(true)
+            val authorizationHeld = CompletableDeferred<Unit>()
+            val releaseAuthorization = CompletableDeferred<Unit>()
+            val holder =
+                async {
+                    authorizationFence.withLock {
+                        authorizationHeld.complete(Unit)
+                        releaseAuthorization.await()
+                    }
+                }
+            authorizationHeld.await()
+
+            val rotation = async { repository.rotateExternalAutomationToken() }
+            val disabling = async { repository.setExternalAutomationEnabled(false) }
+            runCurrent()
+
+            assertFalse(rotation.isCompleted)
+            assertFalse(disabling.isCompleted)
+            releaseAuthorization.complete(Unit)
+            val rotated = rotation.await()
+            disabling.await()
+            holder.await()
+            assertEquals(rotated, repository.externalAutomationToken.first())
+            assertFalse(repository.externalAutomationEnabled.first())
+        }
+
+    @Test
+    fun `restore and reset keep maintenance authorization lock order without deadlock`() =
+        runTest {
+            val authorizationFence = ExternalAutomationAuthorizationFence()
+            val repository =
+                repository(
+                    externalAutomationAuthorizationFence = authorizationFence,
+                )
+            val authorizationHeld = CompletableDeferred<Unit>()
+            val releaseAuthorization = CompletableDeferred<Unit>()
+            val holder =
+                async {
+                    authorizationFence.withLock {
+                        authorizationHeld.complete(Unit)
+                        releaseAuthorization.await()
+                    }
+                }
+            authorizationHeld.await()
+
+            val restoring =
+                async {
+                    repository.restore(
+                        SettingsSnapshot(
+                            filteringEnabled = true,
+                            externalAutomationEnabled = true,
+                        ),
+                    )
+                }
+            runCurrent()
+            val resetting = async { repository.reset() }
+            runCurrent()
+
+            assertFalse(restoring.isCompleted)
+            assertFalse(resetting.isCompleted)
+            releaseAuthorization.complete(Unit)
+            restoring.await()
+            resetting.await()
+            holder.await()
+            assertFalse(repository.filteringEnabled.first())
+            assertFalse(repository.externalAutomationEnabled.first())
         }
 
     @Test
@@ -190,14 +325,16 @@ class SettingsRepositoryImplTest {
         }
 
     @Test
-    fun `notification content history is opt in device local and resettable`() =
+    fun `notification content history defaults on after safe initialization and reset keeps it off`() =
         runTest {
             val repository = repository()
 
             assertFalse(repository.notificationContentStorageEnabled.first())
+            repository.initializeNotificationContentStorageDefault()
+
+            assertTrue(repository.notificationContentStorageEnabled.first())
             assertEquals(emptySet<String>(), repository.contentExcludedPackages.first())
 
-            repository.setNotificationContentStorageEnabled(true)
             repository.setContentExcludedPackages(setOf("com.bank", "com.password"))
             repository.setContentPackageExcluded("com.bank", excluded = false)
             repository.setContentPackageExcluded("com.private", excluded = true)
@@ -216,6 +353,147 @@ class SettingsRepositoryImplTest {
         }
 
     @Test
+    fun `default-on initialization scrubs uninitialized legacy ciphertext before enabling`() =
+        runTest {
+            val events = FakeNotificationEventDao()
+            val cipher = FakeNotificationContentCipher()
+            events.storeEncryptedContent(cipher)
+            val repository =
+                repository(
+                    storedNotificationContentCleaner =
+                        StoredNotificationContentCleaner(
+                            ImmediateTransactionRunner(),
+                            events,
+                            FakePendingNotificationActionDao(),
+                            cipher,
+                        ),
+                )
+
+            repository.initializeNotificationContentStorageDefault()
+
+            assertTrue(repository.notificationContentStorageEnabled.first())
+            assertEquals(0, events.countEncryptedContents())
+            assertTrue(cipher.keyDeleted)
+        }
+
+    @Test
+    fun `failed default-on cleanup remains disabled and can be retried safely`() =
+        runTest {
+            val events = FakeNotificationEventDao()
+            val cipher = FakeNotificationContentCipher()
+            val cleanupRunner = ToggleFailureTransactionRunner()
+            events.storeEncryptedContent(cipher)
+            val repository =
+                repository(
+                    storedNotificationContentCleaner =
+                        StoredNotificationContentCleaner(
+                            cleanupRunner,
+                            events,
+                            FakePendingNotificationActionDao(),
+                            cipher,
+                        ),
+                )
+            cleanupRunner.failure = IOException("cleanup failed")
+
+            assertTrue(
+                runCatching {
+                    repository.initializeNotificationContentStorageDefault()
+                }.exceptionOrNull() is IOException,
+            )
+            assertFalse(repository.notificationContentStorageEnabled.first())
+            assertEquals(1, events.countEncryptedContents())
+
+            cleanupRunner.failure = null
+            repository.initializeNotificationContentStorageDefault()
+
+            assertTrue(repository.notificationContentStorageEnabled.first())
+            assertEquals(0, events.countEncryptedContents())
+        }
+
+    @Test
+    fun `content retention is bounded portable and prevents expired detail resurrection`() =
+        runTest {
+            val nowMillis = 20L * 24 * 60 * 60 * 1_000
+            val clock = Clock.fixed(Instant.ofEpochMilli(nowMillis), ZoneOffset.UTC)
+            val events = FakeNotificationEventDao()
+            val pending = FakePendingNotificationActionDao()
+            val cipher = FakeNotificationContentCipher()
+            val contentGuard = NotificationContentAccessGuard()
+            val settings =
+                repository(
+                    contentAccessGuard = contentGuard,
+                    storedNotificationContentCleaner =
+                        StoredNotificationContentCleaner(
+                            ImmediateTransactionRunner(),
+                            events,
+                            pending,
+                            cipher,
+                        ),
+                    clock = clock,
+                )
+            settings.initializeNotificationContentStorageDefault()
+            settings.setNotificationContentRetentionDays(30)
+            val history =
+                NotificationEventRepositoryImpl(
+                    events,
+                    pending,
+                    cipher,
+                    clock,
+                    settings,
+                    contentGuard,
+                    FakeDailyInsightDao(),
+                    ImmediateTransactionRunner(),
+                    ioDispatcher = Dispatchers.Unconfined,
+                )
+            val outbox =
+                NotificationActionOutboxImpl(
+                    pending,
+                    events,
+                    cipher,
+                    settings,
+                    contentGuard,
+                    ImmediateTransactionRunner(),
+                    clock,
+                    Dispatchers.Unconfined,
+                )
+            val staged =
+                outbox.stage(
+                    NotificationEvent(
+                        packageName = "com.example",
+                        category = "alarm",
+                        postedAtMillis = nowMillis - 10L * 24 * 60 * 60 * 1_000,
+                        action = RuleAction.Keep,
+                        matchedRuleId = null,
+                        recordedAtMillis = nowMillis - 10L * 24 * 60 * 60 * 1_000,
+                    ),
+                    NotificationContent("old title", "old body"),
+                )
+            assertTrue(outbox.arm(staged))
+            val eventId = requireNotNull(outbox.promote(staged))
+            assertTrue(history.getDetail(eventId)?.content is NotificationContentState.Available)
+
+            settings.setNotificationContentRetentionDays(7)
+            assertEquals(NotificationContentState.Expired, history.getDetail(eventId)?.content)
+
+            settings.setNotificationContentRetentionDays(30)
+
+            assertEquals(30, settings.notificationContentRetentionDays.first())
+            assertEquals(30, settings.snapshot().notificationContentRetentionDays)
+            assertEquals(0, events.countEncryptedContents())
+            assertEquals(NotificationContentState.Expired, history.getDetail(eventId)?.content)
+            assertTrue(
+                runCatching {
+                    settings.setNotificationContentRetentionDays(0)
+                }.exceptionOrNull() is IllegalArgumentException,
+            )
+            assertTrue(
+                runCatching {
+                    settings.setNotificationContentRetentionDays(31)
+                }.exceptionOrNull() is IllegalArgumentException,
+            )
+        }
+
+    @Test
     fun `disabling content storage commits false only after ciphertext and key deletion succeed`() =
         runTest {
             val dataStore =
@@ -231,6 +509,7 @@ class SettingsRepositoryImplTest {
                         StoredNotificationContentCleaner(
                             ImmediateTransactionRunner(),
                             events,
+                            FakePendingNotificationActionDao(),
                             cipher,
                         ),
                 )
@@ -260,6 +539,7 @@ class SettingsRepositoryImplTest {
                         StoredNotificationContentCleaner(
                             ImmediateTransactionRunner(),
                             events,
+                            FakePendingNotificationActionDao(),
                             cipher,
                         ),
                 )
@@ -275,6 +555,147 @@ class SettingsRepositoryImplTest {
             assertTrue(failure is IllegalStateException)
             assertTrue(repository.notificationContentStorageEnabled.first())
             assertFalse(cipher.keyDeleted)
+        }
+
+    @Test
+    fun `reset commits safe settings even when content key deletion fails`() =
+        runTest {
+            val dataStore =
+                PreferenceDataStoreFactory.create {
+                    File(tempFolder.root, "reset-key-failure.preferences_pb")
+                }
+            val events = FakeNotificationEventDao()
+            val cipher = FakeNotificationContentCipher()
+            val repository =
+                repository(
+                    dataStore = dataStore,
+                    storedNotificationContentCleaner =
+                        StoredNotificationContentCleaner(
+                            ImmediateTransactionRunner(),
+                            events,
+                            FakePendingNotificationActionDao(),
+                            cipher,
+                        ),
+                )
+            repository.setExternalAutomationEnabled(true)
+            repository.setNotificationContentStorageEnabled(true)
+            events.storeEncryptedContent(cipher)
+            cipher.failKeyDeletion = true
+
+            val failure = runCatching { repository.reset() }.exceptionOrNull()
+
+            assertTrue(failure is IllegalStateException)
+            assertFalse(repository.filteringEnabled.first())
+            assertFalse(repository.externalAutomationEnabled.first())
+            assertFalse(repository.notificationContentStorageEnabled.first())
+            assertEquals(0, events.countEncryptedContents())
+            assertFalse(cipher.keyDeleted)
+        }
+
+    @Test
+    fun `enabling after a failed reset scrubs ciphertext before restoring opt in`() =
+        runTest {
+            val dataStore =
+                PreferenceDataStoreFactory.create {
+                    File(tempFolder.root, "reset-content-cleanup-failure.preferences_pb")
+                }
+            val events = FakeNotificationEventDao()
+            val cipher = FakeNotificationContentCipher()
+            val cleanupRunner = ToggleFailureTransactionRunner()
+            val repository =
+                repository(
+                    dataStore = dataStore,
+                    storedNotificationContentCleaner =
+                        StoredNotificationContentCleaner(
+                            cleanupRunner,
+                            events,
+                            FakePendingNotificationActionDao(),
+                            cipher,
+                        ),
+                )
+            repository.setNotificationContentStorageEnabled(true)
+            events.storeEncryptedContent(cipher)
+            cleanupRunner.failure = IOException("cleanup failed")
+
+            val resetFailure = runCatching { repository.reset() }.exceptionOrNull()
+
+            assertTrue(resetFailure is IOException)
+            assertFalse(repository.notificationContentStorageEnabled.first())
+            assertEquals(1, events.countEncryptedContents())
+
+            cleanupRunner.failure = null
+            repository.setNotificationContentStorageEnabled(true)
+
+            assertTrue(repository.notificationContentStorageEnabled.first())
+            assertEquals(0, events.countEncryptedContents())
+        }
+
+    @Test
+    fun `failed exclusion cleanup cannot reveal old detail after package is allowed again`() =
+        runTest {
+            val dataStore =
+                PreferenceDataStoreFactory.create {
+                    File(tempFolder.root, "content-exclusion-failure.preferences_pb")
+                }
+            val events = FakeNotificationEventDao()
+            val cipher = FakeNotificationContentCipher()
+            val contentAccessGuard = NotificationContentAccessGuard()
+            val cleanupRunner = ToggleFailureTransactionRunner()
+            val settings =
+                repository(
+                    dataStore = dataStore,
+                    contentAccessGuard = contentAccessGuard,
+                    storedNotificationContentCleaner =
+                        StoredNotificationContentCleaner(
+                            cleanupRunner,
+                            events,
+                            FakePendingNotificationActionDao(),
+                            cipher,
+                        ),
+                )
+            val history =
+                NotificationEventRepositoryImpl(
+                    events,
+                    FakePendingNotificationActionDao(),
+                    cipher,
+                    Clock.fixed(Instant.ofEpochMilli(100), ZoneOffset.UTC),
+                    settings,
+                    contentAccessGuard,
+                    FakeDailyInsightDao(),
+                    ImmediateTransactionRunner(),
+                    ioDispatcher = Dispatchers.Unconfined,
+                )
+            settings.setNotificationContentStorageEnabled(true)
+            val eventId =
+                history.record(
+                    NotificationEvent(
+                        packageName = "com.private",
+                        category = null,
+                        postedAtMillis = 100,
+                        action = RuleAction.Keep,
+                        matchedRuleId = null,
+                        recordedAtMillis = 100,
+                    ),
+                    NotificationContent("Bank alert", "Withdrawal completed"),
+                )
+            cleanupRunner.failure = IOException("cleanup failed")
+
+            val failure =
+                runCatching {
+                    settings.setContentPackageExcluded("com.private", excluded = true)
+                }.exceptionOrNull()
+
+            assertTrue(failure is IOException)
+            assertTrue("com.private" in settings.contentExcludedPackages.first())
+            assertEquals(NotificationContentState.NotStored, history.getDetail(eventId)?.content)
+            assertEquals(1, events.countEncryptedContents())
+
+            cleanupRunner.failure = null
+            settings.setContentPackageExcluded("com.private", excluded = false)
+
+            assertTrue("com.private" !in settings.contentExcludedPackages.first())
+            assertEquals(0, events.countEncryptedContents())
+            assertEquals(NotificationContentState.Expired, history.getDetail(eventId)?.content)
         }
 
     @Test
@@ -760,6 +1181,15 @@ private class CancellingDataStore(
         updateCommitted.complete(Unit)
         if (boundary == UpdateCancellationBoundary.AFTER_COMMIT) cancellationPoint.await()
         return updated
+    }
+}
+
+private class ToggleFailureTransactionRunner : TransactionRunner {
+    var failure: Throwable? = null
+
+    override suspend fun <T> run(block: suspend () -> T): T {
+        failure?.let { throw it }
+        return block()
     }
 }
 

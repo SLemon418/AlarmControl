@@ -81,7 +81,12 @@ interface RuleDao {
                 insertRule(rule)
             } else {
                 val existing = requireNotNull(findRuleById(rule.id)) { "Rule ${rule.id} does not exist" }
-                updateRule(rule.copy(createdAtMillis = existing.createdAtMillis))
+                updateRule(
+                    rule.copy(
+                        enabled = existing.enabled,
+                        createdAtMillis = existing.createdAtMillis,
+                    ),
+                )
                 deleteConditionsForRule(rule.id)
                 rule.id
             }

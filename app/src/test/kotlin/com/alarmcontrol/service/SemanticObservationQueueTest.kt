@@ -6,6 +6,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -14,6 +15,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -66,7 +68,7 @@ class SemanticObservationQueueTest {
         }
 
     @Test
-    fun `blocked enrichment cannot drop any active notification decision during a burst`() =
+    fun `blocked enrichment preserves every middle decision during a burst`() =
         runTest {
             val enrichmentStarted = CompletableDeferred<Unit>()
             val releaseEnrichment = CompletableDeferred<Unit>()
@@ -98,10 +100,10 @@ class SemanticObservationQueueTest {
                     )
                 }
 
-            dispatcher.submit(decisions[0])
+            dispatcher.submit(requireNotNull(dispatcher.tryReserve()), decisions[0])
             enrichmentStarted.await()
-            dispatcher.submit(decisions[1])
-            dispatcher.submit(decisions[2])
+            dispatcher.submit(requireNotNull(dispatcher.tryReserve()), decisions[1])
+            dispatcher.submit(requireNotNull(dispatcher.tryReserve()), decisions[2])
             runCurrent()
 
             assertEquals(decisions, persisted)
@@ -111,11 +113,11 @@ class SemanticObservationQueueTest {
             dispatcher.close()
             advanceUntilIdle()
 
-            assertEquals(listOf(decisions[0], decisions[2]), enriched)
+            assertEquals(decisions, enriched)
         }
 
     @Test
-    fun `service cancellation cannot cancel handed-off persistence or replay enrichment`() =
+    fun `service cancellation cannot cancel handed-off persistence or enrichment`() =
         runTest {
             val testDispatcher = StandardTestDispatcher(testScheduler)
             val serviceJob = SupervisorJob()
@@ -129,7 +131,7 @@ class SemanticObservationQueueTest {
             val dispatcher =
                 PostCommitWorkDispatcher<Int, Int>(
                     persistenceScope = applicationScope,
-                    enrichmentScope = serviceScope,
+                    enrichmentScope = applicationScope,
                     persist = { request ->
                         persistenceStarted.complete(Unit)
                         releasePersistence.await()
@@ -141,13 +143,12 @@ class SemanticObservationQueueTest {
 
             val submission =
                 serviceScope.launch {
-                    dispatcher.submit(1)
+                    dispatcher.submit(requireNotNull(dispatcher.tryReserve()), 1)
                 }
             runCurrent()
             persistenceStarted.await()
 
             serviceJob.cancel()
-            dispatcher.clearPending()
             dispatcher.close()
             runCurrent()
 
@@ -156,9 +157,55 @@ class SemanticObservationQueueTest {
             advanceUntilIdle()
 
             assertEquals(listOf(1), persisted)
-            assertTrue(enriched.isEmpty())
+            assertEquals(listOf(1), enriched)
 
             applicationScope.cancel()
+        }
+
+    @Test
+    fun `process loss leaves the already persisted unknown monitor decision intact`() =
+        runTest {
+            val testDispatcher = StandardTestDispatcher(testScheduler)
+            val applicationJob = SupervisorJob()
+            val applicationScope = CoroutineScope(applicationJob + testDispatcher)
+            val enrichmentStarted = CompletableDeferred<Unit>()
+            val persisted = mutableListOf<NotificationEvent>()
+            val enriched = mutableListOf<NotificationEvent>()
+            val baseDecision =
+                NotificationEvent(
+                    packageName = "com.example",
+                    category = null,
+                    postedAtMillis = 1,
+                    action = RuleAction.Cancel,
+                    matchedRuleId = "1",
+                    monitoredRuleId = null,
+                    monitoredAction = null,
+                    recordedAtMillis = 1,
+                )
+            val dispatcher =
+                PostCommitWorkDispatcher<NotificationEvent, NotificationEvent>(
+                    persistenceScope = applicationScope,
+                    enrichmentScope = applicationScope,
+                    persist = { decision ->
+                        persisted += decision
+                        decision
+                    },
+                    enrich = { decision ->
+                        enrichmentStarted.complete(Unit)
+                        awaitCancellation()
+                        enriched += decision
+                    },
+                )
+
+            dispatcher.submit(requireNotNull(dispatcher.tryReserve()), baseDecision)
+            enrichmentStarted.await()
+            applicationScope.cancel()
+            advanceUntilIdle()
+
+            assertEquals(listOf(baseDecision), persisted)
+            assertTrue(enriched.isEmpty())
+            assertNull(persisted.single().monitoredRuleId)
+            assertNull(persisted.single().monitoredAction)
         }
 
     @Test
@@ -180,7 +227,7 @@ class SemanticObservationQueueTest {
             val submissions =
                 (1..5).map { request ->
                     launch {
-                        dispatcher.submit(request)
+                        dispatcher.submit(requireNotNull(dispatcher.tryReserve()), request)
                     }
                 }
 
@@ -199,6 +246,44 @@ class SemanticObservationQueueTest {
         }
 
     @Test
+    fun `retained enrichment requests never exceed the configured total bound`() =
+        runTest {
+            val releaseEnrichment = CompletableDeferred<Unit>()
+            val persisted = mutableListOf<Int>()
+            val dispatcher =
+                PostCommitWorkDispatcher<Int, Int>(
+                    persistenceScope = this,
+                    enrichmentScope = this,
+                    persist = { request ->
+                        persisted += request
+                        request
+                    },
+                    enrich = { releaseEnrichment.await() },
+                    maxConcurrentPersistence = 2,
+                    maxRetainedEnrichment = 6,
+                )
+            val reservations = List(6) { requireNotNull(dispatcher.tryReserve()) }
+            assertNull(dispatcher.tryReserve())
+            val submissions =
+                (1..6).map { request ->
+                    launch {
+                        dispatcher.submit(reservations[request - 1], request)
+                    }
+                }
+
+            runCurrent()
+
+            assertEquals(listOf(1, 2, 3, 4, 5, 6), persisted)
+
+            releaseEnrichment.complete(Unit)
+            advanceUntilIdle()
+
+            assertEquals((1..6).toList(), persisted)
+            assertTrue(submissions.all { it.isCompleted })
+            dispatcher.close()
+        }
+
+    @Test
     fun `persistence failure is reported and propagated to a live caller`() =
         runTest {
             val failure = IllegalStateException("local database unavailable")
@@ -212,12 +297,77 @@ class SemanticObservationQueueTest {
                     enrich = {},
                 )
 
-            val result = runCatching { dispatcher.submit(1) }
+            val result =
+                runCatching {
+                    dispatcher.submit(requireNotNull(dispatcher.tryReserve()), 1)
+                }
 
             val propagated = result.exceptionOrNull()
             assertTrue(propagated is IllegalStateException)
             assertEquals(failure.message, propagated?.message)
             assertTrue(failures.single() === failure)
+            dispatcher.close()
+        }
+
+    @Test
+    fun `reserved action handoff survives dispatcher close before submit`() =
+        runTest {
+            val persisted = mutableListOf<Int>()
+            val enriched = mutableListOf<Int>()
+            val dispatcher =
+                PostCommitWorkDispatcher<Int, Int>(
+                    persistenceScope = this,
+                    enrichmentScope = this,
+                    persist = { request ->
+                        persisted += request
+                        request
+                    },
+                    enrich = enriched::add,
+                )
+            val reservation = requireNotNull(dispatcher.tryReserve())
+            var platformActions = 0
+
+            platformActions += 1
+            dispatcher.close()
+            dispatcher.submit(reservation, 1)
+            advanceUntilIdle()
+
+            assertEquals(1, platformActions)
+            assertEquals(listOf(1), persisted)
+            assertEquals(listOf(1), enriched)
+            assertNull(dispatcher.tryReserve())
+        }
+
+    @Test
+    fun `fatal enrichment failure releases its slot and worker continues`() =
+        runTest {
+            val failures = mutableListOf<Throwable>()
+            val enriched = mutableListOf<Int>()
+            val dispatcher =
+                PostCommitWorkDispatcher<Int, Int>(
+                    persistenceScope = this,
+                    enrichmentScope = this,
+                    persist = { it },
+                    onEnrichmentFailure = failures::add,
+                    enrich = { request ->
+                        if (request == 1) throw LinkageError("broken local model")
+                        enriched += request
+                    },
+                    maxRetainedEnrichment = 2,
+                )
+            val first = requireNotNull(dispatcher.tryReserve())
+            val second = requireNotNull(dispatcher.tryReserve())
+
+            dispatcher.submit(first, 1)
+            dispatcher.submit(second, 2)
+            advanceUntilIdle()
+
+            assertTrue(failures.single() is LinkageError)
+            assertEquals(listOf(2), enriched)
+            val replacementOne = requireNotNull(dispatcher.tryReserve())
+            val replacementTwo = requireNotNull(dispatcher.tryReserve())
+            dispatcher.release(replacementOne)
+            dispatcher.release(replacementTwo)
             dispatcher.close()
         }
 }

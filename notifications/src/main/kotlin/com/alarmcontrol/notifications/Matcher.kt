@@ -7,6 +7,7 @@ import com.alarmcontrol.core.filtering.DecisionTraceLane
 import com.alarmcontrol.core.filtering.DecisionTraceNode
 import com.alarmcontrol.core.filtering.MAX_PERSISTED_TRACE_NODES
 import com.alarmcontrol.core.filtering.NotificationSnapshot
+import com.alarmcontrol.core.filtering.RateSignal
 import com.alarmcontrol.core.filtering.Rule
 import com.alarmcontrol.core.filtering.RuleAction
 import com.alarmcontrol.core.filtering.RuleExecutionMode
@@ -203,13 +204,13 @@ class Matcher {
             val trace = rule.condition.trace(snapshot)
             traces += RuleTrace(rule, trace.result, trace)
             val matched = trace.result == ConditionResult.MATCH
-            val unresolvedRate =
+            val unresolvedFailOpenSignal =
                 trace.result == ConditionResult.UNKNOWN &&
-                    rule.condition.hasMissingRateSignal(snapshot)
+                    rule.condition.hasMissingFailOpenSignal(snapshot)
             if (matched) {
                 decision = MatchDecision.Matched(rule, rule.action)
             }
-            if (matched || unresolvedRate) break
+            if (matched || unresolvedFailOpenSignal) break
         }
         return MatchExplanation(decision, traces)
     }
@@ -266,7 +267,7 @@ class Matcher {
             }
             if (
                 tree.result == ConditionResult.UNKNOWN &&
-                rule.condition.hasMissingRateSignal(snapshot)
+                rule.condition.hasMissingFailOpenSignal(snapshot)
             ) {
                 return EvaluatedRuleDecision(MatchDecision.NoMatch, null)
             }
@@ -282,7 +283,7 @@ class Matcher {
             when (rule.condition.evaluate(snapshot)) {
                 ConditionResult.MATCH -> return MatchDecision.Matched(rule, rule.action)
                 ConditionResult.UNKNOWN ->
-                    if (rule.condition.hasMissingRateSignal(snapshot)) {
+                    if (rule.condition.hasMissingFailOpenSignal(snapshot)) {
                         return MatchDecision.NoMatch
                     }
                 ConditionResult.NO_MATCH -> Unit
@@ -296,8 +297,15 @@ class Matcher {
         rules: List<Rule>,
     ): Boolean {
         for (rule in rules) {
-            if (rule.condition.evaluate(snapshot) == ConditionResult.MATCH) return false
+            val result = rule.condition.evaluate(snapshot)
+            if (result == ConditionResult.MATCH) return false
             if (rule.condition.canMatchWithTrustedSemantic(snapshot)) return true
+            if (
+                result == ConditionResult.UNKNOWN &&
+                rule.condition.hasMissingChannelOrRankingSignal(snapshot)
+            ) {
+                return false
+            }
         }
         return false
     }
@@ -326,13 +334,23 @@ class Matcher {
         rules: List<Rule>,
     ): Boolean {
         for (rule in rules) {
-            when (rule.condition.evaluate(snapshot)) {
-                ConditionResult.MATCH -> return false
-                ConditionResult.UNKNOWN ->
-                    if (rule.condition.requiredSignals().mlCategory) {
-                        return true
-                    }
-                ConditionResult.NO_MATCH -> Unit
+            val result = rule.condition.evaluate(snapshot)
+            if (result == ConditionResult.MATCH) return false
+            if (
+                rule.condition.hasMissingCategorySignal(snapshot) &&
+                rule.condition.canMatchAfterResolving(
+                    snapshot = snapshot,
+                    resolveCategory = true,
+                    resolveSemantic = true,
+                )
+            ) {
+                return true
+            }
+            if (
+                result == ConditionResult.UNKNOWN &&
+                rule.condition.hasMissingChannelOrRankingSignal(snapshot)
+            ) {
+                return false
             }
         }
         return false
@@ -343,13 +361,24 @@ class Matcher {
         rules: List<Rule>,
     ): Boolean {
         for (rule in rules) {
-            when (rule.condition.evaluate(snapshot)) {
-                ConditionResult.MATCH -> return false
-                ConditionResult.UNKNOWN ->
-                    if (rule.condition.hasMissingRateSignal(snapshot)) {
-                        return true
-                    }
-                ConditionResult.NO_MATCH -> Unit
+            val result = rule.condition.evaluate(snapshot)
+            if (result == ConditionResult.MATCH) return false
+            if (
+                rule.condition.hasMissingRateSignal(snapshot) &&
+                rule.condition.canMatchAfterResolving(
+                    snapshot = snapshot,
+                    resolveCategory = true,
+                    resolveSemantic = true,
+                    resolveRate = true,
+                )
+            ) {
+                return true
+            }
+            if (
+                result == ConditionResult.UNKNOWN &&
+                rule.condition.hasMissingChannelOrRankingSignal(snapshot)
+            ) {
+                return false
             }
         }
         return false
@@ -363,7 +392,87 @@ private fun MatchDecision.effectiveAction(): RuleAction =
     }
 
 private fun Condition.hasMissingRateSignal(snapshot: NotificationSnapshot): Boolean =
-    requiredSignals().rateSignals.any { signal -> signal !in snapshot.rateCounts }
+    when (this) {
+        is Condition.RateAtLeast -> RateSignal(scope, windowMillis) !in snapshot.rateCounts
+        is Condition.AllOf ->
+            conditions.any { condition ->
+                condition.evaluate(snapshot) == ConditionResult.UNKNOWN &&
+                    condition.hasMissingRateSignal(snapshot)
+            }
+        is Condition.AnyOf ->
+            conditions.any { condition ->
+                condition.evaluate(snapshot) == ConditionResult.UNKNOWN &&
+                    condition.hasMissingRateSignal(snapshot)
+            }
+        is Condition.Not ->
+            condition.evaluate(snapshot) == ConditionResult.UNKNOWN &&
+                condition.hasMissingRateSignal(snapshot)
+        else -> false
+    }
+
+private fun Condition.hasMissingCategorySignal(snapshot: NotificationSnapshot): Boolean =
+    when (this) {
+        is Condition.MlCategoryEquals -> snapshot.mlCategory == null
+        is Condition.AllOf ->
+            conditions.any { condition ->
+                condition.evaluate(snapshot) == ConditionResult.UNKNOWN &&
+                    condition.hasMissingCategorySignal(snapshot)
+            }
+        is Condition.AnyOf ->
+            conditions.any { condition ->
+                condition.evaluate(snapshot) == ConditionResult.UNKNOWN &&
+                    condition.hasMissingCategorySignal(snapshot)
+            }
+        is Condition.Not ->
+            condition.evaluate(snapshot) == ConditionResult.UNKNOWN &&
+                condition.hasMissingCategorySignal(snapshot)
+        else -> false
+    }
+
+private fun Condition.hasMissingFailOpenSignal(snapshot: NotificationSnapshot): Boolean =
+    hasMissingRateSignal(snapshot) || hasMissingChannelOrRankingSignal(snapshot)
+
+private fun Condition.hasMissingChannelOrRankingSignal(snapshot: NotificationSnapshot): Boolean =
+    hasMissingChannelSignal(snapshot) || hasMissingRankingSignal(snapshot)
+
+private fun Condition.hasMissingChannelSignal(snapshot: NotificationSnapshot): Boolean =
+    when (this) {
+        is Condition.ChannelEquals -> snapshot.channelId == null
+        is Condition.AllOf ->
+            conditions.any { condition ->
+                condition.evaluate(snapshot) == ConditionResult.UNKNOWN &&
+                    condition.hasMissingChannelSignal(snapshot)
+            }
+        is Condition.AnyOf ->
+            conditions.any { condition ->
+                condition.evaluate(snapshot) == ConditionResult.UNKNOWN &&
+                    condition.hasMissingChannelSignal(snapshot)
+            }
+        is Condition.Not ->
+            condition.evaluate(snapshot) == ConditionResult.UNKNOWN &&
+                condition.hasMissingChannelSignal(snapshot)
+        else -> false
+    }
+
+private fun Condition.hasMissingRankingSignal(snapshot: NotificationSnapshot): Boolean =
+    when (this) {
+        is Condition.Conversation -> snapshot.isConversation == null
+        is Condition.ImportanceAtLeast -> snapshot.importance == null
+        is Condition.AllOf ->
+            conditions.any { condition ->
+                condition.evaluate(snapshot) == ConditionResult.UNKNOWN &&
+                    condition.hasMissingRankingSignal(snapshot)
+            }
+        is Condition.AnyOf ->
+            conditions.any { condition ->
+                condition.evaluate(snapshot) == ConditionResult.UNKNOWN &&
+                    condition.hasMissingRankingSignal(snapshot)
+            }
+        is Condition.Not ->
+            condition.evaluate(snapshot) == ConditionResult.UNKNOWN &&
+                condition.hasMissingRankingSignal(snapshot)
+        else -> false
+    }
 
 private fun Condition.canMatchWithTrustedSemantic(snapshot: NotificationSnapshot): Boolean =
     SemanticIntent.entries
@@ -377,6 +486,120 @@ private fun Condition.canMatchWithTrustedSemantic(snapshot: NotificationSnapshot
                 ),
             ) == ConditionResult.MATCH
         }
+
+private fun Condition.canMatchAfterResolving(
+    snapshot: NotificationSnapshot,
+    resolveCategory: Boolean = false,
+    resolveSemantic: Boolean = false,
+    resolveRate: Boolean = false,
+): Boolean =
+    possibleResultsAfterResolving(
+        snapshot = snapshot,
+        resolveCategory = resolveCategory,
+        resolveSemantic = resolveSemantic,
+        resolveRate = resolveRate,
+    ).contains(ConditionResult.MATCH)
+
+private fun Condition.possibleResultsAfterResolving(
+    snapshot: NotificationSnapshot,
+    resolveCategory: Boolean,
+    resolveSemantic: Boolean,
+    resolveRate: Boolean,
+): Set<ConditionResult> =
+    when (this) {
+        is Condition.MlCategoryEquals ->
+            if (resolveCategory && snapshot.mlCategory == null) {
+                RESOLVED_BINARY_RESULTS
+            } else {
+                setOf(evaluate(snapshot))
+            }
+        is Condition.IsAdvertisement ->
+            if (resolveSemantic && snapshot.isAdvertisement == null) {
+                RESOLVED_BINARY_RESULTS
+            } else {
+                setOf(evaluate(snapshot))
+            }
+        is Condition.SemanticIntentEquals ->
+            if (resolveSemantic && snapshot.semanticIntent == null) {
+                RESOLVED_BINARY_RESULTS
+            } else {
+                setOf(evaluate(snapshot))
+            }
+        is Condition.RateAtLeast ->
+            if (
+                resolveRate &&
+                RateSignal(scope, windowMillis) !in snapshot.rateCounts
+            ) {
+                RESOLVED_BINARY_RESULTS
+            } else {
+                setOf(evaluate(snapshot))
+            }
+        is Condition.AllOf -> {
+            if (conditions.isEmpty()) {
+                setOf(ConditionResult.NO_MATCH)
+            } else {
+                conditions.fold(setOf(ConditionResult.MATCH)) { accumulated, child ->
+                    accumulated.combineWith(
+                        child.possibleResultsAfterResolving(
+                            snapshot,
+                            resolveCategory,
+                            resolveSemantic,
+                            resolveRate,
+                        ),
+                        ConditionResult::and,
+                    )
+                }
+            }
+        }
+        is Condition.AnyOf -> {
+            if (conditions.isEmpty()) {
+                setOf(ConditionResult.NO_MATCH)
+            } else {
+                conditions.fold(setOf(ConditionResult.NO_MATCH)) { accumulated, child ->
+                    accumulated.combineWith(
+                        child.possibleResultsAfterResolving(
+                            snapshot,
+                            resolveCategory,
+                            resolveSemantic,
+                            resolveRate,
+                        ),
+                        ConditionResult::or,
+                    )
+                }
+            }
+        }
+        is Condition.Not ->
+            condition
+                .possibleResultsAfterResolving(
+                    snapshot,
+                    resolveCategory,
+                    resolveSemantic,
+                    resolveRate,
+                ).mapTo(mutableSetOf(), ConditionResult::not)
+        else -> setOf(evaluate(snapshot))
+    }
+
+private fun Set<ConditionResult>.combineWith(
+    other: Set<ConditionResult>,
+    combine: (ConditionResult, ConditionResult) -> ConditionResult,
+): Set<ConditionResult> =
+    flatMapTo(mutableSetOf()) { left ->
+        other.map { right -> combine(left, right) }
+    }
+
+private fun ConditionResult.and(other: ConditionResult): ConditionResult =
+    when {
+        this == ConditionResult.NO_MATCH || other == ConditionResult.NO_MATCH -> ConditionResult.NO_MATCH
+        this == ConditionResult.UNKNOWN || other == ConditionResult.UNKNOWN -> ConditionResult.UNKNOWN
+        else -> ConditionResult.MATCH
+    }
+
+private fun ConditionResult.or(other: ConditionResult): ConditionResult =
+    when {
+        this == ConditionResult.MATCH || other == ConditionResult.MATCH -> ConditionResult.MATCH
+        this == ConditionResult.UNKNOWN || other == ConditionResult.UNKNOWN -> ConditionResult.UNKNOWN
+        else -> ConditionResult.NO_MATCH
+    }
 
 private fun EvaluatedCondition.toDecisionTrace(
     lane: DecisionTraceLane,
@@ -546,3 +769,8 @@ private fun Condition.kind(): DecisionConditionKind =
     }
 
 private const val ACTIVE_TRACE_BUDGET = 96
+private val RESOLVED_BINARY_RESULTS =
+    setOf(
+        ConditionResult.MATCH,
+        ConditionResult.NO_MATCH,
+    )

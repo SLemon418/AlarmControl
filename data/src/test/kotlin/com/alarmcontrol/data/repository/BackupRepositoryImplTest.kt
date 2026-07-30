@@ -4,6 +4,7 @@ import com.alarmcontrol.core.backup.BackupCategoryFeedback
 import com.alarmcontrol.core.backup.BackupData
 import com.alarmcontrol.core.backup.BackupSemanticFeedback
 import com.alarmcontrol.core.backup.BackupSummary
+import com.alarmcontrol.core.backup.MAX_BACKUP_FILE_BYTES
 import com.alarmcontrol.core.backup.RestoreMode
 import com.alarmcontrol.core.backup.RestoreOptions
 import com.alarmcontrol.core.filtering.Condition
@@ -13,9 +14,12 @@ import com.alarmcontrol.core.filtering.SemanticIntent
 import com.alarmcontrol.core.insights.CategoryCount
 import com.alarmcontrol.core.insights.DailyInsight
 import com.alarmcontrol.core.insights.RuleTriggerCount
+import com.alarmcontrol.core.privacy.LocalDataResetWriteFence
+import com.alarmcontrol.core.privacy.StaleLocalDataWriteException
 import com.alarmcontrol.core.profile.FilteringProfile
 import com.alarmcontrol.core.result.DataResult
 import com.alarmcontrol.core.settings.MaintenanceSettingsSnapshot
+import com.alarmcontrol.core.settings.SettingsMutationFence
 import com.alarmcontrol.core.settings.SettingsRepository
 import com.alarmcontrol.core.settings.SettingsSnapshot
 import com.alarmcontrol.data.backup.BackupCodec
@@ -27,17 +31,28 @@ import com.alarmcontrol.data.db.entity.LlmObservationEntity
 import com.alarmcontrol.data.db.entity.NotificationEventEntity
 import com.alarmcontrol.data.db.model.StoredRuleAction
 import com.alarmcontrol.data.mapper.toWrite
+import com.alarmcontrol.data.security.MaintenancePolicyAccessGuard
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.Clock
+import java.time.Instant
+import java.time.ZoneOffset
+
+private const val BACKUP_NOW_MILLIS = 100_000L
 
 @Suppress("LargeClass") // Keeps the cross-section backup and restore matrix in one fixture.
+@OptIn(ExperimentalCoroutinesApi::class)
 class BackupRepositoryImplTest {
     private val ruleDao = FakeRuleDao()
     private val dailyDao = FakeDailyInsightDao()
@@ -58,7 +73,74 @@ class BackupRepositoryImplTest {
             feedbackDao,
             llmObservationDao,
             settings,
+            clock = Clock.fixed(Instant.ofEpochMilli(BACKUP_NOW_MILLIS), ZoneOffset.UTC),
         )
+
+    @Test
+    fun `preview and restore reject an oversized string at the repository boundary`() =
+        runTest {
+            val oversized = "x".repeat(MAX_BACKUP_FILE_BYTES + 1)
+
+            assertTrue(backup.preview(oversized, null) is DataResult.Failure)
+            assertTrue(backup.restore(oversized) is DataResult.Failure)
+        }
+
+    @Test
+    fun `whole data reset waits through restore settings finalization and wins afterward`() =
+        runTest {
+            val resetFence = LocalDataResetWriteFence()
+            val blockingSettings = BlockingFinalRestoreSettingsRepository(settings, resetFence)
+            val guardedBackup =
+                BackupRepositoryImpl(
+                    transactionRunner,
+                    ruleDao,
+                    dailyDao,
+                    profileDao,
+                    feedbackDao,
+                    llmObservationDao,
+                    blockingSettings,
+                    clock = Clock.fixed(Instant.ofEpochMilli(BACKUP_NOW_MILLIS), ZoneOffset.UTC),
+                    localDataResetWriteFence = resetFence,
+                )
+            val payload =
+                BackupCodec.encode(
+                    BackupData(
+                        rules =
+                            listOf(
+                                Rule(
+                                    id = "1",
+                                    name = "stale",
+                                    condition = Condition.PackageEquals("com.stale"),
+                                    action = RuleAction.Cancel,
+                                ),
+                            ),
+                        dailyInsights = emptyList(),
+                        settings =
+                            SettingsSnapshot(
+                                externalAutomationEnabled = true,
+                                eventRetentionDays = 14,
+                            ),
+                    ),
+                )
+
+            val restoring = async { guardedBackup.restore(payload) }
+            blockingSettings.finalRestoreStarted.await()
+            val resetting =
+                async {
+                    resetFence.resetAndAdvanceOnCommit { onCommitted ->
+                        blockingSettings.reset()
+                        onCommitted()
+                    }
+                }
+            runCurrent()
+            assertFalse(resetting.isCompleted)
+            blockingSettings.releaseFinalRestore.complete(Unit)
+
+            assertTrue(restoring.await() is DataResult.Success)
+            resetting.await()
+            assertFalse(settings.current.externalAutomationEnabled)
+            assertEquals(30, settings.current.eventRetentionDays)
+        }
 
     @Test
     fun `restore replaces existing rules and remaps history references to the new ids`() =
@@ -710,7 +792,174 @@ class BackupRepositoryImplTest {
         }
 
     @Test
-    fun `feedback merge invalidates a linked row evicted by the global cap`() =
+    fun `repeated semantic feedback merge preserves validator bounds and export round trip`() =
+        runTest {
+            val password = "password".toCharArray()
+            val payload =
+                BackupCryptor.encrypt(
+                    BackupCodec.encode(
+                        BackupData(
+                            rules = emptyList(),
+                            dailyInsights = emptyList(),
+                            semanticFeedback =
+                                listOf(
+                                    BackupSemanticFeedback(
+                                        packageName = "com.remote",
+                                        intent = SemanticIntent.MARKETING,
+                                        count = 500_000,
+                                    ),
+                                ),
+                        ),
+                    ),
+                    password,
+                )
+            val options =
+                RestoreOptions(
+                    mode = RestoreMode.MERGE,
+                    rulesAndProfiles = false,
+                    dailyInsights = false,
+                    settings = false,
+                    learningFeedback = true,
+                )
+
+            repeat(2) {
+                assertTrue(backup.restore(payload, password, options) is DataResult.Success)
+            }
+            assertEquals(1_000_000, llmObservationDao.getSemanticFeedbackCounts().single().count)
+            assertTrue(
+                backup.preview(
+                    backup.export(password, includeLearningFeedback = true),
+                    password,
+                ) is DataResult.Success,
+            )
+
+            assertTrue(backup.restore(payload, password, options) is DataResult.Failure)
+            assertEquals(1_000_000, llmObservationDao.getSemanticFeedbackCounts().single().count)
+            assertTrue(
+                backup.preview(
+                    backup.export(password, includeLearningFeedback = true),
+                    password,
+                ) is DataResult.Success,
+            )
+        }
+
+    @Test
+    fun `learning export bounds feedback while preserving runtime priors and local groups`() =
+        runTest {
+            val priors =
+                List(25_000) { index ->
+                    com.alarmcontrol.data.db.entity.SemanticFeedbackPriorEntity(
+                        packageName = "com.imported.$index",
+                        intent = SemanticIntent.OTHER.name,
+                        count = if (index == 0) Int.MAX_VALUE else index + 1,
+                    )
+                }
+            llmObservationDao.upsertSemanticImportedPriors(priors)
+            val localFeedback =
+                listOf(
+                    com.alarmcontrol.data.db.entity.LocalSemanticFeedbackEntity(
+                        sourceEventId = 1,
+                        packageName = "com.imported.0",
+                        correctedIntent = SemanticIntent.OTHER.name,
+                        recordedAtMillis = 100,
+                    ),
+                    com.alarmcontrol.data.db.entity.LocalSemanticFeedbackEntity(
+                        sourceEventId = 2,
+                        packageName = "com.local",
+                        correctedIntent = SemanticIntent.SECURITY.name,
+                        recordedAtMillis = 101,
+                    ),
+                )
+            localFeedback.forEach {
+                llmObservationDao.upsertLocalSemanticFeedback(it)
+            }
+            val priorsBeforeExport = llmObservationDao.getSemanticImportedPriors()
+            val localBeforeExport = llmObservationDao.getLocalSemanticFeedback()
+            val password = "password".toCharArray()
+
+            val exported = backup.export(password, includeLearningFeedback = true)
+            val decoded =
+                BackupCodec.decode(
+                    BackupCryptor.decrypt(exported, password),
+                )
+
+            assertEquals(25_000, decoded.semanticFeedback.size)
+            assertTrue(
+                decoded.semanticFeedback.any {
+                    it.packageName == "com.local" &&
+                        it.intent == SemanticIntent.SECURITY &&
+                        it.count == 1
+                },
+            )
+            assertEquals(
+                1_000_000,
+                decoded.semanticFeedback
+                    .single {
+                        it.packageName == "com.imported.0" &&
+                            it.intent == SemanticIntent.OTHER
+                    }.count,
+            )
+            assertEquals(priorsBeforeExport, llmObservationDao.getSemanticImportedPriors())
+            assertEquals(localBeforeExport, llmObservationDao.getLocalSemanticFeedback())
+            assertTrue(backup.preview(exported, password) is DataResult.Success)
+        }
+
+    @Test
+    fun `semantic feedback merge rejects a disjoint key beyond the export row limit`() =
+        runTest {
+            llmObservationDao.upsertSemanticImportedPriors(
+                List(25_000) { index ->
+                    com.alarmcontrol.data.db.entity.SemanticFeedbackPriorEntity(
+                        packageName = "com.existing.$index",
+                        intent = SemanticIntent.OTHER.name,
+                        count = 1,
+                    )
+                },
+            )
+            val password = "password".toCharArray()
+            val payload =
+                BackupCryptor.encrypt(
+                    BackupCodec.encode(
+                        BackupData(
+                            rules = emptyList(),
+                            dailyInsights = emptyList(),
+                            semanticFeedback =
+                                listOf(
+                                    BackupSemanticFeedback(
+                                        packageName = "com.new",
+                                        intent = SemanticIntent.SECURITY,
+                                        count = 1,
+                                    ),
+                                ),
+                        ),
+                    ),
+                    password,
+                )
+
+            val result =
+                backup.restore(
+                    payload,
+                    password,
+                    RestoreOptions(
+                        mode = RestoreMode.MERGE,
+                        rulesAndProfiles = false,
+                        dailyInsights = false,
+                        settings = false,
+                        learningFeedback = true,
+                    ),
+                )
+
+            assertTrue(result is DataResult.Failure)
+            assertEquals(25_000, llmObservationDao.getSemanticImportedPriors().size)
+            assertTrue(
+                llmObservationDao
+                    .getSemanticImportedPriors()
+                    .none { it.packageName == "com.new" },
+            )
+        }
+
+    @Test
+    fun `feedback merge never evicts existing local learning at the global cap`() =
         runTest {
             feedbackDao.seedRows(
                 List(CategoryFeedbackDao.MAX_RETAINED_ROWS) { index ->
@@ -759,12 +1008,119 @@ class BackupRepositoryImplTest {
                 )
 
             assertTrue(result is DataResult.Success)
-            assertEquals(listOf(77L), dailyDao.invalidatedEventIds)
+            assertEquals(emptyList<Long>(), dailyDao.invalidatedEventIds)
             assertEquals(CategoryFeedbackDao.MAX_RETAINED_ROWS, feedbackDao.countAll())
-            assertEquals(
-                emptyList<Long>(),
-                feedbackDao.inserted.mapNotNull { it.notificationEventId },
+            assertTrue(feedbackDao.inserted.any { it.notificationEventId == 77L })
+            assertTrue(feedbackDao.inserted.none { it.packageName == "com.remote" })
+        }
+
+    @Test
+    fun `feedback merge cannot evict newer local learning with old imported rows`() =
+        runTest {
+            feedbackDao.seedRows(
+                List(CategoryFeedbackDao.MAX_RETAINED_ROWS) { index ->
+                    CategoryFeedbackEntity(
+                        id = index + 1L,
+                        packageName = "com.local.$index",
+                        notificationEventId = if (index == 0) 88L else null,
+                        predictedLabel = "promotion",
+                        correctedLabel = "social",
+                        recordedAtMillis = 10_000L + index,
+                    )
+                },
             )
+            val password = "password".toCharArray()
+            val payload =
+                BackupCryptor.encrypt(
+                    BackupCodec.encode(
+                        BackupData(
+                            rules = emptyList(),
+                            dailyInsights = emptyList(),
+                            categoryFeedback =
+                                listOf(
+                                    BackupCategoryFeedback(
+                                        packageName = "com.old-backup",
+                                        predictedLabel = "promotion",
+                                        correctedLabel = "news",
+                                        recordedAtMillis = 1,
+                                    ),
+                                ),
+                        ),
+                    ),
+                    password,
+                )
+
+            val result =
+                backup.restore(
+                    payload,
+                    password,
+                    RestoreOptions(
+                        mode = RestoreMode.MERGE,
+                        rulesAndProfiles = false,
+                        dailyInsights = false,
+                        settings = false,
+                        learningFeedback = true,
+                    ),
+                )
+
+            assertTrue(result is DataResult.Success)
+            assertEquals(CategoryFeedbackDao.MAX_RETAINED_ROWS, feedbackDao.countAll())
+            assertTrue(feedbackDao.inserted.none { it.packageName == "com.old-backup" })
+            assertTrue(feedbackDao.inserted.any { it.notificationEventId == 88L })
+            assertEquals(emptyList<Long>(), dailyDao.invalidatedEventIds)
+        }
+
+    @Test
+    fun `far future feedback is rejected before it can evict local learning`() =
+        runTest {
+            feedbackDao.seedRows(
+                List(CategoryFeedbackDao.MAX_RETAINED_ROWS) { index ->
+                    CategoryFeedbackEntity(
+                        id = index + 1L,
+                        packageName = "com.local.$index",
+                        predictedLabel = "promotion",
+                        correctedLabel = "social",
+                        recordedAtMillis = BACKUP_NOW_MILLIS - index,
+                    )
+                },
+            )
+            val password = "password".toCharArray()
+            val payload =
+                BackupCryptor.encrypt(
+                    BackupCodec.encode(
+                        BackupData(
+                            rules = emptyList(),
+                            dailyInsights = emptyList(),
+                            categoryFeedback =
+                                listOf(
+                                    BackupCategoryFeedback(
+                                        packageName = "com.future-backup",
+                                        predictedLabel = "promotion",
+                                        correctedLabel = "news",
+                                        recordedAtMillis = Long.MAX_VALUE,
+                                    ),
+                                ),
+                        ),
+                    ),
+                    password,
+                )
+
+            val result =
+                backup.restore(
+                    payload,
+                    password,
+                    RestoreOptions(
+                        mode = RestoreMode.MERGE,
+                        rulesAndProfiles = false,
+                        dailyInsights = false,
+                        settings = false,
+                        learningFeedback = true,
+                    ),
+                )
+
+            assertTrue(result is DataResult.Failure)
+            assertEquals(CategoryFeedbackDao.MAX_RETAINED_ROWS, feedbackDao.countAll())
+            assertTrue(feedbackDao.inserted.none { it.packageName == "com.future-backup" })
         }
 
     @Test
@@ -886,6 +1242,71 @@ class BackupRepositoryImplTest {
             assertFalse(checkpoints.single().externalAutomationEnabled)
             assertFalse(checkpoints.single().llmAutoActionsEnabled)
             assertEquals(desired, settings.current)
+        }
+
+    @Test
+    fun `concurrent user setting waits for restore finalization and applies afterward`() =
+        runTest {
+            val mutationFence = SettingsMutationFence()
+            val maintenanceGuard = MaintenancePolicyAccessGuard()
+            val guardedSettings = MutationFencedBackupSettingsRepository(settings, mutationFence)
+            val transactionStarted = CompletableDeferred<Unit>()
+            val releaseTransaction = CompletableDeferred<Unit>()
+            val runner =
+                object : TransactionRunner {
+                    override suspend fun <T> run(block: suspend () -> T): T {
+                        transactionStarted.complete(Unit)
+                        releaseTransaction.await()
+                        return block()
+                    }
+                }
+            val repository =
+                BackupRepositoryImpl(
+                    runner,
+                    ruleDao,
+                    dailyDao,
+                    profileDao,
+                    feedbackDao,
+                    llmObservationDao,
+                    guardedSettings,
+                    settingsMutationFence = mutationFence,
+                    maintenancePolicyAccessGuard = maintenanceGuard,
+                )
+            val payload =
+                BackupCodec.encode(
+                    BackupData(
+                        rules =
+                            listOf(
+                                Rule(
+                                    id = "restored",
+                                    name = "Restored",
+                                    condition = Condition.PackageEquals("com.example"),
+                                    action = RuleAction.Cancel,
+                                ),
+                            ),
+                        dailyInsights = emptyList(),
+                    ),
+                )
+
+            val restoring =
+                async {
+                    repository.restore(
+                        payload,
+                        options = RestoreOptions(settings = false),
+                    )
+                }
+            transactionStarted.await()
+            val userDisablingFiltering = async { guardedSettings.setFilteringEnabled(false) }
+            val housekeeping = async { maintenanceGuard.withLock { Unit } }
+            runCurrent()
+
+            assertFalse(userDisablingFiltering.isCompleted)
+            assertFalse(housekeeping.isCompleted)
+            releaseTransaction.complete(Unit)
+            assertTrue(restoring.await() is DataResult.Success)
+            userDisablingFiltering.await()
+            housekeeping.await()
+            assertFalse(settings.current.filteringEnabled)
         }
 
     @Test
@@ -1119,6 +1540,96 @@ internal class InMemoryBackupSettingsRepository : SettingsRepository {
 
     private fun update(block: SettingsSnapshot.() -> SettingsSnapshot) {
         state.value = state.value.block()
+    }
+}
+
+private class BlockingFinalRestoreSettingsRepository(
+    private val delegate: InMemoryBackupSettingsRepository,
+    private val resetFence: LocalDataResetWriteFence,
+) : SettingsRepository by delegate {
+    val finalRestoreStarted = CompletableDeferred<Unit>()
+    val releaseFinalRestore = CompletableDeferred<Unit>()
+
+    override suspend fun restore(snapshot: SettingsSnapshot) {
+        if (snapshot.externalAutomationEnabled) {
+            finalRestoreStarted.complete(Unit)
+            releaseFinalRestore.await()
+        }
+        delegate.restore(snapshot)
+    }
+
+    override suspend fun restoreIfCurrent(
+        snapshot: SettingsSnapshot,
+        resetEpoch: LocalDataResetWriteFence.Epoch,
+    ) {
+        resetFence.writeIfCurrent(resetEpoch) {
+            restore(snapshot)
+            Unit
+        } ?: throw StaleLocalDataWriteException()
+    }
+
+    override suspend fun restoreIfCurrentWhileMutationAndMaintenanceLocked(
+        snapshot: SettingsSnapshot,
+        resetEpoch: LocalDataResetWriteFence.Epoch,
+    ) {
+        restoreIfCurrent(snapshot, resetEpoch)
+    }
+}
+
+private class MutationFencedBackupSettingsRepository(
+    private val delegate: InMemoryBackupSettingsRepository,
+    private val mutationFence: SettingsMutationFence,
+) : SettingsRepository by delegate {
+    override suspend fun setFilteringEnabled(enabled: Boolean) {
+        mutationFence.withLock {
+            delegate.setFilteringEnabled(enabled)
+        }
+    }
+
+    override suspend fun setFilteringEnabledIfCurrent(
+        enabled: Boolean,
+        resetEpoch: LocalDataResetWriteFence.Epoch,
+    ) {
+        mutationFence.withLock {
+            delegate.setFilteringEnabledIfCurrent(enabled, resetEpoch)
+        }
+    }
+
+    override suspend fun setFilteringEnabledIfCurrentWhileMutationLocked(
+        enabled: Boolean,
+        resetEpoch: LocalDataResetWriteFence.Epoch,
+    ) {
+        delegate.setFilteringEnabledIfCurrent(enabled, resetEpoch)
+    }
+
+    override suspend fun snapshot(): SettingsSnapshot =
+        mutationFence.withLock {
+            delegate.snapshot()
+        }
+
+    override suspend fun snapshotWhileMutationLocked(): SettingsSnapshot = delegate.snapshot()
+
+    override suspend fun restoreIfCurrent(
+        snapshot: SettingsSnapshot,
+        resetEpoch: LocalDataResetWriteFence.Epoch,
+    ) {
+        mutationFence.withLock {
+            delegate.restoreIfCurrent(snapshot, resetEpoch)
+        }
+    }
+
+    override suspend fun restoreIfCurrentWhileMutationLocked(
+        snapshot: SettingsSnapshot,
+        resetEpoch: LocalDataResetWriteFence.Epoch,
+    ) {
+        delegate.restoreIfCurrent(snapshot, resetEpoch)
+    }
+
+    override suspend fun restoreIfCurrentWhileMutationAndMaintenanceLocked(
+        snapshot: SettingsSnapshot,
+        resetEpoch: LocalDataResetWriteFence.Epoch,
+    ) {
+        delegate.restoreIfCurrent(snapshot, resetEpoch)
     }
 }
 

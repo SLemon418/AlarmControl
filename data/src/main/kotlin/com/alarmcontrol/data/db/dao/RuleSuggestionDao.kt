@@ -14,7 +14,8 @@ interface RuleSuggestionDao {
     @Query(
         "SELECT package_name, channel_id, COUNT(*) AS total_count, " +
             "SUM(CASE WHEN action IN (:cancelAction, :snoozeAction) THEN 1 ELSE 0 END) AS silenced_count " +
-            "FROM notification_events WHERE recorded_at_millis >= :sinceMillis AND undone = 0 " +
+            "FROM notification_events WHERE recorded_at_millis >= :sinceMillis " +
+            "AND recorded_at_millis <= :nowMillis AND undone = 0 " +
             "AND channel_id IS NOT NULL GROUP BY package_name, channel_id " +
             "HAVING COUNT(*) >= :minimumEvents AND " +
             "SUM(CASE WHEN action IN (:cancelAction, :snoozeAction) THEN 1 ELSE 0 END) * 100 " +
@@ -22,6 +23,7 @@ interface RuleSuggestionDao {
     )
     fun observeChannelCandidates(
         sinceMillis: Long,
+        nowMillis: Long,
         minimumEvents: Int,
         minimumPercent: Int,
         cancelAction: StoredRuleAction,
@@ -32,14 +34,17 @@ interface RuleSuggestionDao {
         "SELECT package_name, SUM(is_marketing) AS marketing_count, COUNT(*) AS total_count FROM (" +
             "SELECT package_name, CASE WHEN LOWER(corrected_label) = 'promotion' THEN 1 ELSE 0 END " +
             "AS is_marketing FROM category_feedback WHERE recorded_at_millis >= :sinceMillis " +
+            "AND recorded_at_millis <= :nowMillis " +
             "UNION ALL SELECT package_name, CASE WHEN corrected_intent = 'MARKETING' THEN 1 ELSE 0 END " +
-            "AS is_marketing FROM local_semantic_feedback WHERE recorded_at_millis >= :sinceMillis) " +
+            "AS is_marketing FROM local_semantic_feedback WHERE recorded_at_millis >= :sinceMillis " +
+            "AND recorded_at_millis <= :nowMillis) " +
             "GROUP BY package_name " +
             "HAVING SUM(is_marketing) >= :minimumCorrections " +
             "AND SUM(is_marketing) * 100 >= COUNT(*) * :minimumPercent",
     )
     fun observeMarketingCandidates(
         sinceMillis: Long,
+        nowMillis: Long,
         minimumCorrections: Int,
         minimumPercent: Int,
     ): Flow<List<MarketingSuggestionRow>>

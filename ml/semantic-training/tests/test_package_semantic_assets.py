@@ -493,11 +493,21 @@ class PackageSemanticAssetsTest(unittest.TestCase):
                 ),
             }
 
-            manifest = packager.package_assets(fixture.options())
+            with mock.patch.object(
+                packager,
+                "_fsync_directory",
+                wraps=packager._fsync_directory,
+            ) as sync_directory:
+                manifest = packager.package_assets(fixture.options())
 
             self.assertEqual(
                 packager.OUTPUT_FILENAMES,
                 {path.name for path in fixture.output_dir.iterdir()},
+            )
+            self.assertEqual(2, sync_directory.call_count)
+            self.assertEqual(
+                fixture.output_dir.parent.resolve(),
+                sync_directory.call_args_list[-1].args[0].resolve(),
             )
             self.assertEqual(
                 fixture.model_path.read_bytes(),

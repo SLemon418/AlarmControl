@@ -6,6 +6,7 @@ import com.alarmcontrol.core.filtering.PersistedRateOccurrence
 import com.alarmcontrol.core.filtering.RateListenerKeyHashResult
 import com.alarmcontrol.core.filtering.RateListenerKeyHasher
 import com.alarmcontrol.core.filtering.RateOccurrenceId
+import com.alarmcontrol.core.filtering.RateOccurrenceIncompleteReason
 import com.alarmcontrol.core.filtering.RateOccurrenceLifecycleGate
 import com.alarmcontrol.core.filtering.RateOccurrencePersistenceResult
 import com.alarmcontrol.core.filtering.RateOccurrenceRepository
@@ -59,6 +60,7 @@ internal class NotificationRateLifecycleActor(
     private val rateStateLock = Any()
     private var trackerAvailable = false
     private var nextSeedRetryAtMillis: Long? = null
+    private var appliedResetGeneration = lifecycleGate.currentResetMarker.generation
 
     private val worker =
         scope.launch {
@@ -68,13 +70,16 @@ internal class NotificationRateLifecycleActor(
         }
 
     val currentLifecycleGeneration: Long
-        get() = lifecycleGeneration.get()
+        get() =
+            synchronized(rateStateLock) {
+                applyExternalResetIfNeededLocked()
+                lifecycleGeneration.get()
+            }
 
     /** Marks a new connected generation unavailable before any callback can observe stale counts. */
     fun connected(anchorMillis: Long = clock.millis()): Long {
         val generation = lifecycleGeneration.incrementAndGet()
-        retainGap(anchorMillis)
-        markTrackerUnavailable()
+        markUnavailableAndRetainGap(anchorMillis)
         enqueueControl(Command.Connected(generation, anchorMillis))
         return generation
     }
@@ -82,8 +87,7 @@ internal class NotificationRateLifecycleActor(
     /** Invalidates queued work immediately and records a durable completeness gap best-effort. */
     fun disconnected(anchorMillis: Long = clock.millis()) {
         lifecycleGeneration.incrementAndGet()
-        retainGap(anchorMillis)
-        markTrackerUnavailable()
+        markUnavailableAndRetainGap(anchorMillis)
         enqueueControl(Command.FlushGap(anchorMillis))
     }
 
@@ -148,8 +152,14 @@ internal class NotificationRateLifecycleActor(
         requestedSignals: Set<RateSignal>,
     ): RateCountSnapshot =
         synchronized(rateStateLock) {
+            applyExternalResetIfNeededLocked()
             RateCountSnapshot(
-                counts = tracker.counts(snapshot, requestedSignals),
+                counts =
+                    tracker.counts(
+                        snapshot = snapshot,
+                        requestedSignals = requestedSignals,
+                        observationNowMillis = clock.millis(),
+                    ),
             )
         }
 
@@ -170,10 +180,12 @@ internal class NotificationRateLifecycleActor(
     ): Boolean {
         if (expectation == null) return commit()
         return synchronized(rateStateLock) {
+            applyExternalResetIfNeededLocked()
             val currentCounts =
                 tracker.counts(
-                    snapshot,
-                    expectation.requestedSignals,
+                    snapshot = snapshot,
+                    requestedSignals = expectation.requestedSignals,
+                    observationNowMillis = clock.millis(),
                 )
             if (currentCounts == expectation.expectedCounts) {
                 commit()
@@ -220,6 +232,7 @@ internal class NotificationRateLifecycleActor(
     private suspend fun processSafely(command: Command) {
         try {
             lifecycleGate.withOperation {
+                applyExternalResetIfNeeded()
                 persistPendingGap()
                 when (command) {
                     is Command.Connected -> processConnected(command)
@@ -232,8 +245,12 @@ internal class NotificationRateLifecycleActor(
             }
         } catch (error: CancellationException) {
             throw error
+        } catch (_: LinkageError) {
+            handleCommandFailure(command)
+        } catch (_: OutOfMemoryError) {
+            handleCommandFailure(command)
         } catch (_: Exception) {
-            handleCommandException(command)
+            handleCommandFailure(command)
         }
     }
 
@@ -408,10 +425,15 @@ internal class NotificationRateLifecycleActor(
             is RateOccurrenceSeed.Incomplete -> {
                 markTrackerUnavailable()
                 nextSeedRetryAtMillis =
-                    maxOf(
-                        addSaturated(nowMillis, MINIMUM_SEED_RETRY_MILLIS),
-                        seed.retryAtMillis ?: Long.MIN_VALUE,
-                    )
+                    if (seed.reason == RateOccurrenceIncompleteReason.FUTURE_OCCURRENCE) {
+                        seed.retryAtMillis
+                            ?: addSaturated(nowMillis, MINIMUM_SEED_RETRY_MILLIS)
+                    } else {
+                        maxOf(
+                            addSaturated(nowMillis, MINIMUM_SEED_RETRY_MILLIS),
+                            seed.retryAtMillis ?: Long.MIN_VALUE,
+                        )
+                    }
             }
 
             is RateOccurrenceSeed.Unavailable -> {
@@ -437,16 +459,19 @@ internal class NotificationRateLifecycleActor(
         }
     }
 
-    private suspend fun handleCommandException(command: Command) {
-        markUnavailableAndRetainGap(failureAnchor(command))
-        if (command is Command.Post) {
-            command.outcome.complete(
-                if (isCurrent(command.generation)) {
-                    RatePostOutcome.Proceed
-                } else {
-                    RatePostOutcome.Stale
-                },
-            )
+    private suspend fun handleCommandFailure(command: Command) {
+        try {
+            markUnavailableAndRetainGap(failureAnchor(command))
+        } finally {
+            if (command is Command.Post) {
+                command.outcome.complete(
+                    if (isCurrent(command.generation)) {
+                        RatePostOutcome.Proceed
+                    } else {
+                        RatePostOutcome.Stale
+                    },
+                )
+            }
         }
         onFailure()
         try {
@@ -455,21 +480,53 @@ internal class NotificationRateLifecycleActor(
             }
         } catch (error: CancellationException) {
             throw error
+        } catch (_: LinkageError) {
+            // The in-memory gap remains pending; a later command retries persistence.
+        } catch (_: OutOfMemoryError) {
+            // The in-memory gap remains pending; a later command retries persistence.
         } catch (_: Exception) {
             // The pending anchor remains in memory; the next command or connection retries it.
         }
     }
 
     private fun markUnavailableAndRetainGap(anchorMillis: Long) {
-        retainGap(anchorMillis)
-        markTrackerUnavailable()
+        synchronized(rateStateLock) {
+            applyExternalResetIfNeededLocked()
+            trackerAvailable = false
+            tracker.markUnavailable()
+            retainGap(anchorMillis)
+        }
     }
 
     private fun markTrackerUnavailable() {
         synchronized(rateStateLock) {
+            applyExternalResetIfNeededLocked()
             trackerAvailable = false
             tracker.markUnavailable()
         }
+    }
+
+    private fun applyExternalResetIfNeeded() {
+        synchronized(rateStateLock) {
+            applyExternalResetIfNeededLocked()
+        }
+    }
+
+    private fun applyExternalResetIfNeededLocked() {
+        val marker = lifecycleGate.currentResetMarker
+        if (marker.generation == appliedResetGeneration) return
+        lifecycleGeneration.incrementAndGet()
+        pendingGap.set(null)
+        nextSeedRetryAtMillis = null
+        // Windows are inclusive, so history becomes complete only from the first millisecond after
+        // the clear. This matches Room's reset marker and keeps negated rate rules fail-open.
+        trackerAvailable =
+            tracker.seed(
+                occurrences = emptyList(),
+                nowMillis = marker.resetAtMillis,
+                coverageStartMillis = addSaturated(marker.resetAtMillis, 1L),
+            )
+        appliedResetGeneration = marker.generation
     }
 
     private fun replaceSeed(
