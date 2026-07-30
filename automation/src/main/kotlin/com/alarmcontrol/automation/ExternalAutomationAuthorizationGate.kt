@@ -2,11 +2,18 @@ package com.alarmcontrol.automation
 
 import com.alarmcontrol.core.coroutines.ApplicationScope
 import com.alarmcontrol.core.settings.SettingsRepository
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.retryWhen
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicReference
@@ -41,7 +48,11 @@ internal class ExternalAutomationAuthorizationGate internal constructor(
 
     init {
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
-            combine(enabled, token, ::AuthorizationSnapshot).collect(snapshot::set)
+            combine(
+                enabled.recoveringSettingsFlow(),
+                token.recoveringSettingsFlow(),
+                ::AuthorizationSnapshot,
+            ).collect(snapshot::set)
         }
     }
 
@@ -96,4 +107,24 @@ internal fun String?.isAuthorizedAutomationToken(expected: String): Boolean {
     }
 }
 
+private fun <T> Flow<T>.recoveringSettingsFlow(): Flow<T> =
+    flow {
+        do {
+            emitAll(
+                this@recoveringSettingsFlow.retryWhen { cause, _ ->
+                    when (cause) {
+                        is CancellationException -> false
+                        is Exception -> {
+                            delay(SETTINGS_RESUBSCRIBE_DELAY_MILLIS)
+                            true
+                        }
+                        else -> false
+                    }
+                },
+            )
+            delay(SETTINGS_RESUBSCRIBE_DELAY_MILLIS)
+        } while (currentCoroutineContext().isActive)
+    }
+
+private const val SETTINGS_RESUBSCRIBE_DELAY_MILLIS = 1_000L
 private const val MAX_AUTOMATION_TOKEN_CHARS = 128
