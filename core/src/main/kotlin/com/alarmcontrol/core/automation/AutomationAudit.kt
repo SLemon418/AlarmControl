@@ -1,5 +1,6 @@
 package com.alarmcontrol.core.automation
 
+import com.alarmcontrol.core.privacy.LocalDataResetWriteFence
 import kotlinx.coroutines.flow.Flow
 
 enum class AutomationSource { EXTERNAL, QUICK_SETTINGS, SHORTCUT, IN_APP }
@@ -23,7 +24,19 @@ data class AutomationAuditEntry(
 
 /** Local-only bounded audit trail for automation requests. */
 interface AutomationAuditRepository {
+    /** Records [entry]. */
     suspend fun record(entry: AutomationAuditEntry)
+
+    /**
+     * Records only if the request's operation-entry reset generation is still current. The default
+     * preserves compatibility for non-persistent test doubles.
+     */
+    suspend fun recordIfCurrent(
+        entry: AutomationAuditEntry,
+        resetEpoch: LocalDataResetWriteFence.Epoch,
+    ) {
+        record(entry)
+    }
 
     fun observeRecent(limit: Int): Flow<List<AutomationAuditEntry>>
 }

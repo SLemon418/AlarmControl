@@ -21,6 +21,10 @@ object LlmResponseParser {
             val parser = JSONTokener(raw.trim())
             val obj = parser.nextValue() as? JSONObject ?: error("Expected one JSON object")
             require(parser.nextClean() == END_OF_INPUT) { "Unexpected content after JSON object" }
+            val fields = obj.keys().asSequence().toSet()
+            require(fields == REQUIRED_FIELDS || fields == REQUIRED_FIELDS_WITH_AD) {
+                "Unexpected response fields"
+            }
             val rawIntent = obj.get("intent") as? String ?: error("Missing intent")
             val intent = SemanticIntent.entries.singleOrNull { it.name == rawIntent } ?: error("Unknown intent")
             val confidence = (obj.get("confidence") as? Number)?.toDouble() ?: error("Missing confidence")
@@ -38,4 +42,6 @@ object LlmResponseParser {
         }.getOrDefault(LlmAnalysisResult.UNAVAILABLE)
 
     private const val END_OF_INPUT = '\u0000'
+    private val REQUIRED_FIELDS = setOf("intent", "confidence", "reason")
+    private val REQUIRED_FIELDS_WITH_AD = REQUIRED_FIELDS + "ad"
 }

@@ -653,51 +653,102 @@ baselineProfile {
 // merged into the release variant — so run :app unit tests on the debug variant only.
 tasks.matching { it.name == "testReleaseUnitTest" }.configureEach { enabled = false }
 
-// Build-time enforcement in addition to the JVM guard tests: every assembled variant's merged
-// manifest and runtime dependency graph must remain offline-clean (CLAUDE.md §3).
+// Build-time enforcement in addition to the JVM guard tests: every assembled app/test variant's
+// merged manifest and runtime dependency graph must remain offline-clean (CLAUDE.md §3).
 val offlineGuard by tasks.registering {
     group = "verification"
     description = "Fails if a merged manifest or runtime classpath violates the offline boundary."
-    dependsOn("processDebugMainManifest", "processReleaseMainManifest")
+    dependsOn(
+        "processDebugMainManifest",
+        "processReleaseMainManifest",
+        "processDebugAndroidTestManifest",
+        ":data:processDebugAndroidTestManifest",
+        ":ml:processDebugAndroidTestManifest",
+    )
 
     doLast {
+        val instrumentedTestProjects = listOf(project, project(":data"), project(":ml"))
+        check(instrumentedTestProjects.map { it.path }.toSet() == setOf(":app", ":data", ":ml")) {
+            "Offline test-APK scanner fixture must include app, data, and ml"
+        }
         val manifests =
-            listOf("debug", "release").map { variant ->
-                val taskVariant = variant.replaceFirstChar { it.uppercaseChar() }
-                layout.buildDirectory
-                    .file(
-                        "intermediates/merged_manifest/$variant/" +
-                            "process${taskVariant}MainManifest/AndroidManifest.xml",
-                    ).get()
-                    .asFile
-            }
-        val missingManifests = manifests.filterNot { it.isFile }
+            listOf(
+                "debug app" to
+                    "intermediates/merged_manifest/debug/" +
+                    "processDebugMainManifest/AndroidManifest.xml",
+                "release app" to
+                    "intermediates/merged_manifest/release/" +
+                    "processReleaseMainManifest/AndroidManifest.xml",
+            ).map { (label, path) ->
+                label to
+                    layout.buildDirectory
+                        .file(path)
+                        .get()
+                        .asFile
+            } +
+                instrumentedTestProjects.map { targetProject ->
+                    "${targetProject.path} debug instrumented-test APK" to
+                        targetProject.layout.buildDirectory
+                            .file(
+                                "intermediates/packaged_manifests/debugAndroidTest/" +
+                                    "processDebugAndroidTestManifest/AndroidManifest.xml",
+                            ).get()
+                            .asFile
+                }
+        val missingManifests = manifests.filterNot { (_, file) -> file.isFile }
         check(missingManifests.isEmpty()) {
-            "Expected merged manifests were not produced: ${missingManifests.joinToString()}"
+            "Expected merged manifests were not produced: " +
+                missingManifests.joinToString { (label, file) -> "$label (${file.absolutePath})" }
         }
         val internetPermission =
             Regex(
                 """<uses-permission(?:-sdk-\d+)?\b[^>]*android:name\s*=\s*["']android\.permission\.INTERNET["']""",
             )
+        check(
+            internetPermission.containsMatchIn(
+                """<uses-permission android:name="android.permission.INTERNET" />""",
+            ),
+        ) {
+            "Offline manifest scanner fixture must detect INTERNET"
+        }
         val violatingManifests =
-            manifests.filter { manifest ->
+            manifests.filter { (_, manifest) ->
                 internetPermission.containsMatchIn(manifest.readText())
             }
         check(violatingManifests.isEmpty()) {
-            "Offline boundary violated: INTERNET permission found in ${violatingManifests.joinToString()}"
+            "Offline boundary violated: INTERNET permission found in " +
+                violatingManifests.joinToString { (label, file) -> "$label (${file.absolutePath})" }
         }
 
         val forbiddenTokens =
             listOf("okhttp", "retrofit", "ktor-client", "grpc", "volley", "apollo", "firebase", "analytics")
+        val runtimeConfigurations =
+            listOf(
+                project to "debugRuntimeClasspath",
+                project to "releaseRuntimeClasspath",
+            ) +
+                instrumentedTestProjects.map { targetProject ->
+                    targetProject to "debugAndroidTestRuntimeClasspath"
+                }
+        check(
+            runtimeConfigurations
+                .filter { (_, configurationName) -> configurationName == "debugAndroidTestRuntimeClasspath" }
+                .map { (targetProject, _) -> targetProject.path }
+                .toSet() == setOf(":app", ":data", ":ml"),
+        ) {
+            "Offline runtime scanner fixture must include every instrumented-test APK"
+        }
         val violations =
-            listOf("debugRuntimeClasspath", "releaseRuntimeClasspath").flatMap { configurationName ->
-                configurations
+            runtimeConfigurations.flatMap { (targetProject, configurationName) ->
+                targetProject.configurations
                     .getByName(configurationName)
                     .incoming
                     .resolutionResult
                     .allComponents
                     .mapNotNull { component ->
-                        component.moduleVersion?.let { id -> "$configurationName:${id.group}:${id.name}" }
+                        component.moduleVersion?.let { id ->
+                            "${targetProject.path}:$configurationName:${id.group}:${id.name}"
+                        }
                     }.filter { coordinate -> forbiddenTokens.any { token -> token in coordinate.lowercase() } }
             }
         check(violations.isEmpty()) {
@@ -711,11 +762,20 @@ tasks
     .matching {
         it.name == "assembleDebug" ||
             it.name == "assembleRelease" ||
+            it.name == "assembleDebugAndroidTest" ||
             it.name == "bundleDebug" ||
             it.name == "bundleRelease"
     }.configureEach {
         dependsOn(offlineGuard)
     }
+
+listOf(project(":data"), project(":ml")).forEach { targetProject ->
+    targetProject.tasks
+        .matching { it.name == "check" || it.name == "assembleDebugAndroidTest" }
+        .configureEach {
+            dependsOn(offlineGuard)
+        }
+}
 
 tasks
     .matching { it.name == "bundleRelease" }

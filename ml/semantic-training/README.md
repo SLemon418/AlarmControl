@@ -162,13 +162,18 @@ python3 ml/semantic-training/train_koelectra.py \
   --max-rss-bytes 4294967296
 ```
 
-The output contains atomic `best/` and `checkpoint/` bundles with model
-weights, tokenizer, model config, optimizer state, checkpoint metadata, and
-`training_manifest.json`. `SIGINT` or `SIGTERM` is handled at an optimizer
-boundary and writes a final checkpoint before exiting. Peak RSS is checked
-before model loading and at every training and validation batch boundary; the
-default hard ceiling is 4 GiB and can be lowered with `--max-rss-bytes`. Heavy
-training is never part of the standard-library test command.
+The output exposes `best` and `checkpoint` as logical selectors. Each publish
+writes a complete immutable hidden generation containing model weights,
+tokenizer, model config, optimizer state, and checkpoint metadata, then
+atomically swaps one fsynced pointer under a process lock. Concurrent trainers
+and abrupt termination therefore cannot expose a mixed or partial bundle.
+Pass the logical selector path shown below to repository tools; they resolve
+one committed generation. `training_manifest.json` remains at the output root.
+`SIGINT` or `SIGTERM` is handled at an optimizer boundary and writes a final
+checkpoint before exiting. Peak RSS is checked before model loading and at
+every training and validation batch boundary; the default hard ceiling is
+4 GiB and can be lowered with `--max-rss-bytes`. Heavy training is never part
+of the standard-library test command.
 
 Evaluate a local `best/` bundle without loading a remote model:
 

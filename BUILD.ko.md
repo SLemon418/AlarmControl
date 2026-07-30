@@ -40,8 +40,9 @@ sdk.dir=/absolute/path/to/your/Android/sdk
 ./gradlew --dependency-verification strict check
 ```
 
-`offlineGuard`는 Debug/Release 병합 매니페스트의 `android.permission.INTERNET` 또는
-런타임 클래스패스의 금지된 네트워크 의존성을 발견하면 실패합니다. WorkManager의 읽기 전용
+`offlineGuard`는 Debug/Release 앱 및 `:app`/`:data`/`:ml` Debug 계측 테스트 APK
+매니페스트의 `android.permission.INTERNET` 또는 해당 런타임 클래스패스의 금지된
+네트워크 의존성을 발견하면 실패합니다. WorkManager의 읽기 전용
 `ACCESS_NETWORK_STATE` 권한은 허용됩니다. `:baselineprofile:offlineManifestGuard`는 같은
 검사를 두 Baseline Profile 테스트 APK에도 적용합니다.
 
@@ -101,13 +102,14 @@ CI와 형식 회귀 확인용 산출물로 남습니다.
 
 ### GitHub Release 게시
 
-Release 워크플로는 `vMAJOR.MINOR.PATCH` 태그를 push할 때만 실행합니다. 태그 버전은 APK의
-`versionName`과 정확히 같아야 하며 태그 커밋은 저장소 기본 브랜치의 조상이어야 합니다.
-새로 게시하는 APK의 `versionCode`도 이전 Release보다 반드시 커야 합니다. 같거나 낮은
-값은 Android가 업데이트로 설치하지 않습니다. 두 값은 `app/version.json`에서 변경합니다.
+Release 워크플로는 선행 0이 없는 strict `vMAJOR.MINOR.PATCH` 태그를 push할 때만
+실행합니다. 태그 버전은 APK의 `versionName`과 정확히 같아야 하며 태그 커밋은 저장소 기본
+브랜치의 조상이어야 합니다. 새로 게시하는 APK의 의미 버전 `versionName`과 Android
+`versionCode`는 모두 이전의 모든 Release보다 반드시 커야 합니다. 같거나 낮은 code는
+Android가 업데이트로 설치하지 않습니다. 두 값은 `app/version.json`에서 변경합니다.
 워크플로는 새 태그의 과거 이력만 보지 않고 checkout된 기본 브랜치 ref에서 도달 가능한
-모든 strict SemVer Release 태그의 커밋된 메타데이터를 확인합니다. 현재 코드가 그
-모두보다 크지 않으면 거부하므로 과거 커밋에 Release 태그를 뒤늦게 붙여도 우회할 수
+모든 strict SemVer Release 태그의 커밋된 메타데이터를 확인합니다. 두 값 중 하나라도
+그 모두보다 크지 않으면 거부하므로 과거 커밋에 Release 태그를 뒤늦게 붙여도 우회할 수
 없습니다. 해당 태그가 없는 첫 Release는 허용하며, 비교에는 checkout이 받은 Git 이력만
 사용하고 추가 네트워크 요청을 하지 않습니다. 서명과 게시 전에는 checkout이 태그가
 가리키는 정확한 커밋인지 확인하고, 그 checkout에서 `:data`, `:ml`, `:app`
@@ -173,7 +175,7 @@ JVM 테스트는 실제 Android 런타임 검증을 대체하지 않습니다. �
 있을 때 다음 명령을 실행합니다.
 
 ```sh
-./gradlew :data:connectedDebugAndroidTest  # Room v1/v2/v3/v10/v12 -> v15 마이그레이션
+./gradlew :data:connectedDebugAndroidTest  # Room v1/v2/v3/v10/v12/v15 -> v16 마이그레이션
 ./gradlew :ml:connectedDebugAndroidTest    # 번들 TFLite 런타임/에셋 호환성
 ./gradlew :app:connectedDebugAndroidTest   # Activity/Hilt, 리스너, 자동화, LLM 폴백, WorkManager
 ```
@@ -195,7 +197,7 @@ JVM 테스트는 실제 Android 런타임 검증을 대체하지 않습니다. �
 
 계측 테스트 APK 컴파일을 실제 기기 테스트 실행으로 보고하지 않습니다.
 
-현재 Room 테스트는 v1, v2, v3, v10, v12에서 v15까지의 실제 경로와 기존 이진 광고
+현재 Room 테스트는 v1, v2, v3, v10, v12, v15에서 v16까지의 실제 경로와 기존 이진 광고
 관찰값의 7종 의미 prior 이관을 검증합니다.
 `:baselineprofile:assemble`은 기기를 시작하지 않고 생성기 변형을 컴파일하며 프로필 수집은
 명시적인 별도 작업입니다.

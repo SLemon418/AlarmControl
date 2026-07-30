@@ -70,6 +70,54 @@ class NotificationHistoryDaoInstrumentedTest {
         }
 
     @Test
+    fun channelNamesComeFromTheLatestEventInEachQueryScope() =
+        runBlocking {
+            val eventDao = database.notificationEventDao()
+            eventDao.insert(
+                event(
+                    packageName = "com.example.shop",
+                    postedAtMillis = 100,
+                    epochDay = 5,
+                ).copy(channelId = "offers", channelName = "Zulu"),
+            )
+            eventDao.insert(
+                event(
+                    packageName = "com.example.shop",
+                    postedAtMillis = 200,
+                    epochDay = 5,
+                ).copy(channelId = "offers", channelName = "Alerts"),
+            )
+            eventDao.insert(
+                event(
+                    packageName = "com.example.shop",
+                    postedAtMillis = 300,
+                    epochDay = 6,
+                ).copy(channelId = "offers", channelName = "Future"),
+            )
+
+            assertEquals(
+                "Future",
+                eventDao
+                    .observeSources(limit = 10)
+                    .first()
+                    .single()
+                    .channelName,
+            )
+            assertEquals(
+                "Alerts",
+                database
+                    .dailyInsightDao()
+                    .channelBreakdownBetween(
+                        epochDay = 5,
+                        startMillis = 0,
+                        endMillis = 1_000,
+                        limit = 10,
+                    ).single()
+                    .channelName,
+            )
+        }
+
+    @Test
     fun categoryFeedbackTrimVictimsCanInvalidateTheirCompletedRollupBeforeDeletion() =
         runBlocking {
             val eventId =
@@ -156,6 +204,83 @@ class NotificationHistoryDaoInstrumentedTest {
                     .observeSourceGapDaysBetween(0, 10)
                     .first(),
             )
+        }
+
+    @Test
+    fun futureDatedEventCannotEvictCurrentHistoryAfterClockRollback() =
+        runBlocking {
+            val eventDao = database.notificationEventDao()
+            val futureId =
+                eventDao.insert(
+                    event(
+                        packageName = "com.example.future",
+                        postedAtMillis = 2_000,
+                        epochDay = 6,
+                    ),
+                )
+            val currentId =
+                eventDao.insert(
+                    event(
+                        packageName = "com.example.current",
+                        postedAtMillis = 1_000,
+                        epochDay = 5,
+                    ),
+                )
+
+            val deleted =
+                eventDao.deleteOverLimitWithSourceGaps(
+                    max = 1,
+                    legacyZoneId = ZoneOffset.UTC,
+                )
+
+            assertEquals(1, deleted)
+            assertEquals(null, eventDao.getDetail(futureId))
+            assertEquals(currentId, eventDao.getDetail(currentId)?.event?.id)
+        }
+
+    @Test
+    fun encryptedContentRetentionUsesPayloadCreationTimeAfterDelayedPromotion() =
+        runBlocking {
+            val eventDao = database.notificationEventDao()
+            val eventId =
+                eventDao.insertWithTraceAndTrim(
+                    event =
+                        NotificationEventEntity(
+                            packageName = "com.example.delayed",
+                            category = null,
+                            postedAtMillis = 100,
+                            action = StoredRuleAction.KEEP,
+                            matchedRuleId = null,
+                            // Promotion normalizes the durable row time, while the encrypted
+                            // payload retains when the notification was originally processed.
+                            recordedAtMillis = 1_000,
+                            hadEncryptedContent = true,
+                        ),
+                    trace = emptyList(),
+                    encryptedContent =
+                        EncryptedNotificationContentEntity(
+                            formatVersion = 1,
+                            aadId = "delayed",
+                            nonce = byteArrayOf(1),
+                            ciphertext = byteArrayOf(2),
+                            createdAtMillis = 100,
+                        ),
+                    max = 10,
+                    maxTraceEvents = 10,
+                    legacyZoneId = ZoneOffset.UTC,
+                )
+
+            val deleted =
+                eventDao.deleteEncryptedContentsOlderThan(
+                    cutoffMillis = 500,
+                    nowMillis = 1_000,
+                )
+
+            assertEquals(1, deleted)
+            assertEquals(1, eventDao.countAll())
+            assertEquals(0, eventDao.countEncryptedContents())
+            assertEquals(null, eventDao.getDetail(eventId)?.encryptedContent)
+            assertEquals(true, eventDao.getDetail(eventId)?.event?.hadEncryptedContent)
         }
 
     @Test
@@ -474,22 +599,23 @@ class NotificationHistoryDaoInstrumentedTest {
         }
 
     @Test
-    fun atomicInsertReturnsTheIdWhenTheInsertedOldRowIsImmediatelyTrimmed() =
+    fun atomicInsertKeepsTheNewestDatabaseRowAcrossClockRollback() =
         runBlocking {
             val dao = database.notificationEventDao()
-            dao.insert(
-                NotificationEventEntity(
-                    packageName = "com.example.newer",
-                    category = null,
-                    postedAtMillis = 200,
-                    postedEpochDay = 2,
-                    action = StoredRuleAction.KEEP,
-                    matchedRuleId = null,
-                    recordedAtMillis = 200,
-                ),
-            )
+            val futureId =
+                dao.insert(
+                    NotificationEventEntity(
+                        packageName = "com.example.newer",
+                        category = null,
+                        postedAtMillis = 200,
+                        postedEpochDay = 2,
+                        action = StoredRuleAction.KEEP,
+                        matchedRuleId = null,
+                        recordedAtMillis = 200,
+                    ),
+                )
 
-            val trimmedId =
+            val retainedId =
                 dao.insertWithTraceAndTrim(
                     event =
                         NotificationEventEntity(
@@ -526,16 +652,17 @@ class NotificationHistoryDaoInstrumentedTest {
                     legacyZoneId = ZoneOffset.UTC,
                 )
 
-            assertEquals(2L, trimmedId)
+            assertEquals(2L, retainedId)
             assertEquals(1, dao.countAll())
-            assertEquals(null, dao.getDetail(trimmedId))
-            assertEquals(0, dao.countEncryptedContents())
-            assertEquals(0, dao.observeCoverage().first().traceEventCount)
+            assertEquals(null, dao.getDetail(futureId))
+            assertEquals(retainedId, dao.getDetail(retainedId)?.event?.id)
+            assertEquals(1, dao.countEncryptedContents())
+            assertEquals(1, dao.observeCoverage().first().traceEventCount)
             assertEquals(
-                false,
+                true,
                 database.llmObservationDao().upsertIfEventExists(
                     LlmObservationEntity(
-                        notificationEventId = trimmedId,
+                        notificationEventId = retainedId,
                         packageName = "com.example.old",
                         predictedIsAdvertisement = false,
                         predictedIntent = "OTHER",
@@ -544,9 +671,9 @@ class NotificationHistoryDaoInstrumentedTest {
                     ),
                 ),
             )
-            assertEquals(0, database.llmObservationDao().countAll())
+            assertEquals(1, database.llmObservationDao().countAll())
             assertEquals(
-                listOf(1L),
+                listOf(2L),
                 database
                     .dailyInsightDao()
                     .observeSourceGapDaysBetween(0, 10)
@@ -581,6 +708,7 @@ class NotificationHistoryDaoInstrumentedTest {
         category = null,
         postedAtMillis = postedAtMillis,
         postedEpochDay = epochDay,
+        postedMinuteOfDay = 0,
         action = StoredRuleAction.KEEP,
         matchedRuleId = null,
         recordedAtMillis = postedAtMillis,

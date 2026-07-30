@@ -12,16 +12,26 @@ import shutil
 import signal
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any, Sequence
 
+from atomic_generation import publish_generation
 from semantic_contract import (
+    CONVERSION_BUNDLE_FILES,
+    CONVERSION_GENERATIONS_DIRECTORY,
+    CONVERSION_LABELS_FILENAME,
+    CONVERSION_MANIFEST_FILENAME,
+    CONVERSION_MODEL_FILENAME,
+    CONVERSION_POINTER_FILENAME,
+    CONVERSION_VOCAB_FILENAME,
     LABELS,
     MAX_SEQUENCE_LENGTH,
     RUNTIME_TEXT_FORMAT_VERSION,
     WordPieceTokenizer,
+    resolve_conversion_bundle,
     sha256_file,
-    validated_training_rows,
+    validated_training_rows_snapshot,
 )
 
 GIB = 1024**3
@@ -31,6 +41,10 @@ BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_DATASET = BASE_DIR / "artifacts" / "dataset-v6" / "dataset.jsonl"
 DEFAULT_BASE_MODEL = BASE_DIR / "artifacts" / "base-model" / "koelectra-small-v3"
 DEFAULT_OUTPUT = BASE_DIR / "artifacts" / "fallback-conv1d"
+MODEL_FILENAME = CONVERSION_MODEL_FILENAME
+VOCAB_FILENAME = CONVERSION_VOCAB_FILENAME
+LABELS_FILENAME = CONVERSION_LABELS_FILENAME
+MANIFEST_FILENAME = CONVERSION_MANIFEST_FILENAME
 
 
 class ResourceLimitExceeded(RuntimeError):
@@ -46,6 +60,27 @@ def _text_format_manifest() -> dict[str, str]:
             "strip outer whitespace, then normalize to NFC"
         ),
     }
+
+
+def _dataset_manifest(
+    records: Sequence[dict[str, Any]],
+    dataset_sha256: str,
+) -> dict[str, Any]:
+    return {
+        "sha256": dataset_sha256,
+        "rows": len(records),
+        "train_rows": sum(record["split"] == "train" for record in records),
+        "validation_rows": sum(
+            record["split"] == "validation" for record in records
+        ),
+        "test_rows": sum(record["split"] == "test" for record in records),
+    }
+
+
+def _load_dataset_snapshot(
+    path: Path,
+) -> tuple[list[dict[str, Any]], str]:
+    return validated_training_rows_snapshot(path)
 
 
 def _configure_process_environment() -> None:
@@ -77,10 +112,102 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             json.dump(value, stream, ensure_ascii=False, indent=2, sort_keys=True)
             stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(temporary_name, path)
+        _fsync_directory(path.parent)
     except BaseException:
         Path(temporary_name).unlink(missing_ok=True)
         raise
+
+
+def _write_bytes_synced(path: Path, value: bytes) -> None:
+    with path.open("xb") as stream:
+        stream.write(value)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def _copy_synced(source: Path, destination: Path) -> None:
+    with source.open("rb") as input_stream, destination.open("xb") as output_stream:
+        shutil.copyfileobj(input_stream, output_stream)
+        output_stream.flush()
+        os.fsync(output_stream.fileno())
+
+
+def _fsync_directory(directory: Path) -> None:
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _staged_bundle_paths(output: Path) -> dict[str, Path]:
+    transaction_id = uuid.uuid4().hex
+    return {
+        name: output / f".{name}.{transaction_id}.staging"
+        for name in CONVERSION_BUNDLE_FILES
+    }
+
+
+def _bundle_file_contracts(paths: dict[str, Path]) -> dict[str, dict[str, Any]]:
+    return {
+        name: {
+            "bytes": path.stat().st_size,
+            "sha256": sha256_file(path),
+        }
+        for name, path in paths.items()
+        if name != MANIFEST_FILENAME
+    }
+
+
+def _validate_conversion_bundle(
+    paths: dict[str, Path],
+    expected_contracts: dict[str, dict[str, Any]],
+) -> None:
+    if _bundle_file_contracts(paths) != expected_contracts:
+        raise ValueError("staged conversion bundle changed before publication")
+    manifest = json.loads(paths[MANIFEST_FILENAME].read_text(encoding="utf-8"))
+    if manifest.get("artifact_bundle") != expected_contracts:
+        raise ValueError("training manifest does not bind the staged conversion bundle")
+
+
+def _publish_staged_bundle(
+    output: Path,
+    staged: dict[str, Path],
+    validate,
+) -> None:
+    if set(staged) != set(CONVERSION_BUNDLE_FILES):
+        raise ValueError("conversion bundle staging is incomplete")
+    if any(path.parent != output or not path.is_file() for path in staged.values()):
+        raise ValueError("conversion bundle staging must contain same-directory regular files")
+    output.mkdir(parents=True, exist_ok=True)
+
+    def writer(generation: Path) -> None:
+        for name, source in staged.items():
+            _copy_synced(source, generation / name)
+
+    def validate_generation(generation: Path) -> None:
+        validate(
+            {
+                name: generation / name
+                for name in CONVERSION_BUNDLE_FILES
+            }
+        )
+
+    try:
+        publish_generation(
+            output,
+            pointer_name=CONVERSION_POINTER_FILENAME,
+            generations_name=CONVERSION_GENERATIONS_DIRECTORY,
+            required_files=CONVERSION_BUNDLE_FILES,
+            writer=writer,
+            validate=validate_generation,
+        )
+    finally:
+        for path in staged.values():
+            path.unlink(missing_ok=True)
 
 
 def _load_pretrained_embeddings(weights_path: Path, expected_shape: tuple[int, int]):
@@ -178,7 +305,7 @@ def _convert_to_dynamic_int8(tf, model, output_path: Path) -> dict[str, Any]:
         converter = tf.lite.TFLiteConverter.from_saved_model(temporary_directory)
         converter.optimizations = [tf.lite.Optimize.DEFAULT]
         converted = converter.convert()
-    output_path.write_bytes(converted)
+    _write_bytes_synced(output_path, converted)
 
     interpreter = tf.lite.Interpreter(model_path=str(output_path), num_threads=2)
     interpreter.allocate_tensors()
@@ -267,7 +394,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise FileNotFoundError(required)
 
     tokenizer = WordPieceTokenizer.from_file(vocab_path)
-    records = validated_training_rows(dataset_path)
+    records, dataset_sha256 = _load_dataset_snapshot(dataset_path)
     train_x, train_y, train_records = _encode_split(records, "train", tokenizer)
     validation_x, validation_y, validation_records = _encode_split(
         records, "validation", tokenizer
@@ -379,76 +506,84 @@ def main(argv: Sequence[str] | None = None) -> int:
         return_dict=True,
         verbose=0,
     )
-    model_path = output / "semantic_notification_classifier.tflite"
-    tensor_contract = _convert_to_dynamic_int8(tf, model, model_path)
-    shutil.copyfile(vocab_path, output / "semantic_vocab.txt")
-    (output / "semantic_labels.txt").write_text(
-        "".join(f"{label}\n" for label in LABELS),
-        encoding="utf-8",
-    )
+    staged = _staged_bundle_paths(output)
+    try:
+        model_path = staged[MODEL_FILENAME]
+        tensor_contract = _convert_to_dynamic_int8(tf, model, model_path)
+        _copy_synced(vocab_path, staged[VOCAB_FILENAME])
+        _write_bytes_synced(
+            staged[LABELS_FILENAME],
+            "".join(f"{label}\n" for label in LABELS).encode("utf-8"),
+        )
 
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    revision_file = base_model / "REVISION"
-    manifest = {
-        "schema_version": "alarmcontrol-semantic-model-v1",
-        "architecture": "koelectra-embedding-conv1d",
-        "quantization": "dynamic-range-int8",
-        "seed": arguments.seed,
-        "labels": list(LABELS),
-        "max_sequence_length": MAX_SEQUENCE_LENGTH,
-        "lowercase": False,
-        "text_separator": "single-space",
-        "text_format": _text_format_manifest(),
-        "dataset": {
-            "sha256": sha256_file(dataset_path),
-            "rows": len(records),
-            "train_rows": len(train_records),
-            "validation_rows": len(validation_records),
-            "test_rows": len(test_records),
-        },
-        "base_model": {
-            "name_or_path": str(base_model),
-            "revision": (
-                revision_file.read_text(encoding="utf-8").strip()
-                if revision_file.is_file()
-                else None
-            ),
-            "config_sha256": sha256_file(config_path),
-            "weights_sha256": sha256_file(weights_path),
-            "vocab_sha256": sha256_file(vocab_path),
-            "model_type": config.get("model_type"),
-        },
-        "training": {
-            "conversion_only": arguments.convert_only,
-            "epochs_requested": arguments.epochs,
-            "epochs_completed": (
-                None if arguments.convert_only else len(history_values.get("loss", []))
-            ),
-            "batch_size": arguments.batch_size,
-            "learning_rate": arguments.learning_rate,
-            "maximum_rss_bytes": _maximum_rss_bytes(),
-            "rss_limit_bytes": arguments.max_rss_bytes,
-            "history": history_values,
-        },
-        "keras_metrics": {
-            "validation": {
-                name: float(value) for name, value in validation_metrics.items()
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        revision_file = base_model / "REVISION"
+        artifact_bundle = _bundle_file_contracts(staged)
+        manifest = {
+            "schema_version": "alarmcontrol-semantic-model-v1",
+            "architecture": "koelectra-embedding-conv1d",
+            "quantization": "dynamic-range-int8",
+            "seed": arguments.seed,
+            "labels": list(LABELS),
+            "max_sequence_length": MAX_SEQUENCE_LENGTH,
+            "lowercase": False,
+            "text_separator": "single-space",
+            "text_format": _text_format_manifest(),
+            "dataset": _dataset_manifest(records, dataset_sha256),
+            "base_model": {
+                "name_or_path": str(base_model),
+                "revision": (
+                    revision_file.read_text(encoding="utf-8").strip()
+                    if revision_file.is_file()
+                    else None
+                ),
+                "config_sha256": sha256_file(config_path),
+                "weights_sha256": sha256_file(weights_path),
+                "vocab_sha256": sha256_file(vocab_path),
+                "model_type": config.get("model_type"),
             },
-            "test": {name: float(value) for name, value in test_metrics.items()},
-        },
-        "artifact": {
-            "file": model_path.name,
-            "bytes": model_path.stat().st_size,
-            "sha256": sha256_file(model_path),
-            "tensor_contract": tensor_contract,
-        },
-        "runtime": {
-            "tensorflow": tf.__version__,
-            "keras": tf.keras.__version__,
-            "python": platform.python_version(),
-        },
-    }
-    _atomic_json(output / "training_manifest.json", manifest)
+            "training": {
+                "conversion_only": arguments.convert_only,
+                "epochs_requested": arguments.epochs,
+                "epochs_completed": (
+                    None
+                    if arguments.convert_only
+                    else len(history_values.get("loss", []))
+                ),
+                "batch_size": arguments.batch_size,
+                "learning_rate": arguments.learning_rate,
+                "maximum_rss_bytes": _maximum_rss_bytes(),
+                "rss_limit_bytes": arguments.max_rss_bytes,
+                "history": history_values,
+            },
+            "keras_metrics": {
+                "validation": {
+                    name: float(value) for name, value in validation_metrics.items()
+                },
+                "test": {name: float(value) for name, value in test_metrics.items()},
+            },
+            "artifact": {
+                "file": MODEL_FILENAME,
+                "bytes": model_path.stat().st_size,
+                "sha256": sha256_file(model_path),
+                "tensor_contract": tensor_contract,
+            },
+            "artifact_bundle": artifact_bundle,
+            "runtime": {
+                "tensorflow": tf.__version__,
+                "keras": tf.keras.__version__,
+                "python": platform.python_version(),
+            },
+        }
+        _atomic_json(staged[MANIFEST_FILENAME], manifest)
+        _publish_staged_bundle(
+            output,
+            staged,
+            lambda paths: _validate_conversion_bundle(paths, artifact_bundle),
+        )
+    finally:
+        for path in staged.values():
+            path.unlink(missing_ok=True)
     print(json.dumps(manifest["artifact"], ensure_ascii=False, sort_keys=True))
     return 0
 

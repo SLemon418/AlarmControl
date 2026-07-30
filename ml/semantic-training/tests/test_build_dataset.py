@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from collections import Counter
 from pathlib import Path
+from unittest import mock
 
 TRAINING_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TRAINING_DIR))
@@ -80,6 +81,38 @@ def write_fixture_catalogs(catalog_dir: Path) -> None:
 
 
 class DatasetBuilderTest(unittest.TestCase):
+    def test_catalog_manifest_hash_uses_the_parsed_byte_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            catalog_dir = root / "catalog"
+            write_fixture_catalogs(catalog_dir)
+            target = catalog_dir / builder.CATALOG_FILENAMES["ko"][0]
+            original = target.read_bytes()
+            real_assign_splits = builder.assign_splits
+
+            def mutate_after_catalog_load(records):
+                target.write_bytes(original + b"\n")
+                return real_assign_splits(records)
+
+            with mock.patch.object(
+                builder,
+                "assign_splits",
+                side_effect=mutate_after_catalog_load,
+            ):
+                manifest = builder.build_dataset(
+                    catalog_dir,
+                    root / "output",
+                )
+
+            self.assertEqual(
+                hashlib.sha256(original).hexdigest(),
+                manifest["files"][f"catalog/{target.name}"]["sha256"],
+            )
+            self.assertNotEqual(
+                manifest["files"][f"catalog/{target.name}"]["sha256"],
+                hashlib.sha256(target.read_bytes()).hexdigest(),
+            )
+
     def test_build_is_deterministic_and_family_disjoint(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

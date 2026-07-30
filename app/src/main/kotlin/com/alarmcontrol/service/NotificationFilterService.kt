@@ -13,11 +13,13 @@ import com.alarmcontrol.core.feedback.AdObservation
 import com.alarmcontrol.core.filtering.DecisionTraceLane
 import com.alarmcontrol.core.filtering.DecisionTraceNode
 import com.alarmcontrol.core.filtering.MAX_PERSISTED_TRACE_NODES
+import com.alarmcontrol.core.filtering.NotificationActionOutbox
 import com.alarmcontrol.core.filtering.NotificationContent
 import com.alarmcontrol.core.filtering.NotificationContentVisibility
 import com.alarmcontrol.core.filtering.NotificationDecisionEnrichment
 import com.alarmcontrol.core.filtering.NotificationEvent
 import com.alarmcontrol.core.filtering.NotificationEventRepository
+import com.alarmcontrol.core.filtering.NotificationHistoryWriteFence
 import com.alarmcontrol.core.filtering.NotificationSnapshot
 import com.alarmcontrol.core.filtering.RateListenerKeyHasher
 import com.alarmcontrol.core.filtering.RateOccurrenceLifecycleGate
@@ -26,6 +28,7 @@ import com.alarmcontrol.core.filtering.RateSignal
 import com.alarmcontrol.core.filtering.RuleAction
 import com.alarmcontrol.core.filtering.RuleRepository
 import com.alarmcontrol.core.filtering.SemanticIntent
+import com.alarmcontrol.core.filtering.StagedNotificationAction
 import com.alarmcontrol.core.result.runCatchingPreservingCancellation
 import com.alarmcontrol.core.settings.FilteringActionGate
 import com.alarmcontrol.core.settings.SemanticAnalysisScope
@@ -47,15 +50,20 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.time.Clock
 import java.util.concurrent.atomic.AtomicLong
@@ -88,6 +96,10 @@ class NotificationFilterService : NotificationListenerService() {
     @Inject lateinit var ruleRepository: RuleRepository
 
     @Inject lateinit var eventRepository: NotificationEventRepository
+
+    @Inject lateinit var notificationActionOutbox: NotificationActionOutbox
+
+    @Inject lateinit var notificationHistoryWriteFence: NotificationHistoryWriteFence
 
     @Inject lateinit var adFeedbackRepository: AdFeedbackRepository
 
@@ -143,9 +155,11 @@ class NotificationFilterService : NotificationListenerService() {
     private val postCommitWorkDispatcher by lazy {
         PostCommitWorkDispatcher(
             persistenceScope = applicationScope,
-            enrichmentScope = scope,
+            enrichmentScope = applicationScope,
             persist = ::persistCommittedEvaluation,
             onPersistenceFailure = {
+                processingCoordinator.invalidateAll()
+                startActionOutboxRecovery(discardUnarmed = false)
                 Log.w(TAG, "Post-commit notification persistence failed")
             },
             onEnrichmentFailure = { Log.w(TAG, "Post-commit notification enrichment failed") },
@@ -164,13 +178,30 @@ class NotificationFilterService : NotificationListenerService() {
     private val contentExcludedPackages = MutableStateFlow<Set<String>?>(null)
     private var rulesJob: Job? = null
     private var settingsJob: Job? = null
+    private val actionOutboxRecovered = MutableStateFlow(false)
     private val semanticGeneration = AtomicLong(0)
+    private val actionOutboxRecoveryCoordinator by lazy {
+        ActionOutboxRecoveryCoordinator(
+            scope = scope,
+            recoverStartup = notificationActionOutbox::recover,
+            recoverArmed = notificationActionOutbox::recoverArmed,
+            publishReady = { ready -> actionOutboxRecovered.value = ready },
+            onFailure = {
+                Log.w(TAG, "Notification action outbox recovery failed; retrying")
+            },
+        )
+    }
 
     override fun onListenerConnected() {
         super.onListenerConnected()
+        startActionOutboxRecovery()
         rateLifecycleActor.connected()
         observeRulesIfNeeded()
         observeSettingsIfNeeded()
+    }
+
+    private fun startActionOutboxRecovery(discardUnarmed: Boolean = true) {
+        actionOutboxRecoveryCoordinator.request(discardUnarmed)
     }
 
     private fun observeRulesIfNeeded() {
@@ -290,16 +321,7 @@ class NotificationFilterService : NotificationListenerService() {
     private suspend fun updateFilteringGate(
         previousFiltering: Boolean?,
         filtering: Boolean,
-    ) {
-        when {
-            !filtering -> filteringActionGate.blockActions()
-            previousFiltering == null -> filteringActionGate.initializeFromPersistedState(true)
-            !previousFiltering -> {
-                filteringActionGate.requestRuleRefresh()
-                filteringActionGate.allowActions()
-            }
-        }
-    }
+    ) = reconcileListenerFilteringState(filteringActionGate, previousFiltering, filtering)
 
     private fun publishSettings(settings: ListenerSettings) {
         filteringEnabled.value = settings.filtering
@@ -362,15 +384,35 @@ class NotificationFilterService : NotificationListenerService() {
         val key = sbn.key
         val rateGeneration = rateLifecycleActor.currentLifecycleGeneration
         val rateOutcome = CompletableDeferred<RatePostOutcome>(parent = null)
-        processingCoordinator.submit(key, freshness = snapshot.postedAtMillis) { token ->
-            runCatchingPreservingCancellation {
-                when (rateOutcome.await()) {
-                    RatePostOutcome.Proceed -> evaluateAndApply(key, snapshot, token)
-                    RatePostOutcome.Stale -> Unit
+        val postCommitReservation = postCommitWorkDispatcher.tryReserve()
+        val processingJob =
+            postCommitReservation?.let { reservation ->
+                processingCoordinator.submit(key, freshness = snapshot.postedAtMillis) { token ->
+                    runCatchingPreservingCancellation {
+                        when (rateOutcome.await()) {
+                            RatePostOutcome.Proceed ->
+                                evaluateAndApply(
+                                    key = key,
+                                    snapshot = snapshot,
+                                    token = token,
+                                    postCommitReservation = reservation,
+                                )
+                            RatePostOutcome.Stale -> Unit
+                        }
+                    }
+                        // Fixed message only: notification content must never enter logs (§1/§3).
+                        .onFailure { Log.w(TAG, "Notification processing failed") }
                 }
             }
-                // Fixed message only: notification content must never enter logs (§1/§3).
-                .onFailure { Log.w(TAG, "Notification processing failed") }
+        if (processingJob == null) {
+            // A newer post must still invalidate older work when capacity is full, while a late
+            // callback must not evict fresher same-key work.
+            processingCoordinator.invalidateIfAtLeastAsFresh(key, snapshot.postedAtMillis)
+        }
+        postCommitReservation?.let { reservation ->
+            processingJob?.invokeOnCompletion {
+                postCommitWorkDispatcher.release(reservation)
+            }
         }
         // Submit first: a newer post invalidates older work even while this actor is in Room I/O.
         rateLifecycleActor.tryPost(
@@ -394,6 +436,7 @@ class NotificationFilterService : NotificationListenerService() {
     }
 
     override fun onListenerDisconnected() {
+        actionOutboxRecoveryCoordinator.stop()
         processingCoordinator.invalidateAll()
         rateLifecycleActor.disconnected()
         semanticGeneration.incrementAndGet()
@@ -401,14 +444,18 @@ class NotificationFilterService : NotificationListenerService() {
         super.onListenerDisconnected()
     }
 
+    // One state machine intentionally keeps stage, arm, platform commit, and durable handoff together.
+    @Suppress("LongMethod", "TooGenericExceptionCaught")
     private suspend fun evaluateAndApply(
         key: String,
         snapshot: NotificationSnapshot,
         token: NotificationProcessingCoordinator.ProcessingToken,
+        postCommitReservation: PostCommitWorkDispatcher.Reservation,
     ) {
         // Startup cache failures must fail open rather than hold listener work indefinitely.
         val runtime =
             withTimeoutOrNull(CACHE_READY_TIMEOUT_MILLIS) {
+                actionOutboxRecovered.filter { it }.first()
                 ListenerRuntime(
                     filtering = filteringEnabled.filterNotNull().first(),
                     semanticClassifierEnabled = semanticClassifierEnabled.filterNotNull().first(),
@@ -429,39 +476,98 @@ class NotificationFilterService : NotificationListenerService() {
                 runtime.semanticClassifierEnabled,
                 token,
             ) ?: return
-        if (
-            !commitFilteringAction(
-                token = token,
-                filteringActionGate = filteringActionGate,
-                tokenCommit = { action ->
-                    rateLifecycleActor.commitIfRateCountsCurrent(
-                        snapshot = evaluated.common,
-                        expectation = evaluated.rateCountExpectation,
-                    ) {
-                        token.commit(action)
+        val historyEpoch = notificationHistoryWriteFence.captureEpoch()
+        val prepared = prepareBasePersistedEvaluation(evaluated, runtime)
+        if (!token.isCurrent()) return
+        var stagedAction: StagedNotificationAction? = null
+        var preserveArmedActionForRecovery = false
+        var committed = false
+        try {
+            stagedAction =
+                withContext(NonCancellable) {
+                    notificationHistoryWriteFence.writeIfCurrent(historyEpoch) {
+                        notificationActionOutbox.stage(
+                            event = prepared.toEvent(evaluated),
+                            content = prepared.content,
+                        )
                     }
-                },
-            ) {
-                applyAction(key, evaluated.action)
+                }
+            if (stagedAction == null) return
+            if (!token.isCurrent()) return
+            val durableStage = stagedAction
+            committed =
+                commitFilteringAction(
+                    token = token,
+                    filteringActionGate = filteringActionGate,
+                    tokenCommit = { action ->
+                        armStagedActionThenCommit(
+                            outbox = notificationActionOutbox,
+                            staged = durableStage,
+                            rateCommit = { tokenCommit ->
+                                rateLifecycleActor.commitIfRateCountsCurrent(
+                                    snapshot = evaluated.common,
+                                    expectation = evaluated.rateCountExpectation,
+                                    commit = tokenCommit,
+                                )
+                            },
+                            tokenCommit = token::commit,
+                            onActionStart = { preserveArmedActionForRecovery = true },
+                            action = action,
+                        )
+                    },
+                ) {
+                    applyAction(key, evaluated.action)
+                }
+        } catch (error: Throwable) {
+            if (preserveArmedActionForRecovery) {
+                processingCoordinator.invalidateAll()
+                startActionOutboxRecovery(discardUnarmed = false)
             }
-        ) {
+            throw error
+        } finally {
+            discardStagedActionUnlessPreserved(
+                outbox = notificationActionOutbox,
+                staged = stagedAction,
+                preserveForRecovery = preserveArmedActionForRecovery,
+                onFailure = {
+                    Log.w(TAG, "Uncommitted notification action cleanup failed")
+                },
+            )
+        }
+        if (!committed) {
             return
         }
-        postCommitWorkDispatcher.submit(
-            PostCommitEvaluationRequest(
-                evaluated = evaluated,
-                runtime = runtime,
-            ),
-        )
+        try {
+            withContext(NonCancellable) {
+                postCommitWorkDispatcher.submit(
+                    reservation = postCommitReservation,
+                    request =
+                        PostCommitEvaluationRequest(
+                            evaluated = evaluated,
+                            runtime = runtime,
+                            historyEpoch = historyEpoch,
+                            stagedAction = requireNotNull(stagedAction),
+                            prepared = prepared,
+                        ),
+                )
+            }
+        } catch (error: Throwable) {
+            startActionOutboxRecovery(discardUnarmed = false)
+            throw error
+        }
     }
 
     private suspend fun processPostCommitEvaluation(request: PersistedPostCommitEvaluationRequest) {
         val runtime = request.original.runtime
         val originalEvaluation = request.original.evaluated
-        if (semanticGeneration.get() != originalEvaluation.semanticGeneration) return
         var evaluated = originalEvaluation
+        val optionalEnrichmentCurrent =
+            isPostCommitOptionalEnrichmentCurrent(
+                capturedGeneration = runtime.semanticGeneration,
+                currentGeneration = semanticGeneration.get(),
+            )
         val categoryClassification =
-            if (evaluated.monitorNeedsPostCommitMlCategory) {
+            if (optionalEnrichmentCurrent && evaluated.common.mlCategory == null) {
                 categoryRuleResolver.resolveMonitorAfterCommit(evaluated.common)
             } else {
                 null
@@ -470,7 +576,6 @@ class NotificationFilterService : NotificationListenerService() {
             categoryClassification?.let { classification ->
                 evaluated.common.copy(mlCategory = classification.category)
             } ?: evaluated.common
-        if (semanticGeneration.get() != evaluated.semanticGeneration) return
         val postCommitNeedsSemantic =
             evaluated.monitorNeedsPostCommitSemantic ||
                 matcher
@@ -484,10 +589,14 @@ class NotificationFilterService : NotificationListenerService() {
                 compiled = runtime.compiledRules,
                 existingClassification = evaluated.semanticClassification,
                 classifySemantic = postCommitNeedsSemantic,
-                classifierEnabled = runtime.semanticClassifierEnabled,
+                classifierEnabled =
+                    isPostCommitSemanticClassifierEnabled(
+                        capturedGeneration = runtime.semanticGeneration,
+                        currentGeneration = semanticGeneration.get(),
+                        currentEnabled = semanticClassifierEnabled.value,
+                    ),
                 existingDecisionTrace = evaluated.decisionTrace,
             )
-        if (semanticGeneration.get() != evaluated.semanticGeneration) return
         evaluated =
             evaluated.copy(
                 common = enrichedCommon,
@@ -506,19 +615,13 @@ class NotificationFilterService : NotificationListenerService() {
             )
         completePostCommitEnrichment(
             request = request,
-            originalEvaluation = originalEvaluation,
             evaluated = evaluated,
-            postCommitNeedsSemantic = postCommitNeedsSemantic,
-            postCommitNeedsDelayedObservation = monitorEvaluation.needsDelayedObservation,
         )
     }
 
     private suspend fun completePostCommitEnrichment(
         request: PersistedPostCommitEvaluationRequest,
-        originalEvaluation: EvaluatedNotification,
         evaluated: EvaluatedNotification,
-        postCommitNeedsSemantic: Boolean,
-        postCommitNeedsDelayedObservation: Boolean,
     ) {
         val runtime = request.original.runtime
         eventRepository.enrichRecordedDecision(
@@ -533,7 +636,6 @@ class NotificationFilterService : NotificationListenerService() {
                 ),
         )
         evaluated.semanticClassification
-            ?.takeUnless { it == originalEvaluation.semanticClassification }
             ?.let { result ->
                 recordSemanticObservation(
                     eventId = request.eventId,
@@ -542,26 +644,12 @@ class NotificationFilterService : NotificationListenerService() {
                     confidenceScore = result.confidence,
                 )
             }
-        val observationWasDeferred =
-            !originalEvaluation.needsDelayedSemanticObservation &&
-                (
-                    originalEvaluation.monitorNeedsPostCommitMlCategory ||
-                        originalEvaluation.monitorNeedsPostCommitSemantic
-                )
-        val shouldRunDeferredObservation =
-            postCommitNeedsDelayedObservation ||
-                (
-                    !postCommitNeedsSemantic &&
-                        runtime.semanticScope == SemanticAnalysisScope.ALL_NOTIFICATIONS
-                )
-        if (observationWasDeferred && shouldRunDeferredObservation) {
-            enqueueSemanticObservationIfEligible(
-                eventId = request.eventId,
-                snapshot = request.persistedSnapshot,
-                evaluated = evaluated,
-                runtime = runtime,
-            )
-        }
+        enqueueSemanticObservationIfEligible(
+            eventId = request.eventId,
+            snapshot = request.persistedSnapshot,
+            evaluated = evaluated,
+            runtime = runtime,
+        )
     }
 
     private suspend fun prepareEvaluation(
@@ -650,86 +738,41 @@ class NotificationFilterService : NotificationListenerService() {
     private suspend fun persistCommittedEvaluation(
         request: PostCommitEvaluationRequest,
     ): PersistedPostCommitEvaluationRequest? {
-        val evaluated = request.evaluated
-        val runtime = request.runtime
-        val analyticsClassification =
-            if (evaluated.common.mlCategory == null) {
-                withTimeoutOrNull(ANALYTICS_CLASSIFICATION_TIMEOUT_MILLIS) {
-                    classifier.classify(evaluated.common)
-                }
-            } else {
-                null
-            }
-        val persistedSnapshot =
-            evaluated.common.copy(
-                mlCategory = evaluated.common.mlCategory ?: analyticsClassification?.category,
-            )
-        val persistedMlConfidence = evaluated.mlConfidence ?: analyticsClassification?.confidence
-        val encryptedContent =
+        val prepared = request.prepared
+        val persistedSnapshot = prepared.snapshot
+        val eventId =
+            notificationHistoryWriteFence.writeIfCurrent(request.historyEpoch) {
+                checkNotNull(
+                    promoteStagedActionWithRetry(request.stagedAction) {
+                        notificationActionOutbox.promote(it)
+                    },
+                ) { "Armed notification action was missing during promotion" }
+            } ?: return null
+        return PersistedPostCommitEvaluationRequest(
+            original = request,
+            eventId = eventId,
+            persistedSnapshot = persistedSnapshot,
+        )
+    }
+
+    private fun prepareBasePersistedEvaluation(
+        evaluated: EvaluatedNotification,
+        runtime: ListenerRuntime,
+    ): PreparedPersistedEvaluation {
+        val persistedSnapshot = evaluated.common
+        val content =
             persistedSnapshot
                 .takeIf {
                     runtime.storeContent &&
                         it.contentVisibility != NotificationContentVisibility.SECRET &&
                         it.packageName !in runtime.excludedPackages
                 }?.let { NotificationContent(it.title, it.text) }
-        val eventId =
-            eventRepository.record(
-                NotificationEvent(
-                    packageName = persistedSnapshot.packageName,
-                    channelId = persistedSnapshot.channelId,
-                    channelName = persistedSnapshot.channelName,
-                    mlCategory = persistedSnapshot.mlCategory,
-                    mlConfidence = persistedMlConfidence,
-                    category = persistedSnapshot.category,
-                    postedAtMillis = persistedSnapshot.postedAtMillis,
-                    postedEpochDay = persistedSnapshot.postedEpochDay,
-                    postedMinuteOfDay = persistedSnapshot.postedMinuteOfDay,
-                    importance = persistedSnapshot.importance,
-                    isConversation = persistedSnapshot.isConversation,
-                    isForegroundService = persistedSnapshot.isForegroundService,
-                    action = evaluated.action,
-                    matchedRuleId = evaluated.matchedRuleId,
-                    monitoredRuleId = evaluated.monitoredRuleId,
-                    monitoredAction = evaluated.monitoredAction,
-                    decisionTrace = evaluated.decisionTrace,
-                    recordedAtMillis = clock.millis(),
-                ),
-                encryptedContent,
-            )
-        evaluated.semanticClassification?.let { result ->
-            recordSemanticObservation(
-                eventId = eventId,
-                packageName = persistedSnapshot.packageName,
-                intent = result.intent,
-                confidenceScore = result.confidence,
-            )
-        }
-        val observationNeedsPostCommitResolution =
-            !evaluated.needsDelayedSemanticObservation &&
-                (
-                    evaluated.monitorNeedsPostCommitMlCategory ||
-                        evaluated.monitorNeedsPostCommitSemantic
-                )
-        if (!observationNeedsPostCommitResolution) {
-            enqueueSemanticObservationIfEligible(
-                eventId = eventId,
-                snapshot = persistedSnapshot,
-                evaluated = evaluated,
-                runtime = runtime,
-            )
-        }
-        return if (
-            evaluated.monitorNeedsPostCommitMlCategory ||
-            evaluated.monitorNeedsPostCommitSemantic
-        ) {
-            PersistedPostCommitEvaluationRequest(
-                original = request,
-                eventId = eventId,
-                persistedSnapshot = persistedSnapshot,
-            )
-        } else {
-            null
-        }
+        return PreparedPersistedEvaluation(
+            snapshot = persistedSnapshot,
+            mlConfidence = evaluated.mlConfidence,
+            content = content,
+            recordedAtMillis = clock.millis(),
+        )
     }
 
     private fun enqueueSemanticObservationIfEligible(
@@ -869,11 +912,11 @@ class NotificationFilterService : NotificationListenerService() {
     }
 
     override fun onDestroy() {
+        actionOutboxRecoveryCoordinator.stop()
         processingCoordinator.invalidateAll()
         rateLifecycleActor.close()
         semanticGeneration.incrementAndGet()
         releaseLlmAsync()
-        postCommitWorkDispatcher.clearPending()
         postCommitWorkDispatcher.close()
         scope.cancel()
         super.onDestroy()
@@ -900,7 +943,6 @@ class NotificationFilterService : NotificationListenerService() {
 
         const val LLM_ANALYSIS_TIMEOUT_MILLIS = 10_000L
         const val CACHE_READY_TIMEOUT_MILLIS = 2_000L
-        const val ANALYTICS_CLASSIFICATION_TIMEOUT_MILLIS = 500L
         const val MAX_CACHE_RETRY_BACKOFF_STEP = 6
     }
 
@@ -939,13 +981,195 @@ class NotificationFilterService : NotificationListenerService() {
     private data class PostCommitEvaluationRequest(
         val evaluated: EvaluatedNotification,
         val runtime: ListenerRuntime,
+        val historyEpoch: NotificationHistoryWriteFence.Epoch,
+        val stagedAction: StagedNotificationAction,
+        val prepared: PreparedPersistedEvaluation,
     )
+
+    private data class PreparedPersistedEvaluation(
+        val snapshot: NotificationSnapshot,
+        val mlConfidence: Float?,
+        val content: NotificationContent?,
+        val recordedAtMillis: Long,
+    ) {
+        fun toEvent(evaluated: EvaluatedNotification): NotificationEvent =
+            NotificationEvent(
+                packageName = snapshot.packageName,
+                channelId = snapshot.channelId,
+                channelName = snapshot.channelName,
+                mlCategory = snapshot.mlCategory,
+                mlConfidence = mlConfidence,
+                category = snapshot.category,
+                postedAtMillis = snapshot.postedAtMillis,
+                postedEpochDay = snapshot.postedEpochDay,
+                postedMinuteOfDay = snapshot.postedMinuteOfDay,
+                importance = snapshot.importance,
+                isConversation = snapshot.isConversation,
+                isForegroundService = snapshot.isForegroundService,
+                action = evaluated.action,
+                matchedRuleId = evaluated.matchedRuleId,
+                monitoredRuleId = evaluated.monitoredRuleId,
+                monitoredAction = evaluated.monitoredAction,
+                decisionTrace = evaluated.decisionTrace,
+                recordedAtMillis = recordedAtMillis,
+            )
+    }
 
     private data class PersistedPostCommitEvaluationRequest(
         val original: PostCommitEvaluationRequest,
         val eventId: String,
         val persistedSnapshot: NotificationSnapshot,
     )
+}
+
+internal class ActionOutboxRecoveryCoordinator(
+    private val scope: CoroutineScope,
+    private val recoverStartup: suspend () -> Int,
+    private val recoverArmed: suspend () -> Int,
+    private val publishReady: (Boolean) -> Unit,
+    private val onFailure: (Throwable) -> Unit = {},
+) {
+    private val installationLock = Any()
+    private val recoveryMutex = Mutex()
+    private val generation = AtomicLong()
+    private var recoveryJob: Job? = null
+
+    fun request(discardUnarmed: Boolean): Long =
+        synchronized(installationLock) {
+            val requestGeneration = generation.incrementAndGet()
+            publishReady(false)
+            recoveryJob?.cancel()
+            recoveryJob =
+                scope.launch {
+                    recoveryMutex.withLock {
+                        val recovered =
+                            recoverActionOutboxUntilSuccess(
+                                isCurrent = { generation.get() == requestGeneration },
+                                recover = if (discardUnarmed) recoverStartup else recoverArmed,
+                                onFailure = onFailure,
+                            )
+                        if (recovered) {
+                            synchronized(installationLock) {
+                                if (generation.get() == requestGeneration) {
+                                    publishReady(true)
+                                }
+                            }
+                        }
+                    }
+                }
+            requestGeneration
+        }
+
+    fun stop() {
+        synchronized(installationLock) {
+            generation.incrementAndGet()
+            publishReady(false)
+            recoveryJob?.cancel()
+            recoveryJob = null
+        }
+    }
+}
+
+internal suspend fun reconcileListenerFilteringState(
+    filteringActionGate: FilteringActionGate,
+    previousFiltering: Boolean?,
+    filtering: Boolean,
+) {
+    when {
+        !filtering -> filteringActionGate.blockActions()
+        previousFiltering == null -> filteringActionGate.initializeFromPersistedState(true)
+        !previousFiltering -> filteringActionGate.requestRuleRefresh()
+    }
+}
+
+internal suspend fun <T> retryActionOutboxOperation(
+    maxAttempts: Int = 3,
+    initialDelayMillis: Long = 25L,
+    operation: suspend () -> T,
+): Result<T> {
+    require(maxAttempts > 0) { "Action outbox attempts must be positive" }
+    require(initialDelayMillis >= 0) { "Action outbox retry delay must not be negative" }
+    var lastFailure: Throwable? = null
+    repeat(maxAttempts) { attempt ->
+        val result = runCatchingPreservingCancellation { operation() }
+        if (result.isSuccess) return result
+        lastFailure = result.exceptionOrNull()
+        if (attempt + 1 < maxAttempts && initialDelayMillis > 0) {
+            delay(initialDelayMillis * (1L shl attempt))
+        }
+    }
+    return Result.failure(requireNotNull(lastFailure))
+}
+
+internal suspend fun promoteStagedActionWithRetry(
+    staged: StagedNotificationAction,
+    promote: suspend (StagedNotificationAction) -> String?,
+): String? =
+    retryActionOutboxOperation {
+        promote(staged)
+    }.getOrThrow()
+
+internal fun actionOutboxRecoveryDelayMillis(attempt: Int): Long {
+    require(attempt >= 0) { "Action outbox recovery attempt must not be negative" }
+    return (
+        INITIAL_ACTION_OUTBOX_RECOVERY_DELAY_MILLIS *
+            (1L shl attempt.coerceAtMost(MAX_ACTION_OUTBOX_RECOVERY_BACKOFF_EXPONENT))
+    ).coerceAtMost(MAX_ACTION_OUTBOX_RECOVERY_DELAY_MILLIS)
+}
+
+internal suspend fun recoverActionOutboxUntilSuccess(
+    isCurrent: () -> Boolean,
+    recover: suspend () -> Int,
+    onFailure: (Throwable) -> Unit = {},
+): Boolean {
+    var attempt = 0
+    while (isCurrent()) {
+        val result = runCatchingPreservingCancellation { recover() }
+        if (result.isSuccess) return true
+        result.exceptionOrNull()?.let(onFailure)
+        delay(actionOutboxRecoveryDelayMillis(attempt))
+        attempt = (attempt + 1).coerceAtMost(MAX_ACTION_OUTBOX_RECOVERY_BACKOFF_EXPONENT)
+    }
+    return false
+}
+
+private const val INITIAL_ACTION_OUTBOX_RECOVERY_DELAY_MILLIS = 100L
+private const val MAX_ACTION_OUTBOX_RECOVERY_DELAY_MILLIS = 5_000L
+private const val MAX_ACTION_OUTBOX_RECOVERY_BACKOFF_EXPONENT = 6
+
+/**
+ * Arms before entering callback-visible locks, then preserves rate-to-token order before Binder.
+ */
+internal fun armStagedActionThenCommit(
+    outbox: NotificationActionOutbox,
+    staged: StagedNotificationAction,
+    rateCommit: (tokenCommit: () -> Boolean) -> Boolean,
+    tokenCommit: (action: () -> Unit) -> Boolean,
+    onActionStart: () -> Unit = {},
+    action: () -> Unit,
+): Boolean {
+    val armed = runCatching { outbox.arm(staged) }.getOrDefault(false)
+    if (!armed) return false
+    return rateCommit {
+        tokenCommit {
+            onActionStart()
+            action()
+        }
+    }
+}
+
+internal suspend fun discardStagedActionUnlessPreserved(
+    outbox: NotificationActionOutbox,
+    staged: StagedNotificationAction?,
+    preserveForRecovery: Boolean,
+    onFailure: (Throwable) -> Unit = {},
+) {
+    if (staged == null || preserveForRecovery) return
+    withContext(NonCancellable) {
+        runCatchingPreservingCancellation {
+            outbox.discard(staged)
+        }.onFailure(onFailure)
+    }
 }
 
 internal fun destructiveRateCountExpectation(
@@ -1169,6 +1393,19 @@ private data class ResolvedDecision(
     val action: RuleAction?,
     val ruleId: String?,
 )
+
+internal fun isPostCommitOptionalEnrichmentCurrent(
+    capturedGeneration: Long,
+    currentGeneration: Long,
+): Boolean = capturedGeneration == currentGeneration
+
+internal fun isPostCommitSemanticClassifierEnabled(
+    capturedGeneration: Long,
+    currentGeneration: Long,
+    currentEnabled: Boolean?,
+): Boolean =
+    isPostCommitOptionalEnrichmentCurrent(capturedGeneration, currentGeneration) &&
+        currentEnabled == true
 
 internal suspend fun analyzeDelayedSemanticObservation(
     snapshot: NotificationSnapshot,

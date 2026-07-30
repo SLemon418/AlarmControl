@@ -1,9 +1,17 @@
 package com.alarmcontrol.ui.app
 
+import android.content.Context
+import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34])
 class AppIdentityResolverTest {
     @Test
     fun `display label removes control and bidirectional override characters`() {
@@ -28,5 +36,15 @@ class AppIdentityResolverTest {
 
         assertEquals(99, sanitized.length)
         assertFalse(Character.isHighSurrogate(sanitized.last()))
+    }
+
+    @Test
+    fun `missing package identity is marked as a package fallback`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+
+        val identity = AndroidAppIdentityResolver(context).resolve("com.example.definitely.missing")
+
+        assertEquals("com.example.definitely.missing", identity.label)
+        assertTrue(identity.isPackageFallback)
     }
 }

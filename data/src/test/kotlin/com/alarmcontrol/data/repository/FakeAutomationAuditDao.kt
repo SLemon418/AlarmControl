@@ -20,7 +20,7 @@ class FakeAutomationAuditDao : AutomationAuditDao {
     override suspend fun trim(maxRows: Int): Int {
         lastTrimLimit = maxRows
         val before = rows.value.size
-        rows.value = rows.value.sortedByDescending { it.requestedAtMillis }.take(maxRows)
+        rows.value = rows.value.sortedByDescending { it.id }.take(maxRows)
         return before - rows.value.size
     }
 

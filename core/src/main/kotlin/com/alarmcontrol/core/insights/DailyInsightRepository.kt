@@ -1,5 +1,6 @@
 package com.alarmcontrol.core.insights
 
+import com.alarmcontrol.core.privacy.ScopedDataWriteFence
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -20,6 +21,26 @@ interface DailyInsightRepository {
         generatedAtMillis: Long,
         topRules: Int,
     ): DailyInsight
+
+    /**
+     * Aggregates only while the caller's selective-clear generation remains current. UI correction
+     * flows use this to prevent a refresh started before clear from recreating a deleted rollup.
+     */
+    suspend fun aggregateAndStoreIfCurrent(
+        epochDay: Long,
+        startMillis: Long,
+        endMillis: Long,
+        generatedAtMillis: Long,
+        topRules: Int,
+        dailyInsightEpoch: ScopedDataWriteFence.Epoch,
+    ): DailyInsight =
+        aggregateAndStore(
+            epochDay,
+            startMillis,
+            endMillis,
+            generatedAtMillis,
+            topRules,
+        )
 
     /** Streams the most recent [limit] daily insights, newest day first, for the UI. */
     fun observeRecent(limit: Int): Flow<List<DailyInsight>>

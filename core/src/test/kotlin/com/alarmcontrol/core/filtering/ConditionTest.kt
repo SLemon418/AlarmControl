@@ -64,6 +64,10 @@ class ConditionTest {
         assertTrue(Condition.CategoryEquals("alarm").matches(snapshot()))
         assertFalse(Condition.CategoryEquals("alarm").matches(snapshot(category = null)))
         assertTrue(Condition.ChannelEquals("alarms").matches(snapshot()))
+        assertEquals(
+            ConditionResult.UNKNOWN,
+            Condition.ChannelEquals("alarms").evaluate(snapshot(channelId = null)),
+        )
     }
 
     @Test

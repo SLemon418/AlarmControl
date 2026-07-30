@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -172,6 +173,58 @@ class StorageGuardTest(unittest.TestCase):
 
         self.assertTrue(outside_parent.exists())
         (outside_parent / storage_guard.DISPOSABLE_MARKER).unlink()
+
+    def test_parent_symlink_swap_cannot_redirect_candidate_deletion(self) -> None:
+        candidate = self._disposable("cache/victim", b"inside")
+        outside = self.root.parent / f"{self.root.name}-outside-swap"
+        outside_candidate = outside / "victim"
+        outside_candidate.mkdir(parents=True)
+        outside_payload = outside_candidate / "artifact.bin"
+        outside_payload.write_bytes(b"outside")
+        detached_container = self.root / "cache-detached"
+        original_snapshot = storage_guard._snapshot_open_directory
+        resolved_candidate = candidate.resolve()
+        swapped = False
+
+        def swap_after_snapshot(*args, **kwargs):
+            nonlocal swapped
+            tree = original_snapshot(*args, **kwargs)
+            if tree.path == resolved_candidate and not swapped:
+                (self.root / "cache").rename(detached_container)
+                try:
+                    (self.root / "cache").symlink_to(
+                        outside,
+                        target_is_directory=True,
+                    )
+                except (NotImplementedError, OSError) as error:
+                    self.skipTest(f"symlink unavailable: {error}")
+                swapped = True
+            return tree
+
+        try:
+            with mock.patch.object(
+                storage_guard,
+                "_snapshot_open_directory",
+                side_effect=swap_after_snapshot,
+            ):
+                deleted = storage_guard.delete_candidate(self.root, candidate)
+
+            self.assertGreater(deleted, 0)
+            self.assertTrue(swapped)
+            self.assertTrue(outside_payload.is_file())
+            self.assertFalse((detached_container / "victim").exists())
+        finally:
+            swapped_link = self.root / "cache"
+            if swapped_link.is_symlink():
+                swapped_link.unlink()
+            if detached_container.exists():
+                detached_container.rename(self.root / "cache")
+            if outside_payload.exists():
+                outside_payload.unlink()
+            if outside_candidate.exists():
+                outside_candidate.rmdir()
+            if outside.exists():
+                outside.rmdir()
 
     def test_low_filesystem_free_space_is_a_hard_stop(self) -> None:
         current = storage_guard.tree_bytes(self.root)

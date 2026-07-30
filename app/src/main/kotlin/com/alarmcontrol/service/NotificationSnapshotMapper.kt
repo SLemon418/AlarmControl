@@ -89,14 +89,15 @@ internal fun CharSequence?.boundedNotificationText(maxChars: Int): String? {
     }
 }
 
-internal fun Bundle.boundedNotificationExtra(
+internal fun Bundle?.boundedNotificationExtra(
     maxChars: Int,
     vararg keys: String,
 ): String? {
+    val extras = this ?: return null
     keys.forEach { key ->
         val value =
             try {
-                getCharSequence(key)
+                extras.getCharSequence(key)
             } catch (_: RuntimeException) {
                 null
             }

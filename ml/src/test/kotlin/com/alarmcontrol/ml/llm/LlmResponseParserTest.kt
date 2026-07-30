@@ -71,6 +71,40 @@ class LlmResponseParserTest {
     }
 
     @Test
+    fun `rejects unknown fields even when required fields are valid`() {
+        val result =
+            LlmResponseParser.parse(
+                """
+                {
+                  "intent":"MARKETING",
+                  "confidence":0.8,
+                  "reason":"x",
+                  "second_intent":"TRANSACTIONAL"
+                }
+                """.trimIndent(),
+            )
+
+        assertEquals(LlmAnalysisResult.UNAVAILABLE, result)
+    }
+
+    @Test
+    fun `rejects duplicate contradictory intent fields`() {
+        val result =
+            LlmResponseParser.parse(
+                """
+                {
+                  "intent":"MARKETING",
+                  "intent":"TRANSACTIONAL",
+                  "confidence":0.8,
+                  "reason":"x"
+                }
+                """.trimIndent(),
+            )
+
+        assertEquals(LlmAnalysisResult.UNAVAILABLE, result)
+    }
+
+    @Test
     fun `non-JSON or empty output yields UNAVAILABLE`() {
         assertEquals(LlmAnalysisResult.UNAVAILABLE, LlmResponseParser.parse("I cannot answer that."))
         assertEquals(LlmAnalysisResult.UNAVAILABLE, LlmResponseParser.parse(""))

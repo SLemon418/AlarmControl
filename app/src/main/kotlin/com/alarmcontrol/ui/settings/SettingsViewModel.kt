@@ -111,6 +111,7 @@ class SettingsViewModel
                     combine(
                         settingsRepository.eventRetentionDays,
                         settingsRepository.dailyInsightRetentionDays,
+                        settingsRepository.notificationContentRetentionDays,
                         ::RetentionSettings,
                     )
                 val contentSettings =
@@ -155,6 +156,7 @@ class SettingsViewModel
                         llm.classifierEnabled,
                         retention.eventDays,
                         retention.insightDays,
+                        retention.contentDays,
                         general.dynamicColor,
                         content.enabled,
                         content.excludedPackages,
@@ -194,6 +196,7 @@ class SettingsViewModel
                     dailyInsightRetentionDays = settings.insightDays,
                     dynamicColorEnabled = settings.dynamicColor,
                     notificationContentStorageEnabled = settings.contentStorageEnabled,
+                    notificationContentRetentionDays = settings.contentDays,
                     contentExcludedPackages = settings.contentExcludedPackages,
                     contentSourceApps = settings.contentSources,
                     llmModelStatus = llmState.toUiStatus(),
@@ -278,6 +281,10 @@ class SettingsViewModel
             launchSettingUpdate { settingsRepository.setDailyInsightRetentionDays(days) }
         }
 
+        fun setNotificationContentRetentionDays(days: Int) {
+            launchSettingUpdate { settingsRepository.setNotificationContentRetentionDays(days) }
+        }
+
         fun setDynamicColorEnabled(enabled: Boolean) {
             launchSettingUpdate { settingsRepository.setDynamicColorEnabled(enabled) }
         }
@@ -301,9 +308,6 @@ class SettingsViewModel
         ) {
             launchSettingUpdate {
                 settingsRepository.setContentPackageExcluded(packageName, excluded)
-                if (excluded) {
-                    localDataRepository.reconcileStoredNotificationContentPolicy()
-                }
             }
         }
 
@@ -350,7 +354,6 @@ class SettingsViewModel
                         }
                     }
                     attempt { localDataRepository.clearAllDatabaseData() }
-                    attempt { settingsRepository.reset() }
                     messages.value =
                         if (failures.isEmpty()) {
                             uiText(R.string.message_clear_all_done)
@@ -363,39 +366,41 @@ class SettingsViewModel
 
         fun removeLlmModel() {
             viewModelScope.launch(ioDispatcher) {
-                messages.value =
-                    when (llmManager.removeModel()) {
-                        is DataResult.Success -> {
-                            settingsMutationMutex.withLock {
+                settingsMutationMutex.withLock {
+                    messages.value =
+                        when (llmManager.removeModel()) {
+                            is DataResult.Success -> {
                                 settingsRepository.setLlmAnalysisEnabled(false)
+                                uiText(R.string.message_model_removed)
                             }
-                            uiText(R.string.message_model_removed)
+                            is DataResult.Failure -> uiText(R.string.message_model_remove_failed)
+                            DataResult.Loading -> uiText(R.string.message_model_installing)
                         }
-                        is DataResult.Failure -> uiText(R.string.message_model_remove_failed)
-                        DataResult.Loading -> uiText(R.string.message_model_installing)
-                    }
+                }
             }
         }
 
         /** Installs and validates a model selected through SAF; the app never downloads one. */
         fun importLlmModelFrom(uri: Uri) {
             viewModelScope.launch(ioDispatcher) {
-                val result: DataResult<Unit> =
-                    runCatchingPreservingCancellation {
-                        appContext.contentResolver.openInputStream(uri)?.use { source ->
-                            llmManager.installModel(source, appContext.contentResolver.contentLength(uri))
-                        } ?: DataResult.Failure(IllegalStateException("Model source unavailable"))
-                    }.getOrElse { error -> DataResult.Failure(error) }
+                settingsMutationMutex.withLock {
+                    val result: DataResult<Unit> =
+                        runCatchingPreservingCancellation {
+                            appContext.contentResolver.openInputStream(uri)?.use { source ->
+                                llmManager.installModel(source, appContext.contentResolver.contentLength(uri))
+                            } ?: DataResult.Failure(IllegalStateException("Model source unavailable"))
+                        }.getOrElse { error -> DataResult.Failure(error) }
 
-                messages.value =
-                    when (result) {
-                        is DataResult.Success -> {
-                            if (!settingsRepository.llmAnalysisEnabled.first()) llmManager.close()
-                            uiText(R.string.message_model_installed)
+                    messages.value =
+                        when (result) {
+                            is DataResult.Success -> {
+                                if (!settingsRepository.llmAnalysisEnabled.first()) llmManager.close()
+                                uiText(R.string.message_model_installed)
+                            }
+                            is DataResult.Failure -> uiText(R.string.message_model_install_failed)
+                            DataResult.Loading -> uiText(R.string.message_model_installing)
                         }
-                        is DataResult.Failure -> uiText(R.string.message_model_install_failed)
-                        DataResult.Loading -> uiText(R.string.message_model_installing)
-                    }
+                }
             }
         }
 
@@ -609,12 +614,16 @@ class SettingsViewModel
 
         private fun takePendingRestore(): Pair<PendingRestore, BackupPreviewUi>? =
             synchronized(backupRestoreLock) {
-                val pending = pendingRestore ?: return@synchronized null
-                val preview = backupPreview.value ?: return@synchronized null
-                if (!preview.selection.hasSelection) return@synchronized null
-                pendingRestore = null
-                backupPreview.value = null
-                pending to preview
+                val pending = pendingRestore
+                val preview = backupPreview.value
+                if (pending == null || preview == null || !preview.selection.hasSelection) {
+                    clearPendingRestoreLocked()
+                    null
+                } else {
+                    pendingRestore = null
+                    backupPreview.value = null
+                    pending to preview
+                }
             }
 
         private suspend fun previewBackup(
@@ -659,6 +668,7 @@ class SettingsViewModel
             val semanticClassifierEnabled: Boolean,
             val eventDays: Int,
             val insightDays: Int,
+            val contentDays: Int,
             val dynamicColor: Boolean,
             val contentStorageEnabled: Boolean,
             val contentExcludedPackages: Set<String>,
@@ -684,6 +694,7 @@ class SettingsViewModel
         private data class RetentionSettings(
             val eventDays: Int,
             val insightDays: Int,
+            val contentDays: Int,
         )
 
         private data class ContentSettings(

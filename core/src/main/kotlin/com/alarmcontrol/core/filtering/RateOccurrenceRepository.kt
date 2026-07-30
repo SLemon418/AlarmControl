@@ -53,6 +53,7 @@ sealed interface RateOccurrenceSeed {
 
 enum class RateOccurrenceIncompleteReason {
     PERSISTED_GAP,
+    FUTURE_OCCURRENCE,
     HISTORY_LIMIT_EXCEEDED,
 }
 

@@ -23,14 +23,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from atomic_generation import _fsync_directory, publish_generation
 from semantic_contract import (
     ContractError,
     LABELS,
     MAX_SEQUENCE_LENGTH,
     RUNTIME_TEXT_FORMAT_VERSION,
+    TRAINING_GENERATION_REQUIRED_FILES,
+    TRAINING_WEIGHT_FILENAMES,
     notification_text,
     sha256_file,
-    validated_training_rows,
+    training_generation_names,
+    validated_training_rows_snapshot,
 )
 
 INTENTS = LABELS
@@ -155,11 +159,19 @@ def _require_local_base_model(path: Path) -> Path:
 def load_dataset(path: Path) -> dict[str, list[TrainingExample]]:
     """Load balanced train/validation rows from the deterministic dataset."""
 
+    return load_dataset_snapshot(path)[0]
+
+
+def load_dataset_snapshot(
+    path: Path,
+) -> tuple[dict[str, list[TrainingExample]], str]:
+    """Load examples and hash the exact dataset bytes that produced them."""
+
     if not path.is_file():
         raise TrainingInputError(f"dataset does not exist: {path}")
     try:
-        rows = validated_training_rows(path)
-    except (ContractError, OSError) as error:
+        rows, dataset_sha256 = validated_training_rows_snapshot(path)
+    except (ContractError, OSError, UnicodeError) as error:
         raise TrainingInputError(str(error)) from error
     split_examples = {"train": [], "validation": []}
     for row in rows:
@@ -190,7 +202,7 @@ def load_dataset(path: Path) -> dict[str, list[TrainingExample]]:
                 f"{split} must be class-balanced across {list(INTENTS)}; "
                 f"counts={dict(sorted(counts.items()))}"
             )
-    return split_examples
+    return split_examples, dataset_sha256
 
 
 def configure_offline_cpu_environment() -> None:
@@ -230,6 +242,7 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        _fsync_directory(path.parent)
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
@@ -239,28 +252,28 @@ def _replace_directory(
     target: Path,
     writer: Callable[[Path], None],
 ) -> None:
-    """Replace a model bundle only after its new staging directory is complete."""
+    """Publish a complete immutable model generation through one pointer."""
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(
-        tempfile.mkdtemp(prefix=f".{target.name}.staging-", dir=target.parent)
+    pointer_name, generations_name = training_generation_names(target)
+    publish_generation(
+        target.parent,
+        pointer_name=pointer_name,
+        generations_name=generations_name,
+        required_files=TRAINING_GENERATION_REQUIRED_FILES,
+        writer=writer,
+        validate=_validate_checkpoint_bundle,
     )
-    backup = target.with_name(f".{target.name}.previous")
-    try:
-        writer(staging)
-        if backup.exists():
-            shutil.rmtree(backup)
-        if target.exists():
-            target.rename(backup)
-        staging.rename(target)
-        if backup.exists():
-            shutil.rmtree(backup)
-    except BaseException:
-        if not target.exists() and backup.exists():
-            backup.rename(target)
-        if staging.exists():
-            shutil.rmtree(staging)
-        raise
+
+
+def _validate_checkpoint_bundle(directory: Path) -> None:
+    if not any(
+        (directory / name).is_file()
+        and not (directory / name).is_symlink()
+        for name in TRAINING_WEIGHT_FILENAMES
+    ):
+        raise TrainingInputError(
+            f"checkpoint has no supported regular weight file: {directory}"
+        )
 
 
 def _counts_by_intent(
@@ -298,6 +311,7 @@ def _copy_base_vocab(base_model: Path, target: Path) -> bool:
 def initial_manifest(
     options: TrainingOptions,
     examples: dict[str, list[TrainingExample]],
+    dataset_sha256: str,
     torch_version: str,
     transformers_version: str,
 ) -> dict[str, Any]:
@@ -336,7 +350,7 @@ def initial_manifest(
                 else None
             ),
             "dataset": str(options.dataset),
-            "dataset_sha256": sha256_file(options.dataset),
+            "dataset_sha256": dataset_sha256,
             "rows_by_split": {
                 split: len(rows) for split, rows in examples.items()
             },
@@ -437,13 +451,14 @@ def run_training(options: TrainingOptions) -> int:
         ) from error
 
     seed_everything(torch, options.seed)
-    examples = load_dataset(options.dataset)
+    examples, dataset_sha256 = load_dataset_snapshot(options.dataset)
     enforce_memory_ceiling(options.max_rss_bytes, "before model load")
     options.output.mkdir(parents=True, exist_ok=True)
     manifest_path = options.output / "training_manifest.json"
     manifest = initial_manifest(
         options,
         examples,
+        dataset_sha256,
         torch.__version__,
         transformers.__version__,
     )

@@ -146,4 +146,40 @@ class FeedbackRepositoryImplTest {
             assertEquals(CategoryFeedbackDao.MAX_RETAINED_ROWS, dao.countAll())
             assertEquals(emptyList<Long>(), dao.inserted.mapNotNull { it.notificationEventId })
         }
+
+    @Test
+    fun `clock rollback cannot make future corrections evict a new local vote`() =
+        runTest {
+            val rollbackRepository =
+                FeedbackRepositoryImpl(
+                    dao,
+                    dailyInsightDao,
+                    ImmediateTransactionRunner(),
+                )
+            dao.seedRows(
+                List(CategoryFeedbackDao.MAX_RETAINED_ROWS) { index ->
+                    CategoryFeedbackEntity(
+                        id = index + 1L,
+                        packageName = "com.future.$index",
+                        notificationEventId = if (index == 0) 77L else null,
+                        predictedLabel = "promotion",
+                        correctedLabel = "social",
+                        recordedAtMillis = 1_000L + index,
+                    )
+                },
+            )
+
+            rollbackRepository.recordCorrection(
+                CategoryFeedback(
+                    packageName = "com.current",
+                    predictedLabel = "promotion",
+                    correctedLabel = "news",
+                    recordedAtMillis = 500,
+                ),
+            )
+
+            assertEquals(CategoryFeedbackDao.MAX_RETAINED_ROWS, dao.countAll())
+            assertEquals(1, dao.inserted.count { it.packageName == "com.current" })
+            assertEquals(listOf(77L), dailyInsightDao.invalidatedEventIds)
+        }
 }

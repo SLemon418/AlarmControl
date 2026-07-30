@@ -7,15 +7,17 @@ import com.alarmcontrol.core.automation.AutomationOutcome
 import com.alarmcontrol.core.automation.AutomationSource
 import com.alarmcontrol.core.automation.AutomationTarget
 import com.alarmcontrol.core.filtering.RuleRepository
+import com.alarmcontrol.core.privacy.LocalDataResetWriteFence
 import com.alarmcontrol.core.profile.ProfileRepository
 import com.alarmcontrol.core.result.runCatchingPreservingCancellation
+import com.alarmcontrol.core.settings.ExternalAutomationAuthorizationFence
+import com.alarmcontrol.core.settings.SettingsMutationFence
 import com.alarmcontrol.core.settings.SettingsRepository
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import java.security.MessageDigest
 import java.time.Clock
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -35,6 +37,10 @@ class ProfileController
         private val auditRepository: AutomationAuditRepository = NoOpAutomationAuditRepository,
         private val clock: Clock = Clock.systemUTC(),
         private val rateLimiter: AutomationRateLimiter = AutomationRateLimiter(),
+        private val localDataResetWriteFence: LocalDataResetWriteFence = LocalDataResetWriteFence(),
+        private val externalAutomationAuthorizationFence: ExternalAutomationAuthorizationFence =
+            ExternalAutomationAuthorizationFence(),
+        private val settingsMutationFence: SettingsMutationFence = SettingsMutationFence(),
     ) {
         private val operationMutex = Mutex()
 
@@ -50,57 +56,71 @@ class ProfileController
             profileId: String?,
             enabled: Boolean,
             source: AutomationSource = AutomationSource.IN_APP,
-        ): Int =
-            operationMutex.withLock {
-                val target = profileId.normalizedTarget()
-                val result =
-                    if (profileId.isInvalidTarget(target)) {
-                        ApplyResult(AutomationOutcome.INVALID, 0)
-                    } else {
-                        applyEnabled(target, enabled)
-                    }
-                record(
-                    source,
-                    if (enabled) AutomationOperation.ENABLE else AutomationOperation.DISABLE,
-                    profileId,
-                    result,
-                )
-                result.changedCount
+        ): Int {
+            val resetEpoch = localDataResetWriteFence.captureEpoch()
+            return settingsMutationFence.withLock {
+                operationMutex.withLock {
+                    val target = profileId.normalizedTarget()
+                    val result =
+                        if (profileId.isInvalidTarget(target)) {
+                            ApplyResult(AutomationOutcome.INVALID, 0)
+                        } else {
+                            applyEnabled(target, enabled, resetEpoch)
+                        }
+                    record(
+                        source,
+                        if (enabled) AutomationOperation.ENABLE else AutomationOperation.DISABLE,
+                        profileId,
+                        result,
+                        resetEpoch,
+                    )
+                    result.changedCount
+                }
             }
+        }
 
         /** Toggles a profile (or the master gate when [profileId] is blank) for first-party actions. */
         suspend fun toggle(
             profileId: String?,
             source: AutomationSource = AutomationSource.IN_APP,
-        ): Int =
-            operationMutex.withLock {
-                val target = profileId.normalizedTarget()
-                val result =
-                    if (profileId.isInvalidTarget(target)) {
-                        ApplyResult(AutomationOutcome.INVALID, 0)
-                    } else if (target == null) {
-                        applyEnabled(null, enabled = !settingsRepository.filteringEnabled.first())
-                    } else {
-                        when (val resolution = resolveRuleIds(target)) {
-                            TargetResolution.Invalid -> ApplyResult(AutomationOutcome.INVALID, 0)
-                            TargetResolution.NotFound -> ApplyResult(AutomationOutcome.NOT_FOUND, 0)
-                            is TargetResolution.Resolved -> {
-                                val currentRules =
-                                    ruleRepository.observeRules().first().filter { it.id in resolution.ruleIds }
-                                if (currentRules.isEmpty()) {
-                                    ApplyResult(AutomationOutcome.NOT_FOUND, 0)
-                                } else {
-                                    applyResolved(
-                                        resolution.ruleIds,
-                                        enabled = currentRules.any { !it.enabled },
-                                    )
+        ): Int {
+            val resetEpoch = localDataResetWriteFence.captureEpoch()
+            return settingsMutationFence.withLock {
+                operationMutex.withLock {
+                    val target = profileId.normalizedTarget()
+                    val result =
+                        if (profileId.isInvalidTarget(target)) {
+                            ApplyResult(AutomationOutcome.INVALID, 0)
+                        } else if (target == null) {
+                            applyEnabled(
+                                null,
+                                enabled = !settingsRepository.filteringEnabled.first(),
+                                resetEpoch = resetEpoch,
+                            )
+                        } else {
+                            when (val resolution = resolveRuleIds(target)) {
+                                TargetResolution.Invalid -> ApplyResult(AutomationOutcome.INVALID, 0)
+                                TargetResolution.NotFound -> ApplyResult(AutomationOutcome.NOT_FOUND, 0)
+                                is TargetResolution.Resolved -> {
+                                    val currentRules =
+                                        ruleRepository.observeRules().first().filter { it.id in resolution.ruleIds }
+                                    if (currentRules.isEmpty()) {
+                                        ApplyResult(AutomationOutcome.NOT_FOUND, 0)
+                                    } else {
+                                        applyResolved(
+                                            resolution.ruleIds,
+                                            enabled = currentRules.any { !it.enabled },
+                                            resetEpoch = resetEpoch,
+                                        )
+                                    }
                                 }
                             }
                         }
-                    }
-                record(source, AutomationOperation.TOGGLE, profileId, result)
-                result.changedCount
+                    record(source, AutomationOperation.TOGGLE, profileId, result, resetEpoch)
+                    result.changedCount
+                }
             }
+        }
 
         /**
          * The **external** path used by the exported receiver. Applies [setEnabled] only when the user
@@ -111,61 +131,102 @@ class ProfileController
             profileId: String?,
             enabled: Boolean,
             token: String?,
-        ): Int =
-            operationMutex.withLock {
-                val operation = if (enabled) AutomationOperation.ENABLE else AutomationOperation.DISABLE
-                val target = profileId.normalizedTarget()
-                val now = clock.millis()
-                var shouldRecord = true
-                val result =
-                    when {
-                        !settingsRepository.externalAutomationEnabled.first() ->
-                            ApplyResult(AutomationOutcome.DISABLED, 0).also {
-                                shouldRecord = rateLimiter.tryAcquireRejected(now)
-                            }
-                        !token.isAuthorized(settingsRepository.externalAutomationToken.first()) ->
-                            ApplyResult(AutomationOutcome.UNAUTHORIZED, 0).also {
-                                shouldRecord = rateLimiter.tryAcquireRejected(now)
-                            }
-                        profileId.isInvalidTarget(target) ->
-                            ApplyResult(AutomationOutcome.INVALID, 0).also {
-                                shouldRecord = rateLimiter.tryAcquireRejected(now)
-                            }
-                        !rateLimiter.tryAcquire(now) ->
-                            ApplyResult(AutomationOutcome.THROTTLED, 0).also {
-                                shouldRecord = rateLimiter.tryAcquireRejected(now)
-                            }
-                        else -> applyEnabled(target, enabled)
-                    }
-                if (shouldRecord) {
-                    record(AutomationSource.EXTERNAL, operation, profileId, result)
-                }
-                result.changedCount
+        ): Int {
+            val resetEpoch = localDataResetWriteFence.captureEpoch()
+            val initialRejection = authorizationRejection(token)
+            if (initialRejection != null) {
+                recordRejectedExternalAutomation(profileId, enabled, initialRejection, resetEpoch)
+                return 0
             }
+            return settingsMutationFence.withLock {
+                operationMutex.withLock {
+                    val operation = if (enabled) AutomationOperation.ENABLE else AutomationOperation.DISABLE
+                    val target = profileId.normalizedTarget()
+                    val now = clock.millis()
+                    var shouldRecord = true
+                    val result =
+                        externalAutomationAuthorizationFence.withLock {
+                            when {
+                                !settingsRepository.externalAutomationEnabled.first() ->
+                                    ApplyResult(AutomationOutcome.DISABLED, 0).also {
+                                        shouldRecord = rateLimiter.tryAcquireRejected(now)
+                                    }
+                                !token.isAuthorizedAutomationToken(
+                                    settingsRepository.externalAutomationToken.first(),
+                                ) ->
+                                    ApplyResult(AutomationOutcome.UNAUTHORIZED, 0).also {
+                                        shouldRecord = rateLimiter.tryAcquireRejected(now)
+                                    }
+                                profileId.isInvalidTarget(target) ->
+                                    ApplyResult(AutomationOutcome.INVALID, 0).also {
+                                        shouldRecord = rateLimiter.tryAcquireRejected(now)
+                                    }
+                                !rateLimiter.tryAcquire(now) ->
+                                    ApplyResult(AutomationOutcome.THROTTLED, 0).also {
+                                        shouldRecord = rateLimiter.tryAcquireRejected(now)
+                                    }
+                                else -> applyEnabled(target, enabled, resetEpoch)
+                            }
+                        }
+                    if (shouldRecord) {
+                        record(AutomationSource.EXTERNAL, operation, profileId, result, resetEpoch)
+                    }
+                    result.changedCount
+                }
+            }
+        }
+
+        private suspend fun recordRejectedExternalAutomation(
+            profileId: String?,
+            enabled: Boolean,
+            outcome: AutomationOutcome,
+            resetEpoch: LocalDataResetWriteFence.Epoch,
+        ) {
+            if (!rateLimiter.tryAcquireRejected(clock.millis())) return
+            record(
+                source = AutomationSource.EXTERNAL,
+                operation = if (enabled) AutomationOperation.ENABLE else AutomationOperation.DISABLE,
+                profileId = profileId,
+                result = ApplyResult(outcome, 0),
+                resetEpoch = resetEpoch,
+            )
+        }
+
+        private suspend fun authorizationRejection(token: String?): AutomationOutcome? {
+            if (!settingsRepository.externalAutomationEnabled.first()) {
+                return AutomationOutcome.DISABLED
+            }
+            if (!token.isAuthorizedAutomationToken(settingsRepository.externalAutomationToken.first())) {
+                return AutomationOutcome.UNAUTHORIZED
+            }
+            return null
+        }
 
         private suspend fun applyEnabled(
             profileId: String?,
             enabled: Boolean,
+            resetEpoch: LocalDataResetWriteFence.Epoch,
         ): ApplyResult {
             if (profileId == null) {
                 if (settingsRepository.filteringEnabled.first() == enabled) {
                     return ApplyResult(AutomationOutcome.NO_CHANGE, 0)
                 }
-                settingsRepository.setFilteringEnabled(enabled)
+                settingsRepository.setFilteringEnabledIfCurrentWhileMutationLocked(enabled, resetEpoch)
                 return ApplyResult(AutomationOutcome.APPLIED, 1)
             }
             return when (val resolution = resolveRuleIds(profileId)) {
                 TargetResolution.Invalid -> ApplyResult(AutomationOutcome.INVALID, 0)
                 TargetResolution.NotFound -> ApplyResult(AutomationOutcome.NOT_FOUND, 0)
-                is TargetResolution.Resolved -> applyResolved(resolution.ruleIds, enabled)
+                is TargetResolution.Resolved -> applyResolved(resolution.ruleIds, enabled, resetEpoch)
             }
         }
 
         private suspend fun applyResolved(
             ruleIds: Set<String>,
             enabled: Boolean,
+            resetEpoch: LocalDataResetWriteFence.Epoch,
         ): ApplyResult {
-            val changed = ruleRepository.setRulesEnabled(ruleIds, enabled)
+            val changed = ruleRepository.setRulesEnabledIfCurrent(ruleIds, enabled, resetEpoch)
             return ApplyResult(
                 outcome = if (changed > 0) AutomationOutcome.APPLIED else AutomationOutcome.NO_CHANGE,
                 changedCount = changed,
@@ -177,9 +238,10 @@ class ProfileController
             operation: AutomationOperation,
             profileId: String?,
             result: ApplyResult,
+            resetEpoch: LocalDataResetWriteFence.Epoch,
         ) {
             runCatchingPreservingCancellation {
-                auditRepository.record(
+                auditRepository.recordIfCurrent(
                     AutomationAuditEntry(
                         requestedAtMillis = clock.millis(),
                         source = source,
@@ -188,6 +250,7 @@ class ProfileController
                         outcome = result.outcome,
                         changedCount = result.changedCount,
                     ),
+                    resetEpoch,
                 )
             }
         }
@@ -230,7 +293,6 @@ class ProfileController
 
         private companion object {
             const val MAX_TARGET_CHARS = 200
-            const val MAX_TOKEN_CHARS = 128
         }
 
         private fun String?.normalizedTarget(): String? {
@@ -243,21 +305,6 @@ class ProfileController
 
         private fun String?.isInvalidTarget(normalized: String?): Boolean =
             this != null && isNotBlank() && normalized == null
-
-        private fun String?.isAuthorized(expected: String): Boolean {
-            if (this == null) return false
-            if (isEmpty()) return false
-            if (length > MAX_TOKEN_CHARS) return false
-            if (expected.isEmpty()) return false
-            val suppliedBytes = toByteArray(Charsets.UTF_8)
-            val expectedBytes = expected.toByteArray(Charsets.UTF_8)
-            return try {
-                MessageDigest.isEqual(suppliedBytes, expectedBytes)
-            } finally {
-                suppliedBytes.fill(0)
-                expectedBytes.fill(0)
-            }
-        }
     }
 
 private data object NoOpAutomationAuditRepository : AutomationAuditRepository {

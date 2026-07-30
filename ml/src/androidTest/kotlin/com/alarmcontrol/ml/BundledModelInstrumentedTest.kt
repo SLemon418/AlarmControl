@@ -36,11 +36,13 @@ class BundledModelInstrumentedTest {
 
     private lateinit var vocabulary: List<String>
     private lateinit var labels: List<String>
+    private lateinit var assetSet: ModelAssets.ClassifierAssetSet
 
     @Before
     fun loadBundledAssets() {
-        vocabulary = ModelAssets.readLines(context, MlConfig.VOCAB_ASSET)
-        labels = ModelAssets.readLines(context, MlConfig.LABELS_ASSET)
+        assetSet = ModelAssets.classifierAssetSet(context)
+        vocabulary = ModelAssets.readLines(context, assetSet.vocabulary)
+        labels = ModelAssets.readLines(context, assetSet.labels)
         assertTrue("vocab.txt must be bundled in :ml assets", vocabulary.isNotEmpty())
         assertEquals(
             "labels.txt must match the model's output order",
@@ -52,7 +54,7 @@ class BundledModelInstrumentedTest {
     /** The core compatibility check: the real runtime loads the model and returns a valid distribution. */
     @Test
     fun realRuntimeLoadsAndRunsBundledModel() {
-        val backend = BundledTfLiteBackend(context, MlConfig.MODEL_ASSET, labels.size)
+        val backend = BundledTfLiteBackend(context, assetSet.model, labels.size)
         val features = BagOfWordsFeatureExtractor(vocabulary).extract("flash sale 50% off")
 
         val scores = backend.run(features)
@@ -66,7 +68,7 @@ class BundledModelInstrumentedTest {
     @Test
     fun classifiesHeldOutFixtures() =
         runTest {
-            val classifier = newClassifier(MlConfig.MODEL_ASSET)
+            val classifier = newClassifier(assetSet.model)
             for ((text, expected) in HELD_OUT_FIXTURES) {
                 val result = classifier.classify(snapshot(text))
                 assertNotNull("Expected a categorization for: $text", result)
@@ -94,7 +96,7 @@ class BundledModelInstrumentedTest {
     @Test
     fun unloadableModelDegradesToNull() =
         runTest {
-            val classifier = newClassifier(modelAsset = MlConfig.VOCAB_ASSET)
+            val classifier = newClassifier(modelAsset = assetSet.vocabulary)
             assertNull(classifier.classify(snapshot("Huge weekend sale, 40% off everything")))
         }
 

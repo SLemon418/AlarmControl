@@ -8,11 +8,14 @@ import com.alarmcontrol.core.insights.ChannelCount
 import com.alarmcontrol.core.insights.HourInsightCount
 import com.alarmcontrol.core.insights.RuleTriggerCount
 import com.alarmcontrol.core.insights.SemanticIntentCount
+import com.alarmcontrol.core.privacy.DailyInsightWriteFence
+import com.alarmcontrol.core.privacy.StaleLocalDataWriteException
 import com.alarmcontrol.data.db.entity.NotificationEventEntity
 import com.alarmcontrol.data.db.model.StoredRuleAction
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -152,6 +155,70 @@ class DailyInsightRepositoryImplTest {
             assertEquals(true, insight.appBreakdownComplete)
             assertEquals(true, insight.channelBreakdownComplete)
             assertEquals("Offers", insight.channelBreakdown.single().channelName)
+        }
+
+    @Test
+    fun `legacy event without a posted minute marks an otherwise complete rollup incomplete`() =
+        runTest {
+            dao.seedEvents(
+                event(
+                    packageName = "com.legacy",
+                    category = "alarm",
+                    action = StoredRuleAction.KEEP,
+                    ruleId = null,
+                    recordedAtMillis = 1_100,
+                    postedEpochDay = null,
+                    postedMinuteOfDay = null,
+                ),
+                event(
+                    packageName = "com.current",
+                    category = "alarm",
+                    action = StoredRuleAction.CANCEL,
+                    ruleId = 1,
+                    recordedAtMillis = 1_200,
+                    postedEpochDay = 5,
+                    postedMinuteOfDay = 9 * 60,
+                ),
+            )
+
+            val insight = repository.aggregateAndStore(5, start, end, 1_500, topRules = 5)
+            val persisted = repository.observeRecent(10).first().single()
+
+            assertEquals(2, insight.totalNotifications)
+            assertEquals(listOf(HourInsightCount(9, 1, 1)), insight.hourBreakdown)
+            assertFalse(insight.sourceComplete)
+            assertFalse(persisted.sourceComplete)
+        }
+
+    @Test
+    fun `channel breakdown uses the latest event name instead of lexical maximum`() =
+        runTest {
+            dao.seedEvents(
+                event(
+                    packageName = "com.shop",
+                    category = null,
+                    action = StoredRuleAction.KEEP,
+                    ruleId = null,
+                    recordedAtMillis = 1_100,
+                    id = 10,
+                    channelId = "offers",
+                    channelName = "Zulu",
+                ),
+                event(
+                    packageName = "com.shop",
+                    category = null,
+                    action = StoredRuleAction.KEEP,
+                    ruleId = null,
+                    recordedAtMillis = 1_200,
+                    id = 11,
+                    channelId = "offers",
+                    channelName = "Alerts",
+                ),
+            )
+
+            val insight = repository.aggregateAndStore(5, start, end, 1_500, topRules = 5)
+
+            assertEquals("Alerts", insight.channelBreakdown.single().channelName)
         }
 
     @Test
@@ -390,6 +457,35 @@ class DailyInsightRepositoryImplTest {
             assertEquals(false, insight.sourceComplete)
             assertEquals(false, persisted.sourceComplete)
             assertEquals(listOf(5L, 9L), dao.observeSourceGapDaysBetween(0, 20).first())
+        }
+
+    @Test
+    fun `aggregation captured before selective clear cannot recreate a deleted rollup`() =
+        runTest {
+            val fence = DailyInsightWriteFence()
+            val target =
+                DailyInsightRepositoryImpl(
+                    dao = dao,
+                    transactionRunner = ImmediateTransactionRunner(),
+                    dailyInsightWriteFence = fence,
+                )
+            val staleEpoch = fence.captureEpoch()
+            fence.clearAndAdvanceOnCommit { onCommitted -> onCommitted() }
+
+            val failure =
+                runCatching {
+                    target.aggregateAndStoreIfCurrent(
+                        epochDay = 5,
+                        startMillis = start,
+                        endMillis = end,
+                        generatedAtMillis = 1_500,
+                        topRules = 5,
+                        dailyInsightEpoch = staleEpoch,
+                    )
+                }.exceptionOrNull()
+
+            assertTrue(failure is StaleLocalDataWriteException)
+            assertTrue(target.observeRecent(10).first().isEmpty())
         }
 
     @Test

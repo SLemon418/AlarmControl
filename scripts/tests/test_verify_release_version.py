@@ -95,6 +95,37 @@ class ReleaseVersionVerificationTest(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.VerificationError, "does not match"):
             MODULE.verify(self.repo, "v2.0.0", "HEAD")
 
+    def test_rejects_leading_zero_in_release_tag(self) -> None:
+        self.release("01.0.0", 1)
+
+        with self.assertRaisesRegex(MODULE.VerificationError, "without leading zeroes"):
+            MODULE.verify(self.repo, "v01.0.0", "HEAD")
+
+    def test_rejects_leading_zero_in_version_name(self) -> None:
+        self.release("1.0.0", 1)
+        version_file = self.repo / "app" / "version.json"
+        version_file.write_text(
+            json.dumps({"versionCode": 2, "versionName": "1.01.0"}) + "\n",
+            encoding="utf-8",
+        )
+        self.git("add", ".")
+        self.git("commit", "-qm", "invalid leading zero")
+        self.git("tag", "v1.1.0")
+
+        with self.assertRaisesRegex(MODULE.VerificationError, "without leading zeroes"):
+            MODULE.verify(self.repo, "v1.1.0", "HEAD")
+
+    def test_rejects_version_name_rollback_even_when_version_code_increases(self) -> None:
+        self.release("1.0.0", 1)
+        self.release("2.0.0", 2)
+        self.release("1.5.0", 3)
+
+        with self.assertRaisesRegex(
+            MODULE.VerificationError,
+            "v1.5.0 versionName must be greater than prior release v2.0.0",
+        ):
+            MODULE.verify(self.repo, "v1.5.0", "HEAD")
+
     def test_rejects_late_tag_behind_newer_release_on_history_ref(self) -> None:
         self.release("1.0.0", 1)
         version_file = self.repo / "app" / "version.json"

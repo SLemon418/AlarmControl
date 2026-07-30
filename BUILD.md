@@ -41,9 +41,10 @@ Do not commit `local.properties`.
 ./gradlew --dependency-verification strict check
 ```
 
-`offlineGuard` fails if either merged app manifest declares `android.permission.INTERNET`, or if a
-forbidden networking dependency appears on the debug/release runtime classpath. The
-`:baselineprofile:offlineManifestGuard` task applies the same rule to both test APK variants.
+`offlineGuard` fails if a debug/release app or `:app`/`:data`/`:ml` debug instrumented-test APK
+manifest declares `android.permission.INTERNET`, or if a forbidden networking dependency appears
+on any matching runtime classpath. The `:baselineprofile:offlineManifestGuard` task applies the
+same rule to both test APK variants.
 WorkManager's read-only `ACCESS_NETWORK_STATE` permission is allowed.
 
 The repository includes JVM/Robolectric suites plus connected Room, LiteRT, and app-runtime
@@ -102,16 +103,17 @@ artifact with its existing AAB limits.
 
 ### GitHub Release publication
 
-The release workflow runs only when a `vMAJOR.MINOR.PATCH` tag is pushed. The tag's version must
-exactly match the APK `versionName`, and its commit must be an ancestor of the repository's default
-branch. Every published APK must also increase `versionCode` above the previous release; Android
-will not install an equal or lower code as an update. Update both values in `app/version.json`.
+The release workflow runs only when a strict `vMAJOR.MINOR.PATCH` tag without leading zeroes is
+pushed. The tag's version must exactly match the APK `versionName`, and its commit must be an
+ancestor of the repository's default branch. Every published APK must increase both semantic
+`versionName` and Android `versionCode` above every prior release; Android will not install an equal
+or lower code as an update. Update both values in `app/version.json`.
 The workflow checks the committed metadata from every strict SemVer release tag reachable from the
-checked-out default-branch ref, not just tags behind the new tag. It rejects a code that is not
-greater than all of them, so adding a release tag later to an older commit cannot bypass the check;
-the first such release is allowed. This comparison uses only the history fetched by checkout and
-performs no additional network request. Before signing or publication, the workflow also confirms
-that the checkout is the tag's exact commit and runs the `:data`, `:ml`, and `:app`
+checked-out default-branch ref, not just tags behind the new tag. It rejects either value when it is
+not greater than all of them, so adding a release tag later to an older commit cannot bypass the
+check; the first such release is allowed. This comparison uses only the history fetched by checkout
+and performs no additional network request. Before signing or publication, the workflow also
+confirms that the checkout is the tag's exact commit and runs the `:data`, `:ml`, and `:app`
 `pixel2Api34DebugAndroidTest` suites on that checkout. Configure the `github-release` Environment
 with:
 
@@ -173,7 +175,7 @@ The JVM suite does not replace tests that require the real Android runtime. With
 or emulator, run:
 
 ```sh
-./gradlew :data:connectedDebugAndroidTest  # supported Room v1/v2/v3/v10/v12 -> v15 migrations
+./gradlew :data:connectedDebugAndroidTest  # supported Room v1/v2/v3/v10/v12/v15 -> v16 migrations
 ./gradlew :ml:connectedDebugAndroidTest    # bundled TFLite runtime/asset compatibility
 ./gradlew :app:connectedDebugAndroidTest   # Activity/Hilt, listener, automation, LLM fallback, WorkManager
 ```
@@ -194,7 +196,7 @@ Without a device, compile the test APKs to catch source, resource, and dependenc
 
 Do not report a compiled instrumented-test APK as an executed device test.
 
-The Room tests exercise every real path from seeded v1, v2, v3, v10, and v12 databases to v15,
+The Room tests exercise every real path from seeded v1, v2, v3, v10, v12, and v15 databases to v16,
 including migration of legacy binary advertisement observations into seven-way semantic-intent priors. The
 `:baselineprofile:assemble` lifecycle is configured to compile both generator variants without
 starting a device; profile collection remains an explicit command.

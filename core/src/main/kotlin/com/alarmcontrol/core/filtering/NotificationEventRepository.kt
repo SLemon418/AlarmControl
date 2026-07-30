@@ -57,8 +57,11 @@ interface NotificationEventRepository {
         legacyEndMillis: Long,
     ): Flow<ActionBreakdown>
 
-    /** Excludes [eventId] from local statistics; it cannot restore a dismissed notification. */
-    suspend fun undo(eventId: String)
+    /**
+     * Excludes [eventId] from local statistics; it cannot restore a dismissed notification. Returns
+     * false when the event no longer exists.
+     */
+    suspend fun undo(eventId: String): Boolean
 
     /** Deletes events recorded before [cutoffMillis] (retention housekeeping); returns rows removed. */
     suspend fun purgeEventsOlderThan(cutoffMillis: Long): Int

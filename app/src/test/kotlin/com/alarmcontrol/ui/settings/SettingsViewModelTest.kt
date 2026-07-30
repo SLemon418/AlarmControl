@@ -13,7 +13,6 @@ import com.alarmcontrol.core.backup.BackupPreview
 import com.alarmcontrol.core.backup.BackupRepository
 import com.alarmcontrol.core.backup.BackupSummary
 import com.alarmcontrol.core.filtering.NotificationHistoryRepository
-import com.alarmcontrol.core.privacy.ClearedDataCounts
 import com.alarmcontrol.core.privacy.LocalDataRepository
 import com.alarmcontrol.core.result.DataResult
 import com.alarmcontrol.ml.llm.LlmBackgroundAnalysisEligibility
@@ -29,6 +28,7 @@ import com.alarmcontrol.ui.app.AppIdentityResolver
 import com.alarmcontrol.ui.app.AppIdentityUi
 import io.mockk.coEvery
 import io.mockk.coVerify
+import io.mockk.coVerifyOrder
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
@@ -41,6 +41,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -51,6 +52,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 
@@ -226,22 +228,21 @@ class SettingsViewModelTest {
         }
 
     @Test
-    fun `excluding a package blocks future capture before deleting its ciphertext`() =
+    fun `package exclusion delegates the atomic privacy mutation to settings`() =
         runTest {
-            coEvery { localDataRepository.reconcileStoredNotificationContentPolicy() } answers {
-                repository.operationLog += "reconcile-content"
-                ClearedDataCounts()
-            }
             val vm = viewModel()
 
             vm.setContentPackageExcluded("com.example.bank", excluded = true)
 
-            assertTrue(
-                repository.operationLog.indexOf("excluded-package:com.example.bank:true") <
-                    repository.operationLog.indexOf("reconcile-content"),
+            assertEquals(
+                listOf("excluded-package:com.example.bank:true"),
+                repository.operationLog,
             )
             assertTrue(repository.operationLog.none { it.startsWith("excluded-packages:") })
-            coVerify(exactly = 1) { localDataRepository.reconcileStoredNotificationContentPolicy() }
+            coVerify(exactly = 0) { localDataRepository.reconcileStoredNotificationContentPolicy() }
+            coVerify(exactly = 0) {
+                localDataRepository.clearStoredNotificationContentForPackage(any())
+            }
         }
 
     @Test
@@ -333,8 +334,15 @@ class SettingsViewModelTest {
                 awaitUntil { it.eventRetentionDays == 30 }
                 vm.setEventRetentionDays(90)
                 vm.setDailyInsightRetentionDays(730)
-                val state = awaitUntil { it.eventRetentionDays == 90 && it.dailyInsightRetentionDays == 730 }
+                vm.setNotificationContentRetentionDays(14)
+                val state =
+                    awaitUntil {
+                        it.eventRetentionDays == 90 &&
+                            it.dailyInsightRetentionDays == 730 &&
+                            it.notificationContentRetentionDays == 14
+                    }
                 assertTrue(state.eventRetentionDays == 90)
+                assertTrue(state.notificationContentStorageEnabled)
                 cancelAndIgnoreRemainingEvents()
             }
         }
@@ -388,19 +396,51 @@ class SettingsViewModelTest {
         }
 
     @Test
-    fun `clear all removes imported model before clearing local repositories`() =
+    fun `clear all removes imported model before delegating the coordinated local reset`() =
         runTest {
             val vm = viewModel()
 
             vm.clearAllData()
 
-            assertTrue(repository.operationLog.indexOf("filtering:false") < repository.operationLog.indexOf("reset"))
+            assertTrue("filtering:false" in repository.operationLog)
+            assertFalse("reset" in repository.operationLog)
             coVerify { llmManager.removeModel() }
             coVerify { localDataRepository.clearAllDatabaseData() }
         }
 
+    @OptIn(ExperimentalCoroutinesApi::class)
     @Test
-    fun `clear all continues database and settings cleanup after model failures`() =
+    fun `clear all waits for an active model import and removes the imported model`() =
+        runTest {
+            val uri = mockk<Uri>()
+            val installStarted = CompletableDeferred<Unit>()
+            val allowInstall = CompletableDeferred<Unit>()
+            every { contentResolver.openInputStream(uri) } returns ByteArrayInputStream(byteArrayOf(1))
+            coEvery { llmManager.installModel(any(), null) } coAnswers {
+                installStarted.complete(Unit)
+                allowInstall.await()
+                DataResult.Success(Unit)
+            }
+            val vm = viewModel()
+
+            vm.importLlmModelFrom(uri)
+            installStarted.await()
+            vm.clearAllData()
+            runCurrent()
+
+            coVerify(exactly = 0) { llmManager.removeModel() }
+            allowInstall.complete(Unit)
+            advanceUntilIdle()
+
+            coVerifyOrder {
+                llmManager.installModel(any(), null)
+                llmManager.removeModel()
+                localDataRepository.clearAllDatabaseData()
+            }
+        }
+
+    @Test
+    fun `clear all continues the coordinated local reset after model failures`() =
         runTest {
             coEvery { llmManager.close() } throws IllegalStateException("engine busy")
             coEvery { llmManager.removeModel() } returns
@@ -410,8 +450,8 @@ class SettingsViewModelTest {
             vm.clearAllData()
 
             coVerify(exactly = 1) { localDataRepository.clearAllDatabaseData() }
-            assertTrue("reset" in repository.operationLog)
             assertFalse(repository.filteringEnabled.first())
+            assertFalse("reset" in repository.operationLog)
         }
 
     @Test
@@ -424,7 +464,7 @@ class SettingsViewModelTest {
             vm.clearAllData()
 
             assertFalse(repository.filteringEnabled.first())
-            assertTrue("reset" in repository.operationLog)
+            assertFalse("reset" in repository.operationLog)
             coVerify(exactly = 1) { localDataRepository.clearAllDatabaseData() }
         }
 
@@ -634,6 +674,53 @@ class SettingsViewModelTest {
             assertTrue(suppliedPassphrase.all { it == '\u0000' })
             assertTrue(retainedPassphrase?.all { it == '\u0000' } == true)
             assertTrue(receivedPassphrase.contentEquals("password".toCharArray()))
+            coVerify(exactly = 0) { backupRepository.restore(any(), any(), any()) }
+        }
+
+    @Test
+    fun `confirming an empty restore selection clears the retained passphrase`() =
+        runTest {
+            val uri = mockk<Uri>()
+            val serialized = "encrypted local backup"
+            val suppliedPassphrase = "password".toCharArray()
+            var retainedPassphrase: CharArray? = null
+            every { contentResolver.openInputStream(uri) } returns serialized.byteInputStream()
+            coEvery { backupRepository.preview(serialized, any()) } coAnswers {
+                retainedPassphrase = secondArg()
+                DataResult.Success(
+                    BackupPreview(
+                        encrypted = true,
+                        rules = 1,
+                        profiles = 0,
+                        dailyInsights = 0,
+                        hasSettings = false,
+                        categoryFeedback = 0,
+                        adFeedbackVotes = 0,
+                    ),
+                )
+            }
+            val vm = viewModel()
+
+            vm.uiState.test {
+                awaitUntil { it.llmModelStatus == LlmModelUiStatus.NOT_LOADED }
+                vm.prepareBackupImport(suppliedPassphrase)
+                vm.completeBackupImport(uri)
+                val preview = awaitUntil { it.backupPreview != null }.backupPreview!!
+                vm.updateRestoreSelection(
+                    preview.selection.copy(
+                        rulesAndProfiles = false,
+                        dailyInsights = false,
+                        settings = false,
+                        learningFeedback = false,
+                    ),
+                )
+                vm.confirmRestore()
+                awaitUntil { it.backupPreview == null }
+                cancelAndIgnoreRemainingEvents()
+            }
+
+            assertTrue(suppliedPassphrase.all { it == '\u0000' })
+            assertTrue(retainedPassphrase?.all { it == '\u0000' } == true)
             coVerify(exactly = 0) { backupRepository.restore(any(), any(), any()) }
         }
 }

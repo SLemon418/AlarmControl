@@ -3,7 +3,11 @@ package com.alarmcontrol.data.repository
 import com.alarmcontrol.core.feedback.AdFeedbackCounts
 import com.alarmcontrol.core.feedback.AdFeedbackRepository
 import com.alarmcontrol.core.feedback.AdObservation
+import com.alarmcontrol.core.filtering.NotificationHistoryWriteFence
 import com.alarmcontrol.core.filtering.SemanticIntent
+import com.alarmcontrol.core.privacy.FeedbackWriteFence
+import com.alarmcontrol.core.privacy.LocalDataResetWriteFence
+import com.alarmcontrol.core.privacy.StaleLocalDataWriteException
 import com.alarmcontrol.data.db.TransactionRunner
 import com.alarmcontrol.data.db.dao.DailyInsightDao
 import com.alarmcontrol.data.db.dao.LlmObservationDao
@@ -22,6 +26,10 @@ class AdFeedbackRepositoryImpl
         private val dailyInsightDao: DailyInsightDao,
         private val transactionRunner: TransactionRunner,
         private val clock: Clock = Clock.systemUTC(),
+        private val localDataResetWriteFence: LocalDataResetWriteFence = LocalDataResetWriteFence(),
+        private val notificationHistoryWriteFence: NotificationHistoryWriteFence =
+            NotificationHistoryWriteFence(),
+        private val feedbackWriteFence: FeedbackWriteFence = FeedbackWriteFence(),
     ) : AdFeedbackRepository {
         override suspend fun recordObservation(observation: AdObservation) {
             val entity = observation.toEntity()
@@ -35,29 +43,39 @@ class AdFeedbackRepositoryImpl
         override suspend fun recordCorrection(
             notificationEventId: String,
             correctedIntent: SemanticIntent,
-        ) {
-            notificationEventId.toLongOrNull()?.let {
-                transactionRunner.run {
-                    val target = dao.getCorrectionTarget(it) ?: return@run
-                    check(
-                        dao.setIntentCorrection(
-                            it,
-                            correctedIntent.name,
-                            correctedIntent.isAdvertisement,
-                        ) == 1,
-                    )
-                    dao.upsertLocalSemanticFeedback(
-                        LocalSemanticFeedbackEntity(
-                            sourceEventId = target.notificationEventId,
-                            packageName = target.packageName,
-                            correctedIntent = correctedIntent.name,
-                            recordedAtMillis = clock.millis(),
-                        ),
-                    )
-                    dao.trimLocalSemanticFeedback(LlmObservationDao.MAX_LOCAL_SEMANTIC_FEEDBACK)
-                    dailyInsightDao.deleteContainingEvent(it)
-                }
-            }
+        ): Boolean {
+            val eventId = notificationEventId.toLongOrNull() ?: return false
+            val resetEpoch = localDataResetWriteFence.captureEpoch()
+            val historyEpoch = notificationHistoryWriteFence.captureEpoch()
+            val feedbackEpoch = feedbackWriteFence.captureEpoch()
+            return localDataResetWriteFence.writeIfCurrent(resetEpoch) {
+                notificationHistoryWriteFence.writeIfCurrent(historyEpoch) {
+                    feedbackWriteFence.writeIfCurrent(feedbackEpoch) {
+                        transactionRunner.run {
+                            val target = dao.getCorrectionTarget(eventId) ?: return@run false
+                            val recordedAtMillis = clock.millis()
+                            check(
+                                dao.setIntentCorrection(
+                                    eventId,
+                                    correctedIntent.name,
+                                    correctedIntent.isAdvertisement,
+                                ) == 1,
+                            )
+                            dao.upsertLocalSemanticFeedback(
+                                LocalSemanticFeedbackEntity(
+                                    sourceEventId = target.notificationEventId,
+                                    packageName = target.packageName,
+                                    correctedIntent = correctedIntent.name,
+                                    recordedAtMillis = recordedAtMillis,
+                                ),
+                            )
+                            dao.trimLocalSemanticFeedback(LlmObservationDao.MAX_LOCAL_SEMANTIC_FEEDBACK)
+                            dailyInsightDao.deleteContainingEvent(eventId)
+                            true
+                        }
+                    } ?: throw StaleLocalDataWriteException()
+                } ?: throw StaleLocalDataWriteException()
+            } ?: throw StaleLocalDataWriteException()
         }
 
         override fun observeByEvent(): Flow<Map<String, AdObservation>> =

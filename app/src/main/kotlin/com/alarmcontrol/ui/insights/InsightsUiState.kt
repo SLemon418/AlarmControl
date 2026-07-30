@@ -83,6 +83,8 @@ data class AppAnalysisUi(
     val appName: String,
     val totalCount: Int,
     val silencedCount: Int,
+    val appIcon: ImageBitmap? = null,
+    val appNameIsPackageFallback: Boolean = appName.isBlank() || appName == packageName,
 )
 
 data class RuleAnalysisUi(
@@ -115,6 +117,8 @@ data class HistorySourceUi(
     val channelId: String?,
     val channelName: String?,
     val eventCount: Int,
+    val appIcon: ImageBitmap? = null,
+    val appNameIsPackageFallback: Boolean = appName.isBlank() || appName == packageName,
 )
 
 data class NotificationHistoryCoverageUi(
@@ -134,6 +138,8 @@ data class NotificationDetailUi(
     val title: String? = null,
     val text: String? = null,
     val contentState: NotificationDetailContentUi,
+    val appIcon: ImageBitmap? = null,
+    val appNameIsPackageFallback: Boolean = appName.isBlank() || appName == packageName,
 )
 
 data class RuleSuggestionUi(
@@ -144,6 +150,8 @@ data class RuleSuggestionUi(
     val channelId: String? = null,
     val numerator: Int,
     val denominator: Int,
+    val appIcon: ImageBitmap? = null,
+    val appNameIsPackageFallback: Boolean = appName.isBlank() || appName == packageName,
 )
 
 enum class RuleSuggestionTypeUi { QUIET_CHANNEL, MARKETING_RULE }
@@ -201,6 +209,8 @@ data class ChannelShareUi(
     val channelId: String,
     val count: Int,
     val channelName: String? = null,
+    val appIcon: ImageBitmap? = null,
+    val appNameIsPackageFallback: Boolean = appName.isBlank() || appName == packageName,
 )
 
 /**
@@ -214,14 +224,18 @@ data class InsightsSummaryUi(
     val mostMutedCount: Int,
     val anomalyCount: Int,
     val generatedAtMillis: Long,
+    val mostMutedAppIcon: ImageBitmap? = null,
+    val mostMutedAppNameIsPackageFallback: Boolean =
+        mostMutedAppName.isNullOrBlank() || mostMutedAppName == mostMutedPackage,
 )
 
 /** One activity-log row. */
 data class EventListItem(
     val id: String,
     val packageName: String,
-    val appName: String = packageName,
+    val appName: String = "",
     val appIcon: ImageBitmap? = null,
+    val appNameIsPackageFallback: Boolean = appName.isBlank() || appName == packageName,
     /** Raw on-device prediction used when recording an explicit correction. */
     val predictedCategory: String?,
     val category: String?,

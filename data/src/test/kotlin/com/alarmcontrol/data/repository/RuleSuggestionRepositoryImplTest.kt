@@ -30,7 +30,7 @@ class RuleSuggestionRepositoryImplTest {
             dao.channels.value = listOf(ChannelSuggestionRow("com.shop", "offers", 10, 8))
             dao.marketing.value = listOf(MarketingSuggestionRow("com.shop", 3, 4))
 
-            val suggestions = repository.observeSuggestions(100).first()
+            val suggestions = repository.observeSuggestions(100, 1_000).first()
 
             assertEquals(2, suggestions.size)
             assertTrue(suggestions[0] is RuleSuggestion.QuietChannel)
@@ -45,12 +45,12 @@ class RuleSuggestionRepositoryImplTest {
         runTest {
             dao.channels.value = listOf(ChannelSuggestionRow("com.shop", "offers", 10, 8))
             dao.marketing.value = listOf(MarketingSuggestionRow("com.shop", 3, 4))
-            val first = repository.observeSuggestions(0).first()
+            val first = repository.observeSuggestions(0, 1_000).first()
             val marketing = first.filterIsInstance<RuleSuggestion.MarketingRuleDraft>().single()
             rules.values.value = listOf(marketing.draft.copy(id = "1", executionMode = RuleExecutionMode.ACTIVE))
             repository.dismiss(first.filterIsInstance<RuleSuggestion.QuietChannel>().single().key, 123)
 
-            assertEquals(emptyList<RuleSuggestion>(), repository.observeSuggestions(0).first())
+            assertEquals(emptyList<RuleSuggestion>(), repository.observeSuggestions(0, 1_000).first())
             assertEquals(123L, dao.dismissedAt)
         }
 }
@@ -63,6 +63,7 @@ class FakeRuleSuggestionDao : RuleSuggestionDao {
 
     override fun observeChannelCandidates(
         sinceMillis: Long,
+        nowMillis: Long,
         minimumEvents: Int,
         minimumPercent: Int,
         cancelAction: StoredRuleAction,
@@ -71,6 +72,7 @@ class FakeRuleSuggestionDao : RuleSuggestionDao {
 
     override fun observeMarketingCandidates(
         sinceMillis: Long,
+        nowMillis: Long,
         minimumCorrections: Int,
         minimumPercent: Int,
     ): Flow<List<MarketingSuggestionRow>> = marketing

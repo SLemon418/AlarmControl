@@ -36,9 +36,14 @@ interface CategoryFeedbackDao {
     @Query("DELETE FROM category_feedback WHERE notification_event_id IS NOT NULL")
     suspend fun deleteLinkedToEvents(): Int
 
+    /**
+     * Keeps the latest inserted corrections. Local wall-clock rollback must never make valid
+     * learning rows look corrupt or let them displace a newly inserted correction.
+     */
     @Query(
         "DELETE FROM category_feedback WHERE id NOT IN (" +
-            "SELECT id FROM category_feedback ORDER BY id DESC LIMIT :max)",
+            "SELECT id FROM category_feedback " +
+            "ORDER BY id DESC LIMIT :max)",
     )
     suspend fun trimToMostRecent(max: Int): Int
 
@@ -46,7 +51,8 @@ interface CategoryFeedbackDao {
     @Query(
         "SELECT DISTINCT notification_event_id FROM category_feedback " +
             "WHERE notification_event_id IS NOT NULL AND id NOT IN (" +
-            "SELECT id FROM category_feedback ORDER BY id DESC LIMIT :max)",
+            "SELECT id FROM category_feedback " +
+            "ORDER BY id DESC LIMIT :max)",
     )
     suspend fun getLinkedTrimVictimEventIds(max: Int): List<Long>
 

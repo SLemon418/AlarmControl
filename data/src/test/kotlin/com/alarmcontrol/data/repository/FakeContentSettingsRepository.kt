@@ -13,13 +13,17 @@ import kotlinx.coroutines.flow.flowOf
 /** Minimal mutable settings fake for repository privacy-boundary tests. */
 internal class FakeContentSettingsRepository(
     contentEnabled: Boolean = true,
+    contentRetentionDays: Int = RetentionDefaults.ENCRYPTED_CONTENT_DAYS,
     excludedPackages: Set<String> = emptySet(),
     private val contentAccessGuard: NotificationContentAccessGuard = NotificationContentAccessGuard(),
     private val maintenancePolicyAccessGuard: MaintenancePolicyAccessGuard =
         MaintenancePolicyAccessGuard(),
 ) : SettingsRepository {
     private val contentEnabledState = MutableStateFlow(contentEnabled)
+    private val contentRetentionState = MutableStateFlow(contentRetentionDays)
     private val excludedPackagesState = MutableStateFlow(excludedPackages)
+    var resetWhileMaintenanceLockedCalls: Int = 0
+        private set
 
     override val filteringEnabled: Flow<Boolean> = flowOf(true)
     override val semanticClassifierEnabled: Flow<Boolean> = flowOf(true)
@@ -31,6 +35,7 @@ internal class FakeContentSettingsRepository(
     override val dailyInsightRetentionDays: Flow<Int> = flowOf(RetentionDefaults.DAILY_INSIGHT_DAYS)
     override val dynamicColorEnabled: Flow<Boolean> = flowOf(false)
     override val notificationContentStorageEnabled: Flow<Boolean> = contentEnabledState
+    override val notificationContentRetentionDays: Flow<Int> = contentRetentionState
     override val contentExcludedPackages: Flow<Set<String>> = excludedPackagesState
 
     override suspend fun setFilteringEnabled(enabled: Boolean) = Unit
@@ -59,6 +64,10 @@ internal class FakeContentSettingsRepository(
                 contentEnabledState.value = enabled
             }
         }
+    }
+
+    override suspend fun setNotificationContentRetentionDays(days: Int) {
+        contentRetentionState.value = days
     }
 
     override suspend fun setContentExcludedPackages(packageNames: Set<String>) {
@@ -90,6 +99,7 @@ internal class FakeContentSettingsRepository(
     override suspend fun maintenanceSnapshot(): MaintenanceSettingsSnapshot =
         MaintenanceSettingsSnapshot(
             notificationContentStorageEnabled = contentEnabledState.value,
+            notificationContentRetentionDays = contentRetentionState.value,
             contentExcludedPackages = excludedPackagesState.value,
         )
 
@@ -97,10 +107,15 @@ internal class FakeContentSettingsRepository(
 
     override suspend fun reset() {
         maintenancePolicyAccessGuard.withLock {
-            contentAccessGuard.withLock {
-                contentEnabledState.value = false
-                excludedPackagesState.value = emptySet()
-            }
+            resetWhileMaintenanceLocked()
+        }
+    }
+
+    override suspend fun resetWhileMaintenanceLocked() {
+        resetWhileMaintenanceLockedCalls += 1
+        contentAccessGuard.withLock {
+            contentEnabledState.value = false
+            excludedPackagesState.value = emptySet()
         }
     }
 }

@@ -16,6 +16,8 @@ class FakeSettingsRepository(
     eventDays: Int = RetentionDefaults.EVENT_DAYS,
     insightDays: Int = RetentionDefaults.DAILY_INSIGHT_DAYS,
     dynamicColor: Boolean = false,
+    contentEnabled: Boolean = true,
+    contentDays: Int = RetentionDefaults.ENCRYPTED_CONTENT_DAYS,
 ) : SettingsRepository {
     val operationLog = mutableListOf<String>()
     var beforeSetContentExcludedPackages: suspend (Set<String>) -> Unit = {}
@@ -28,7 +30,8 @@ class FakeSettingsRepository(
     private val insightRetentionState = MutableStateFlow(insightDays)
     private val tokenState = MutableStateFlow("")
     private val dynamicColorState = MutableStateFlow(dynamicColor)
-    private val contentStorageState = MutableStateFlow(false)
+    private val contentStorageState = MutableStateFlow(contentEnabled)
+    private val contentRetentionState = MutableStateFlow(contentDays)
     private val excludedPackagesState = MutableStateFlow(emptySet<String>())
 
     override val filteringEnabled: Flow<Boolean> = filteringState
@@ -45,6 +48,7 @@ class FakeSettingsRepository(
 
     override val dynamicColorEnabled: Flow<Boolean> = dynamicColorState
     override val notificationContentStorageEnabled: Flow<Boolean> = contentStorageState
+    override val notificationContentRetentionDays: Flow<Int> = contentRetentionState
     override val contentExcludedPackages: Flow<Set<String>> = excludedPackagesState
 
     override suspend fun setFilteringEnabled(enabled: Boolean) {
@@ -88,6 +92,10 @@ class FakeSettingsRepository(
         contentStorageState.value = enabled
     }
 
+    override suspend fun setNotificationContentRetentionDays(days: Int) {
+        contentRetentionState.value = days
+    }
+
     override suspend fun setContentExcludedPackages(packageNames: Set<String>) {
         beforeSetContentExcludedPackages(packageNames)
         operationLog += "excluded-packages:${packageNames.sorted().joinToString()}"
@@ -117,6 +125,7 @@ class FakeSettingsRepository(
             llmAnalysisEnabled = llmState.value,
             eventRetentionDays = eventRetentionState.value,
             dailyInsightRetentionDays = insightRetentionState.value,
+            notificationContentRetentionDays = contentRetentionState.value,
         )
 
     override suspend fun maintenanceSnapshot(): MaintenanceSettingsSnapshot =
@@ -124,6 +133,7 @@ class FakeSettingsRepository(
             eventRetentionDays = eventRetentionState.value,
             dailyInsightRetentionDays = insightRetentionState.value,
             notificationContentStorageEnabled = contentStorageState.value,
+            notificationContentRetentionDays = contentRetentionState.value,
             contentExcludedPackages = excludedPackagesState.value,
         )
 
@@ -134,6 +144,7 @@ class FakeSettingsRepository(
         llmState.value = snapshot.llmAnalysisEnabled
         eventRetentionState.value = snapshot.eventRetentionDays
         insightRetentionState.value = snapshot.dailyInsightRetentionDays
+        contentRetentionState.value = snapshot.notificationContentRetentionDays
     }
 
     override suspend fun reset() {
@@ -147,6 +158,7 @@ class FakeSettingsRepository(
         tokenState.value = ""
         dynamicColorState.value = false
         contentStorageState.value = false
+        contentRetentionState.value = RetentionDefaults.ENCRYPTED_CONTENT_DAYS
         excludedPackagesState.value = emptySet()
     }
 }

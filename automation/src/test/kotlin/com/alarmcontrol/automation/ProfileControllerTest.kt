@@ -7,10 +7,16 @@ import com.alarmcontrol.core.filtering.Condition
 import com.alarmcontrol.core.filtering.Rule
 import com.alarmcontrol.core.filtering.RuleAction
 import com.alarmcontrol.core.profile.FilteringProfile
+import com.alarmcontrol.core.settings.ExternalAutomationAuthorizationFence
+import com.alarmcontrol.core.settings.SettingsMutationFence
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -20,6 +26,7 @@ import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class ProfileControllerTest {
     private fun rule(
         id: String,
@@ -189,6 +196,183 @@ class ProfileControllerTest {
         }
 
     @Test
+    fun `token rotation cannot interleave between external authorization and profile apply`() =
+        runTest {
+            val authorizationFence = ExternalAutomationAuthorizationFence()
+            val settings =
+                FakeSettingsRepository(
+                    enabled = true,
+                    externalAutomationAuthorizationFence = authorizationFence,
+                )
+            val repo = FakeRuleRepository(listOf(rule("1", "Work", enabled = false)))
+            val applyStarted = CompletableDeferred<Unit>()
+            val releaseApply = CompletableDeferred<Unit>()
+            repo.beforeBulkUpdate = {
+                applyStarted.complete(Unit)
+                releaseApply.await()
+            }
+            val controller =
+                ProfileController(
+                    ruleRepository = repo,
+                    profileRepository = FakeProfileRepository(),
+                    settingsRepository = settings,
+                    externalAutomationAuthorizationFence = authorizationFence,
+                )
+
+            val applying =
+                async {
+                    controller.setEnabledFromExternalAutomation(
+                        profileId = "1",
+                        enabled = true,
+                        token = "test-token",
+                    )
+                }
+            applyStarted.await()
+            val rotating = async { settings.rotateExternalAutomationToken() }
+            runCurrent()
+
+            assertFalse(rotating.isCompleted)
+            releaseApply.complete(Unit)
+            assertEquals(1, applying.await())
+            assertEquals("rotated-token", rotating.await())
+            assertEquals("rotated-token", settings.currentAutomationToken())
+            assertTrue(repo.current().single().enabled)
+        }
+
+    @Test
+    fun `opt out cannot interleave between external authorization and profile apply`() =
+        runTest {
+            val authorizationFence = ExternalAutomationAuthorizationFence()
+            val settings =
+                FakeSettingsRepository(
+                    enabled = true,
+                    externalAutomationAuthorizationFence = authorizationFence,
+                )
+            val repo = FakeRuleRepository(listOf(rule("1", "Work", enabled = false)))
+            val applyStarted = CompletableDeferred<Unit>()
+            val releaseApply = CompletableDeferred<Unit>()
+            repo.beforeBulkUpdate = {
+                applyStarted.complete(Unit)
+                releaseApply.await()
+            }
+            val controller =
+                ProfileController(
+                    ruleRepository = repo,
+                    profileRepository = FakeProfileRepository(),
+                    settingsRepository = settings,
+                    externalAutomationAuthorizationFence = authorizationFence,
+                )
+
+            val applying =
+                async {
+                    controller.setEnabledFromExternalAutomation(
+                        profileId = "1",
+                        enabled = true,
+                        token = "test-token",
+                    )
+                }
+            applyStarted.await()
+            val disabling = async { settings.setExternalAutomationEnabled(false) }
+            runCurrent()
+
+            assertFalse(disabling.isCompleted)
+            releaseApply.complete(Unit)
+            assertEquals(1, applying.await())
+            disabling.await()
+            assertTrue(repo.current().single().enabled)
+            assertEquals(
+                0,
+                controller.setEnabledFromExternalAutomation(
+                    profileId = "1",
+                    enabled = false,
+                    token = "test-token",
+                ),
+            )
+        }
+
+    @Test
+    fun `stale disabled ingress cache is rechecked against current settings`() =
+        runTest {
+            val staleGate =
+                ExternalAutomationAuthorizationGate(
+                    enabled = flowOf(false),
+                    token = flowOf("old-token"),
+                    scope = backgroundScope,
+                )
+            runCurrent()
+            val cachedDecision = staleGate.authorize("test-token")
+            assertEquals(ExternalAuthorizationDecision.DISABLED, cachedDecision)
+            assertEquals(
+                ExternalAuthorizationLane.AUTHORITATIVE_CHECK,
+                cachedDecision.receiverLane(),
+            )
+            val settings = FakeSettingsRepository(enabled = true, filtering = true)
+            val controller =
+                ProfileController(
+                    FakeRuleRepository(emptyList()),
+                    FakeProfileRepository(),
+                    settings,
+                )
+
+            val changed =
+                controller.setEnabledFromExternalAutomation(
+                    profileId = null,
+                    enabled = false,
+                    token = "test-token",
+                )
+
+            assertEquals(1, changed)
+            assertFalse(settings.isFilteringEnabled())
+        }
+
+    @Test
+    fun `external master toggle waits for restore mutation fence then completes without deadlock`() =
+        runTest {
+            val mutationFence = SettingsMutationFence()
+            val authorizationFence = ExternalAutomationAuthorizationFence()
+            val settings =
+                FakeSettingsRepository(
+                    enabled = true,
+                    filtering = true,
+                    externalAutomationAuthorizationFence = authorizationFence,
+                    settingsMutationFence = mutationFence,
+                )
+            val controller =
+                ProfileController(
+                    ruleRepository = FakeRuleRepository(emptyList()),
+                    profileRepository = FakeProfileRepository(),
+                    settingsRepository = settings,
+                    externalAutomationAuthorizationFence = authorizationFence,
+                    settingsMutationFence = mutationFence,
+                )
+            val restoreHeld = CompletableDeferred<Unit>()
+            val releaseRestore = CompletableDeferred<Unit>()
+            val simulatedRestore =
+                async {
+                    mutationFence.withLock {
+                        restoreHeld.complete(Unit)
+                        releaseRestore.await()
+                    }
+                }
+            restoreHeld.await()
+            val toggling =
+                async {
+                    controller.setEnabledFromExternalAutomation(
+                        profileId = null,
+                        enabled = false,
+                        token = "test-token",
+                    )
+                }
+            runCurrent()
+
+            assertFalse(toggling.isCompleted)
+            releaseRestore.complete(Unit)
+            assertEquals(1, toggling.await())
+            simulatedRestore.await()
+            assertFalse(settings.isFilteringEnabled())
+        }
+
+    @Test
     fun `external automation rejects a wrong token and records a content-free audit outcome`() =
         runTest {
             val repo = FakeRuleRepository(listOf(rule("1", "Work", enabled = true)))
@@ -262,6 +446,48 @@ class ProfileControllerTest {
             assertFalse(settings.isFilteringEnabled())
             assertEquals(13, audit.entries.size)
             assertEquals(AutomationOutcome.APPLIED, audit.entries.last().outcome)
+        }
+
+    @Test
+    fun `unauthorized audit cannot block an authenticated operation`() =
+        runTest {
+            val settings = FakeSettingsRepository(enabled = true, filtering = true)
+            val audit = BlockingRejectedAutomationAuditRepository()
+            val controller =
+                ProfileController(
+                    FakeRuleRepository(emptyList()),
+                    FakeProfileRepository(),
+                    settings,
+                    audit,
+                )
+            val unauthorized =
+                async {
+                    controller.setEnabledFromExternalAutomation(
+                        profileId = null,
+                        enabled = false,
+                        token = "wrong",
+                    )
+                }
+            audit.rejectionStarted.await()
+
+            val authorized =
+                async {
+                    controller.setEnabledFromExternalAutomation(
+                        profileId = null,
+                        enabled = false,
+                        token = "test-token",
+                    )
+                }
+            runCurrent()
+
+            try {
+                assertTrue(authorized.isCompleted)
+                assertEquals(1, authorized.await())
+                assertFalse(settings.isFilteringEnabled())
+            } finally {
+                audit.releaseRejection.complete(Unit)
+            }
+            assertEquals(0, unauthorized.await())
         }
 
     @Test
@@ -381,6 +607,20 @@ private class RecordingAutomationAuditRepository : AutomationAuditRepository {
 private data object ThrowingAutomationAuditRepository : AutomationAuditRepository {
     override suspend fun record(entry: AutomationAuditEntry) {
         error("audit unavailable")
+    }
+
+    override fun observeRecent(limit: Int): Flow<List<AutomationAuditEntry>> = flowOf(emptyList())
+}
+
+private class BlockingRejectedAutomationAuditRepository : AutomationAuditRepository {
+    val rejectionStarted = CompletableDeferred<Unit>()
+    val releaseRejection = CompletableDeferred<Unit>()
+
+    override suspend fun record(entry: AutomationAuditEntry) {
+        if (entry.outcome == AutomationOutcome.UNAUTHORIZED) {
+            rejectionStarted.complete(Unit)
+            releaseRejection.await()
+        }
     }
 
     override fun observeRecent(limit: Int): Flow<List<AutomationAuditEntry>> = flowOf(emptyList())

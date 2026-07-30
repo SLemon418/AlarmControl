@@ -67,6 +67,25 @@ class RuleRepositoryImplTest {
         }
 
     @Test
+    fun `editing preserves an authoritative enabled change made after the editor snapshot`() =
+        runTest {
+            val id = repository.saveRule(newRule(name = "original"))
+            val staleEditorCopy =
+                repository.observeRules().first().single().copy(
+                    name = "renamed",
+                    condition = Condition.CategoryEquals("alarm"),
+                )
+            repository.setRulesEnabled(setOf(id), enabled = false)
+
+            repository.saveRule(staleEditorCopy)
+
+            val stored = repository.observeRules().first().single()
+            assertEquals("renamed", stored.name)
+            assertEquals(Condition.CategoryEquals("alarm"), stored.condition)
+            assertFalse(stored.enabled)
+        }
+
+    @Test
     fun `compound nested rule with a time window round-trips through the repository`() =
         runTest {
             val condition =

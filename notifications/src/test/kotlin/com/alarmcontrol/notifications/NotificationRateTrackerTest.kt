@@ -58,6 +58,48 @@ class NotificationRateTrackerTest {
     }
 
     @Test
+    fun `future seed occurrence degrades every rate signal to unknown`() {
+        val tracker = NotificationRateTracker()
+
+        val seeded =
+            tracker.seed(
+                listOf(occurrence(1, at = 100_001)),
+                nowMillis = 100_000,
+            )
+
+        assertFalse(seeded)
+        assertTrue(tracker.counts(snapshot(100_000), setOf(packageMinute)).isEmpty())
+    }
+
+    @Test
+    fun `clock rollback after a valid seed degrades counts until wall time catches up`() {
+        val tracker = NotificationRateTracker()
+        tracker.seed(
+            occurrences = listOf(occurrence(1, at = 200_000)),
+            nowMillis = 200_000,
+        )
+        tracker.record(occurrence(2, at = 100_000))
+
+        assertTrue(
+            tracker
+                .counts(
+                    snapshot = snapshot(100_000),
+                    requestedSignals = setOf(packageMinute),
+                    observationNowMillis = 100_000,
+                ).isEmpty(),
+        )
+        assertEquals(
+            1,
+            tracker
+                .counts(
+                    snapshot = snapshot(100_000),
+                    requestedSignals = setOf(packageMinute),
+                    observationNowMillis = 200_000,
+                )[packageMinute],
+        )
+    }
+
+    @Test
     fun `distinct out of order occurrences remain sorted`() {
         val tracker = NotificationRateTracker()
         tracker.seed(emptyList(), nowMillis = 200_000)

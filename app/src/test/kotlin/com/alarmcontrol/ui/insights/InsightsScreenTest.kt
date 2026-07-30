@@ -145,6 +145,7 @@ class InsightsScreenTest {
                         summary =
                             InsightsSummaryUi(
                                 mostMutedPackage = "com.example.shop",
+                                mostMutedAppName = "Shop",
                                 mostMutedCount = 7,
                                 anomalyCount = 0,
                                 generatedAtMillis = System.currentTimeMillis(),
@@ -156,8 +157,63 @@ class InsightsScreenTest {
             )
         }
 
-        composeRule.onNodeWithText("Most muted: com.example.shop (7)").assertIsDisplayed()
+        composeRule.onNodeWithText("Most muted: Shop (7)").assertIsDisplayed()
+        composeRule.onNodeWithText("com.example.shop").assertDoesNotExist()
         composeRule.onNodeWithText("Updated", substring = true).assertIsDisplayed()
+    }
+
+    @Test
+    fun summaryCard_hidesPackageFallbackBehindUnknownAppLabel() {
+        composeRule.setContent {
+            InsightsScreen(
+                state =
+                    InsightsUiState(
+                        isLoading = false,
+                        summary =
+                            InsightsSummaryUi(
+                                mostMutedPackage = "com.example.removed",
+                                mostMutedAppName = "com.example.removed",
+                                mostMutedCount = 3,
+                                anomalyCount = 0,
+                                generatedAtMillis = System.currentTimeMillis(),
+                                mostMutedAppNameIsPackageFallback = true,
+                            ),
+                    ),
+                onUndo = {},
+                onRecategorize = { _, _, _, _ -> },
+                onUserMessageShown = {},
+            )
+        }
+
+        composeRule.onNodeWithText("Most muted: Unknown or removed app (3)").assertIsDisplayed()
+        composeRule.onNodeWithText("com.example.removed").assertDoesNotExist()
+    }
+
+    @Test
+    fun summaryCard_showsInstalledAppLabelWhenItEqualsPackageName() {
+        composeRule.setContent {
+            InsightsScreen(
+                state =
+                    InsightsUiState(
+                        isLoading = false,
+                        summary =
+                            InsightsSummaryUi(
+                                mostMutedPackage = "com.example.same",
+                                mostMutedAppName = "com.example.same",
+                                mostMutedCount = 3,
+                                anomalyCount = 0,
+                                generatedAtMillis = System.currentTimeMillis(),
+                                mostMutedAppNameIsPackageFallback = false,
+                            ),
+                    ),
+                onUndo = {},
+                onRecategorize = { _, _, _, _ -> },
+                onUserMessageShown = {},
+            )
+        }
+
+        composeRule.onNodeWithText("Most muted: com.example.same (3)").assertIsDisplayed()
+        composeRule.onNodeWithText("Most muted: Unknown or removed app (3)").assertDoesNotExist()
     }
 
     @Test
@@ -712,6 +768,7 @@ class InsightsScreenTest {
             event.copy(
                 id = "42",
                 appName = "Shop",
+                appNameIsPackageFallback = false,
                 action = EventActionUi.KEPT,
                 actionLabel = uiText(R.string.insights_action_kept),
                 canUndo = false,
@@ -735,6 +792,9 @@ class InsightsScreenTest {
 
         val list = composeRule.onNodeWithTag(INSIGHTS_RECORDS_TEST_TAG)
         composeRule.onNodeWithText("1 matching records").assertIsDisplayed()
+        list.performScrollToNode(hasText("Shop"))
+        composeRule.onNodeWithText("Shop").assertIsDisplayed()
+        composeRule.onNodeWithText("com.example.shop").assertDoesNotExist()
         list.performScrollToNode(hasText("Details"))
         composeRule.onNodeWithText("Details").performClick()
         assertEquals("42", openedId)
@@ -763,6 +823,8 @@ class InsightsScreenTest {
             )
         }
 
+        composeRule.onNodeWithText("Bank").assertIsDisplayed()
+        composeRule.onNodeWithText("com.bank").assertIsDisplayed()
         composeRule.onNodeWithText("Payment received").assertIsDisplayed()
         composeRule.onNodeWithText("₩10,000").assertIsDisplayed()
         composeRule

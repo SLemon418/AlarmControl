@@ -1,6 +1,8 @@
 package com.alarmcontrol.data.backup
 
+import com.alarmcontrol.core.backup.BackupCategoryFeedback
 import com.alarmcontrol.core.backup.BackupData
+import com.alarmcontrol.core.backup.BackupSemanticFeedback
 import com.alarmcontrol.core.filtering.MAX_CONDITION_VALUE_CHARS
 import com.alarmcontrol.core.filtering.MAX_SAVED_RULES
 import com.alarmcontrol.core.filtering.Rule
@@ -13,18 +15,31 @@ import com.alarmcontrol.core.profile.FilteringProfile
 import com.alarmcontrol.core.profile.MAX_PROFILE_NAME_CHARS
 import com.alarmcontrol.core.profile.MAX_PROFILE_RULE_IDS
 import com.alarmcontrol.core.profile.MAX_SAVED_PROFILES
+import com.alarmcontrol.core.settings.RetentionDefaults
 import java.util.Locale
 
 /** Defensive validation for user-selected backup files, performed before a restore transaction. */
 internal object BackupValidator {
-    fun validate(data: BackupData): BackupData =
-        data.also {
+    fun validate(data: BackupData): BackupData = validate(data, Long.MAX_VALUE)
+
+    fun validate(
+        data: BackupData,
+        nowMillis: Long,
+    ): BackupData {
+        require(nowMillis >= 0) { "Current backup-validation timestamp is invalid" }
+        val normalized =
+            data.copy(
+                categoryFeedback =
+                    data.categoryFeedback.map { feedback ->
+                        feedback.normalizeTimestamp(nowMillis)
+                    },
+            )
+        return normalized.also {
             require(it.rules.size <= MAX_SAVED_RULES) { "Backup contains too many rules" }
             require(it.profiles.size <= MAX_SAVED_PROFILES) { "Backup contains too many profiles" }
             require(it.dailyInsights.size <= MAX_INSIGHTS) { "Backup contains too many insight rows" }
             require(it.categoryFeedback.size <= MAX_FEEDBACK_ROWS) { "Backup contains too much feedback" }
             require(it.adFeedback.size <= MAX_FEEDBACK_ROWS) { "Backup contains too much ad feedback" }
-            require(it.semanticFeedback.size <= MAX_FEEDBACK_ROWS) { "Backup contains too much semantic feedback" }
             require(it.rules.map(Rule::id).all(String::isNotBlank)) { "Every backup rule needs an id" }
             require(
                 it.rules
@@ -46,6 +61,9 @@ internal object BackupValidator {
             it.settings?.let { settings ->
                 require(settings.eventRetentionDays in RETENTION_RANGE) { "Event retention is invalid" }
                 require(settings.dailyInsightRetentionDays in RETENTION_RANGE) { "Insight retention is invalid" }
+                require(settings.notificationContentRetentionDays in CONTENT_RETENTION_RANGE) {
+                    "Content retention is invalid"
+                }
             }
             it.categoryFeedback.forEach { feedback ->
                 require(feedback.packageName.isNotBlank() && feedback.packageName.length <= MAX_PACKAGE_CHARS) {
@@ -63,23 +81,45 @@ internal object BackupValidator {
                 }
                 require(feedback.count in 1..MAX_FEEDBACK_VOTES) { "Ad feedback count is invalid" }
             }
-            it.semanticFeedback.forEach { feedback ->
-                require(feedback.packageName.isNotBlank() && feedback.packageName.length <= MAX_PACKAGE_CHARS) {
-                    "Semantic feedback package is invalid"
-                }
-                require(feedback.count in 1..MAX_FEEDBACK_VOTES) { "Semantic feedback count is invalid" }
-            }
+            requireValidSemanticFeedback(it.semanticFeedback)
             requireGroupedFeedbackFits(
                 it.adFeedback.groupBy { feedback -> feedback.packageName to feedback.isAdvertisement },
                 "Ad feedback total is invalid",
                 count = { feedback -> feedback.count },
             )
-            requireGroupedFeedbackFits(
-                it.semanticFeedback.groupBy { feedback -> feedback.packageName to feedback.intent },
-                "Semantic feedback total is invalid",
-                count = { feedback -> feedback.count },
-            )
         }
+    }
+
+    private fun BackupCategoryFeedback.normalizeTimestamp(nowMillis: Long): BackupCategoryFeedback {
+        require(recordedAtMillis >= 0) { "Feedback timestamp is invalid" }
+        val latestAllowed =
+            if (nowMillis > Long.MAX_VALUE - MAX_BACKUP_FEEDBACK_FUTURE_SKEW_MILLIS) {
+                Long.MAX_VALUE
+            } else {
+                nowMillis + MAX_BACKUP_FEEDBACK_FUTURE_SKEW_MILLIS
+            }
+        require(recordedAtMillis <= latestAllowed) { "Feedback timestamp is too far in the future" }
+        return if (recordedAtMillis > nowMillis) copy(recordedAtMillis = nowMillis) else this
+    }
+
+    internal fun requireValidSemanticFeedback(feedback: List<BackupSemanticFeedback>) {
+        require(feedback.size <= MAX_BACKUP_SEMANTIC_FEEDBACK_GROUPS) {
+            "Backup contains too much semantic feedback"
+        }
+        feedback.forEach { row ->
+            require(row.packageName.isNotBlank() && row.packageName.length <= MAX_PACKAGE_CHARS) {
+                "Semantic feedback package is invalid"
+            }
+            require(row.count in 1..MAX_BACKUP_SEMANTIC_FEEDBACK_VOTES_PER_GROUP) {
+                "Semantic feedback count is invalid"
+            }
+        }
+        requireGroupedFeedbackFits(
+            feedback.groupBy { row -> row.packageName to row.intent },
+            "Semantic feedback total is invalid",
+            count = { row -> row.count },
+        )
+    }
 
     private fun validateProfiles(
         profiles: List<FilteringProfile>,
@@ -255,4 +295,10 @@ internal object BackupValidator {
     private const val MAX_SEMANTIC_INTENTS = 7
     private const val HOURS_PER_DAY = 24
     private val RETENTION_RANGE = 1..3_650
+    private val CONTENT_RETENTION_RANGE =
+        RetentionDefaults.MIN_ENCRYPTED_CONTENT_DAYS..RetentionDefaults.MAX_ENCRYPTED_CONTENT_DAYS
 }
+
+internal const val MAX_BACKUP_SEMANTIC_FEEDBACK_GROUPS = 25_000
+internal const val MAX_BACKUP_SEMANTIC_FEEDBACK_VOTES_PER_GROUP = 1_000_000
+internal const val MAX_BACKUP_FEEDBACK_FUTURE_SKEW_MILLIS = 24L * 60 * 60 * 1_000

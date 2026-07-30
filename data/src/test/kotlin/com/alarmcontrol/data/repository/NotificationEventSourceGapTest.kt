@@ -104,6 +104,24 @@ class NotificationEventSourceGapTest {
         }
 
     @Test
+    fun `retention preserves normal history left future dated by a clock rollback`() =
+        runTest {
+            val dao = FakeNotificationEventDao()
+            dao.insert(event(postedAtMillis = 700, epochDay = 20))
+            dao.insert(event(postedAtMillis = 2_000, epochDay = 21))
+
+            val deleted =
+                dao.deleteOlderThanWithSourceGaps(
+                    cutoffMillis = 500,
+                    legacyZoneId = ZoneOffset.UTC,
+                )
+
+            assertEquals(0, deleted)
+            assertEquals(listOf(700L, 2_000L), dao.inserted.map { it.postedAtMillis })
+            assertEquals(emptySet<Long>(), dao.sourceGapDays)
+        }
+
+    @Test
     fun `legacy event day uses the supplied local zone before deletion`() =
         runTest {
             val dao = FakeNotificationEventDao()

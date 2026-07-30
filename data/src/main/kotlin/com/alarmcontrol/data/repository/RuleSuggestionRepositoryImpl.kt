@@ -8,6 +8,8 @@ import com.alarmcontrol.core.filtering.RuleRepository
 import com.alarmcontrol.core.filtering.RuleSuggestion
 import com.alarmcontrol.core.filtering.RuleSuggestionRepository
 import com.alarmcontrol.core.filtering.SemanticIntent
+import com.alarmcontrol.core.privacy.LocalDataResetWriteFence
+import com.alarmcontrol.core.privacy.StaleLocalDataWriteException
 import com.alarmcontrol.data.db.dao.RuleSuggestionDao
 import com.alarmcontrol.data.db.entity.RuleSuggestionDismissalEntity
 import com.alarmcontrol.data.db.model.StoredRuleAction
@@ -20,13 +22,18 @@ class RuleSuggestionRepositoryImpl
     constructor(
         private val dao: RuleSuggestionDao,
         ruleRepository: RuleRepository,
+        private val localDataResetWriteFence: LocalDataResetWriteFence = LocalDataResetWriteFence(),
     ) : RuleSuggestionRepository {
         private val rules = ruleRepository.observeRules()
 
-        override fun observeSuggestions(sinceMillis: Long): Flow<List<RuleSuggestion>> =
+        override fun observeSuggestions(
+            sinceMillis: Long,
+            nowMillis: Long,
+        ): Flow<List<RuleSuggestion>> =
             combine(
                 dao.observeChannelCandidates(
                     sinceMillis = sinceMillis,
+                    nowMillis = nowMillis,
                     minimumEvents = MIN_CHANNEL_EVENTS,
                     minimumPercent = MIN_SILENCED_PERCENT,
                     cancelAction = StoredRuleAction.CANCEL,
@@ -34,6 +41,7 @@ class RuleSuggestionRepositoryImpl
                 ),
                 dao.observeMarketingCandidates(
                     sinceMillis = sinceMillis,
+                    nowMillis = nowMillis,
                     minimumCorrections = MIN_MARKETING_CORRECTIONS,
                     minimumPercent = MIN_MARKETING_PERCENT,
                 ),
@@ -79,7 +87,11 @@ class RuleSuggestionRepositoryImpl
             suggestionKey: String,
             dismissedAtMillis: Long,
         ) {
-            dao.dismiss(RuleSuggestionDismissalEntity(suggestionKey, dismissedAtMillis))
+            val resetEpoch = localDataResetWriteFence.captureEpoch()
+            localDataResetWriteFence.writeIfCurrent(resetEpoch) {
+                dao.dismiss(RuleSuggestionDismissalEntity(suggestionKey, dismissedAtMillis))
+                Unit
+            } ?: throw StaleLocalDataWriteException()
         }
 
         private fun marketingDraft(packageName: String): Rule =

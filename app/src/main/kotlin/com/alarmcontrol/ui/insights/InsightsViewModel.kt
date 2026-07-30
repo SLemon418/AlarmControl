@@ -22,18 +22,22 @@ import com.alarmcontrol.core.insights.DailyInsightRepository
 import com.alarmcontrol.core.insights.InsightsAnalyticsRepository
 import com.alarmcontrol.core.insights.InsightsDateRange
 import com.alarmcontrol.core.insights.InsightsSummaryRepository
+import com.alarmcontrol.core.privacy.DailyInsightWriteFence
+import com.alarmcontrol.core.privacy.ScopedDataWriteFence
 import com.alarmcontrol.core.result.DataResult
 import com.alarmcontrol.core.result.asDataResult
 import com.alarmcontrol.core.result.runCatchingPreservingCancellation
 import com.alarmcontrol.ml.NotificationCategories
 import com.alarmcontrol.ui.UiText
 import com.alarmcontrol.ui.app.AppIdentityResolver
+import com.alarmcontrol.ui.app.AppIdentityUi
 import com.alarmcontrol.ui.uiText
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -44,9 +48,11 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.time.Clock
@@ -77,6 +83,7 @@ class InsightsViewModel
         private val appIdentityResolver: AppIdentityResolver,
         private val clock: Clock,
         @Dispatcher(AppDispatcher.Default) private val dispatcher: CoroutineDispatcher,
+        private val dailyInsightWriteFence: DailyInsightWriteFence = DailyInsightWriteFence(),
     ) : ViewModel() {
         private val availableCategories: List<String> = categories.labels
         private val messages = MutableStateFlow<UiText?>(null)
@@ -98,6 +105,7 @@ class InsightsViewModel
             MutableStateFlow(InsightsDateRange(initialAnalysisEnd - DEFAULT_ANALYSIS_DAYS + 1, initialAnalysisEnd))
 
         private val todayWindow = MutableStateFlow(clock.todayWindow())
+        private val suggestionRefreshGeneration = MutableStateFlow(0L)
 
         private val rules =
             ruleRepository
@@ -193,17 +201,37 @@ class InsightsViewModel
                     if (tab != InsightsTab.OVERVIEW) {
                         flowOf(emptyList())
                     } else {
-                        ruleSuggestionRepository
-                            .observeSuggestions(clock.millis() - SUGGESTION_WINDOW_MILLIS)
-                            .map { rows ->
+                        merge(
+                            combine(
+                                eventRepository.observeRecent(SUGGESTION_ACTIVITY_LIMIT),
+                                feedbackRepository.observeEventCorrections(),
+                                adFeedbackRepository.observeByEvent(),
+                                suggestionRefreshGeneration,
+                            ) { _, _, _, _ -> Unit },
+                            suggestionBoundRefreshes(),
+                        ).map { clock.millis() }
+                            .flatMapLatest { nowMillis ->
+                                ruleSuggestionRepository.observeSuggestions(
+                                    sinceMillis = nowMillis - SUGGESTION_WINDOW_MILLIS,
+                                    nowMillis = nowMillis,
+                                )
+                            }.map { rows ->
                                 rows.map { suggestion ->
                                     suggestion.toUiModel(
-                                        appIdentityResolver.resolve(suggestion.packageName()).label,
+                                        appIdentityResolver.resolve(suggestion.packageName()),
                                     )
                                 }
                             }
                     }
                 }.flowOn(dispatcher)
+
+        private fun suggestionBoundRefreshes(): Flow<Unit> =
+            flow {
+                while (true) {
+                    delay(SUGGESTION_BOUND_REFRESH_INTERVAL_MILLIS)
+                    emit(Unit)
+                }
+            }
 
         private val overviewSourceComplete: Flow<Boolean> =
             selectedTab
@@ -325,12 +353,15 @@ class InsightsViewModel
                             .observeSources(HISTORY_SOURCE_LIMIT)
                             .map { sources ->
                                 sources.map {
+                                    val identity = appIdentityResolver.resolve(it.packageName)
                                     HistorySourceUi(
                                         packageName = it.packageName,
-                                        appName = appIdentityResolver.resolve(it.packageName).label,
+                                        appName = identity.label,
                                         channelId = it.channelId,
                                         channelName = it.channelName,
                                         eventCount = it.eventCount,
+                                        appIcon = identity.icon,
+                                        appNameIsPackageFallback = identity.isPackageFallback,
                                     )
                                 }
                             }
@@ -485,12 +516,16 @@ class InsightsViewModel
 
         fun onUndo(eventId: String) {
             val affectedEvent = eventForRefresh(eventId)
+            val dailyInsightEpoch = dailyInsightWriteFence.captureEpoch()
             viewModelScope.launch(dispatcher) {
-                runCatchingPreservingCancellation { eventRepository.undo(eventId) }
-                    .onSuccess {
-                        refreshDailyInsight(affectedEvent)
-                        messages.value = uiText(R.string.message_insights_excluded)
-                    }.onFailure { messages.value = uiText(R.string.message_insights_update_failed) }
+                runCatchingPreservingCancellation {
+                    check(eventRepository.undo(eventId)) {
+                        "Notification event is unavailable"
+                    }
+                }.onSuccess {
+                    refreshDailyInsight(affectedEvent, dailyInsightEpoch)
+                    messages.value = uiText(R.string.message_insights_excluded)
+                }.onFailure { messages.value = uiText(R.string.message_insights_update_failed) }
             }
         }
 
@@ -622,6 +657,7 @@ class InsightsViewModel
             correctedLabel: String,
         ) {
             val affectedEvent = eventForRefresh(eventId)
+            val dailyInsightEpoch = dailyInsightWriteFence.captureEpoch()
             viewModelScope.launch(dispatcher) {
                 runCatchingPreservingCancellation {
                     feedbackRepository.recordCorrection(
@@ -634,7 +670,7 @@ class InsightsViewModel
                         ),
                     )
                 }.onSuccess {
-                    refreshDailyInsight(affectedEvent)
+                    refreshDailyInsight(affectedEvent, dailyInsightEpoch)
                     messages.value = uiText(R.string.message_recategorized, correctedLabel)
                 }.onFailure { messages.value = uiText(R.string.message_recategorize_failed) }
             }
@@ -645,11 +681,14 @@ class InsightsViewModel
             correctedIsAdvertisement: Boolean,
         ) {
             val affectedEvent = eventForRefresh(eventId)
+            val dailyInsightEpoch = dailyInsightWriteFence.captureEpoch()
             viewModelScope.launch(dispatcher) {
                 runCatchingPreservingCancellation {
-                    adFeedbackRepository.recordCorrection(eventId, correctedIsAdvertisement)
+                    check(adFeedbackRepository.recordCorrection(eventId, correctedIsAdvertisement)) {
+                        "Semantic feedback target is unavailable"
+                    }
                 }.onSuccess {
-                    refreshDailyInsight(affectedEvent)
+                    refreshDailyInsight(affectedEvent, dailyInsightEpoch)
                     messages.value =
                         uiText(
                             if (correctedIsAdvertisement) {
@@ -667,11 +706,14 @@ class InsightsViewModel
             correctedIntent: SemanticIntent,
         ) {
             val affectedEvent = eventForRefresh(eventId)
+            val dailyInsightEpoch = dailyInsightWriteFence.captureEpoch()
             viewModelScope.launch(dispatcher) {
                 runCatchingPreservingCancellation {
-                    adFeedbackRepository.recordCorrection(eventId, correctedIntent)
+                    check(adFeedbackRepository.recordCorrection(eventId, correctedIntent)) {
+                        "Semantic feedback target is unavailable"
+                    }
                 }.onSuccess {
-                    refreshDailyInsight(affectedEvent)
+                    refreshDailyInsight(affectedEvent, dailyInsightEpoch)
                     messages.value =
                         uiText(
                             R.string.message_semantic_corrected,
@@ -689,9 +731,10 @@ class InsightsViewModel
             }
         }
 
-        /** Re-subscribes today's SQL counters when the screen resumes after a date boundary. */
+        /** Refreshes wall-clock-bounded overview queries when the screen resumes. */
         fun refreshDayBoundary() {
             todayWindow.value = clock.todayWindow()
+            suggestionRefreshGeneration.value += 1
         }
 
         fun onUserMessageShown() {
@@ -706,7 +749,10 @@ class InsightsViewModel
             (uiState.value.events + uiState.value.historyEvents)
                 .firstOrNull { it.id == eventId }
 
-        private suspend fun refreshDailyInsight(event: EventListItem?) {
+        private suspend fun refreshDailyInsight(
+            event: EventListItem?,
+            dailyInsightEpoch: ScopedDataWriteFence.Epoch,
+        ) {
             event ?: return
             val epochDay =
                 event.postedEpochDay
@@ -718,7 +764,7 @@ class InsightsViewModel
             if (epochDay >= LocalDate.now(clock).toEpochDay()) return
             val day = LocalDate.ofEpochDay(epochDay)
             runCatchingPreservingCancellation {
-                dailyInsightRepository.aggregateAndStore(
+                dailyInsightRepository.aggregateAndStoreIfCurrent(
                     epochDay = epochDay,
                     startMillis = day.atStartOfDay(clock.zone).toInstant().toEpochMilli(),
                     endMillis =
@@ -729,6 +775,7 @@ class InsightsViewModel
                             .toEpochMilli(),
                     generatedAtMillis = clock.millis(),
                     topRules = DAILY_RULE_BREAKDOWN_LIMIT,
+                    dailyInsightEpoch = dailyInsightEpoch,
                 )
             }
         }
@@ -746,6 +793,8 @@ class InsightsViewModel
             const val STOP_TIMEOUT_MS = 5_000L
             const val MAX_QUERY_CHARS = MAX_NOTIFICATION_HISTORY_QUERY_CHARS
             const val SUGGESTION_WINDOW_MILLIS = 7L * 24 * 60 * 60 * 1_000
+            const val SUGGESTION_ACTIVITY_LIMIT = 1
+            const val SUGGESTION_BOUND_REFRESH_INTERVAL_MILLIS = 60L * 60 * 1_000
             const val LAST_7_DAYS_OFFSET = 6L
             const val LAST_30_DAYS_OFFSET = 29L
             const val LAST_90_DAYS_OFFSET = 89L
@@ -866,26 +915,30 @@ private fun AdObservation.toUiModel(): AdObservationUi =
         correctedIntent = correctedIntent,
     )
 
-private fun RuleSuggestion.toUiModel(appName: String): RuleSuggestionUi =
+private fun RuleSuggestion.toUiModel(identity: AppIdentityUi): RuleSuggestionUi =
     when (this) {
         is RuleSuggestion.QuietChannel ->
             RuleSuggestionUi(
                 key = key,
                 type = RuleSuggestionTypeUi.QUIET_CHANNEL,
-                appName = appName,
+                appName = identity.label,
                 packageName = packageName,
                 channelId = channelId,
                 numerator = silencedCount,
                 denominator = totalCount,
+                appIcon = identity.icon,
+                appNameIsPackageFallback = identity.isPackageFallback,
             )
         is RuleSuggestion.MarketingRuleDraft ->
             RuleSuggestionUi(
                 key = key,
                 type = RuleSuggestionTypeUi.MARKETING_RULE,
-                appName = appName,
+                appName = identity.label,
                 packageName = packageName,
                 numerator = marketingCorrections,
                 denominator = totalCorrections,
+                appIcon = identity.icon,
+                appNameIsPackageFallback = identity.isPackageFallback,
             )
     }
 

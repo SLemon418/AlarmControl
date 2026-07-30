@@ -415,9 +415,7 @@ internal class DefaultOnDeviceLlmManager(
         val store = modelStore
         if (store == null) {
             updateState(command.generation, command.previousState)
-            command.reply.complete(
-                DataResult.Failure(IllegalStateException("Model installation is not configured")),
-            )
+            command.reply.complete(DataResult.Failure(IllegalStateException("Model installation is not configured")))
             return
         }
         val result =
@@ -430,6 +428,21 @@ internal class DefaultOnDeviceLlmManager(
                             LlmInitState.Installing(copied, command.expectedBytes),
                         )
                     }
+
+                fun recoverReplacementFailure(error: Throwable): DataResult.Failure {
+                    engine.closeBestEffort()
+                    updateState(
+                        command.generation,
+                        recoverAfterFailedReplacement(
+                            engine = engine,
+                            modelStore = modelStore,
+                            previousState = command.previousState,
+                            staged = staged,
+                            originalFailure = error,
+                        ) { updateModelInfo(command.generation, it) },
+                    )
+                    return DataResult.Failure(error)
+                }
                 try {
                     generation.requireCurrentInstallation(stateLock, command.generation)
                     updateState(command.generation, LlmInitState.Loading)
@@ -452,38 +465,21 @@ internal class DefaultOnDeviceLlmManager(
                     throw error
                 } catch (error: ModelInstallationSupersededException) {
                     engine.closeBestEffort()
-                    staged.rollback()
+                    if (!staged.rollbackPreserving(error)) {
+                        updateModelInfo(command.generation, null)
+                        updateState(command.generation, LlmInitState.Unavailable(LlmFailure.STORAGE_FAILURE))
+                    }
                     DataResult.Failure(error)
                 } catch (error: OutOfMemoryError) {
-                    engine.closeBestEffort()
-                    staged.rollback()
-                    updateState(command.generation, LlmInitState.Unavailable(LlmFailure.LOAD_FAILED))
-                    DataResult.Failure(error)
+                    recoverReplacementFailure(error)
                 } catch (error: LinkageError) {
-                    engine.closeBestEffort()
-                    staged.rollback()
-                    updateState(
-                        command.generation,
-                        restorePreviousEngine(
-                            engine = engine,
-                            modelStore = modelStore,
-                            previousState = command.previousState,
-                        ) { updateModelInfo(command.generation, it) },
-                    )
-                    DataResult.Failure(error)
+                    recoverReplacementFailure(error)
                 } catch (error: Exception) {
-                    engine.closeBestEffort()
-                    staged.rollback()
-                    updateState(
-                        command.generation,
-                        restorePreviousEngine(
-                            engine = engine,
-                            modelStore = modelStore,
-                            previousState = command.previousState,
-                        ) { updateModelInfo(command.generation, it) },
-                    )
-                    DataResult.Failure(error)
+                    recoverReplacementFailure(error)
                 }
+            } catch (error: OutOfMemoryError) {
+                updateState(command.generation, stateAfterStagingOom(engine, command.previousState))
+                DataResult.Failure(error)
             } catch (error: IllegalArgumentException) {
                 updateState(command.generation, command.previousState.orUnavailable(LlmFailure.MODEL_INVALID))
                 DataResult.Failure(error)
@@ -642,6 +638,10 @@ private fun loadVerifiedOrPreviousModel(
         engine.load()
         store?.discardRollbackArtifacts()
         verifiedInfo
+    } catch (error: LinkageError) {
+        restorePreviousModel(engine, store) ?: throw error
+    } catch (error: OutOfMemoryError) {
+        restorePreviousModel(engine, store) ?: throw error
     } catch (error: Exception) {
         restorePreviousModel(engine, store) ?: throw error
     }
@@ -657,6 +657,10 @@ private fun restorePreviousModel(
         engine.load()
         store.discardRollbackArtifacts()
         restoredInfo
+    } catch (_: LinkageError) {
+        null
+    } catch (_: OutOfMemoryError) {
+        null
     } catch (_: Exception) {
         null
     }
@@ -665,35 +669,95 @@ private fun restorePreviousEngine(
     engine: LlmEngine,
     modelStore: LocalLlmModelStore?,
     previousState: LlmInitState,
+    originalFailure: Throwable,
     updateModelInfo: (LlmModelInfo?) -> Unit,
 ): LlmInitState {
-    if (previousState != LlmInitState.Ready || !engine.isModelAvailable()) {
+    if (previousState != LlmInitState.Ready) {
+        updateModelInfo(null)
+        return LlmInitState.Unavailable(LlmFailure.MODEL_INVALID)
+    }
+    if (!engine.isModelAvailable()) {
+        originalFailure.addSuppressed(IllegalStateException(MODEL_MISSING_MESSAGE))
         updateModelInfo(null)
         return LlmInitState.Unavailable(LlmFailure.MODEL_INVALID)
     }
     return try {
         val verifiedInfo = modelStore?.verifyInstalledModel()
         if (modelStore != null && verifiedInfo == null) {
+            originalFailure.addSuppressed(IllegalStateException(MODEL_MISSING_MESSAGE))
             updateModelInfo(null)
             return LlmInitState.Unavailable(LlmFailure.MODEL_MISSING)
         }
         engine.load()
         updateModelInfo(verifiedInfo)
         LlmInitState.Ready
-    } catch (_: ModelIntegrityException) {
+    } catch (error: ModelIntegrityException) {
+        originalFailure.addSuppressedDistinct(error)
         engine.closeBestEffort()
         updateModelInfo(null)
         LlmInitState.Unavailable(LlmFailure.MODEL_INTEGRITY_FAILED)
-    } catch (_: LinkageError) {
+    } catch (error: LinkageError) {
+        originalFailure.addSuppressedDistinct(error)
         engine.closeBestEffort()
         LlmInitState.Unavailable(LlmFailure.LOAD_FAILED)
-    } catch (_: OutOfMemoryError) {
+    } catch (error: OutOfMemoryError) {
+        originalFailure.addSuppressedDistinct(error)
         engine.closeBestEffort()
         LlmInitState.Unavailable(LlmFailure.LOAD_FAILED)
-    } catch (_: Exception) {
+    } catch (error: Exception) {
+        originalFailure.addSuppressedDistinct(error)
         engine.closeBestEffort()
         LlmInitState.Unavailable(LlmFailure.LOAD_FAILED)
     }
+}
+
+private fun recoverAfterFailedReplacement(
+    engine: LlmEngine,
+    modelStore: LocalLlmModelStore?,
+    previousState: LlmInitState,
+    staged: LocalLlmModelStore.StagedModel,
+    originalFailure: Throwable,
+    updateModelInfo: (LlmModelInfo?) -> Unit,
+): LlmInitState =
+    if (staged.rollbackPreserving(originalFailure)) {
+        restorePreviousEngine(
+            engine = engine,
+            modelStore = modelStore,
+            previousState = previousState,
+            originalFailure = originalFailure,
+            updateModelInfo = updateModelInfo,
+        )
+    } else {
+        updateModelInfo(null)
+        LlmInitState.Unavailable(LlmFailure.STORAGE_FAILURE)
+    }
+
+private fun LocalLlmModelStore.StagedModel.rollbackPreserving(originalFailure: Throwable): Boolean =
+    try {
+        rollback()
+        true
+    } catch (error: LinkageError) {
+        originalFailure.addSuppressedDistinct(error)
+        false
+    } catch (error: OutOfMemoryError) {
+        originalFailure.addSuppressedDistinct(error)
+        false
+    } catch (error: Exception) {
+        originalFailure.addSuppressedDistinct(error)
+        false
+    }
+
+private fun Throwable.addSuppressedDistinct(error: Throwable) {
+    if (error !== this) addSuppressed(error)
+}
+
+private fun stateAfterStagingOom(
+    engine: LlmEngine,
+    previousState: LlmInitState,
+): LlmInitState {
+    if (previousState == LlmInitState.Ready) return LlmInitState.Ready
+    engine.closeBestEffort()
+    return LlmInitState.Unavailable(LlmFailure.LOAD_FAILED)
 }
 
 private const val MODEL_MISSING_MESSAGE = "On-device model file is missing"

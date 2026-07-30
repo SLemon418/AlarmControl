@@ -224,6 +224,7 @@ interface NotificationRateStateDao {
         limit: Int,
     ): RateOccurrenceSeedSnapshot {
         val state = rateState()
+        val newestPersistedPostedAtMillis = newestHistoryPostedAt()
         val incompleteUntilMillis =
             state
                 ?.incompleteUntilMillis
@@ -240,9 +241,13 @@ interface NotificationRateStateDao {
             }
         return RateOccurrenceSeedSnapshot(
             rateState = state,
+            newestPersistedPostedAtMillis = newestPersistedPostedAtMillis,
             coverageStartMillis = coverageStartMillis,
             occurrences =
-                if (coverageStartMillis == null) {
+                if (
+                    coverageStartMillis == null ||
+                    newestPersistedPostedAtMillis?.let { it > nowMillis } == true
+                ) {
                     emptyList()
                 } else {
                     historyForSeed(coverageStartMillis, nowMillis, limit)
@@ -303,6 +308,7 @@ interface NotificationRateStateDao {
 
 data class RateOccurrenceSeedSnapshot(
     val rateState: NotificationRateStateEntity?,
+    val newestPersistedPostedAtMillis: Long?,
     val coverageStartMillis: Long?,
     val occurrences: List<NotificationRateOccurrenceHistoryEntity>,
 )

@@ -11,6 +11,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
+from coupled_artifact_publisher import publish_coupled_files
+
 SCHEMA_VERSION = "semantic-family-v1"
 MANIFEST_VERSION = "semantic-dataset-manifest-v6"
 SOURCE_KIND = "codex-synthetic"
@@ -247,10 +249,13 @@ def _validate_catalog_record(
             )
 
 
-def load_and_validate_catalogs(catalog_dir: Path) -> list[dict[str, Any]]:
-    """Load all source catalogs and enforce the semantic-family-v1 contract."""
+def _load_and_validate_catalogs_snapshot(
+    catalog_dir: Path,
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Validate catalogs and retain provenance from the exact parsed bytes."""
 
     records: list[dict[str, Any]] = []
+    catalog_hashes: dict[str, dict[str, Any]] = {}
     family_ids: set[str] = set()
     notification_texts: set[tuple[str, str]] = set()
     group_counts: Counter[tuple[str, str]] = Counter()
@@ -260,7 +265,12 @@ def load_and_validate_catalogs(catalog_dir: Path) -> list[dict[str, Any]]:
             path = catalog_dir / filename
             if not path.is_file():
                 raise DatasetValidationError(f"missing catalog: {path}")
-            lines = path.read_text(encoding="utf-8").splitlines()
+            content = path.read_bytes()
+            lines = content.decode("utf-8").splitlines()
+            catalog_hashes[f"catalog/{filename}"] = {
+                "sha256": _sha256_bytes(content),
+                "families": len(content.splitlines()),
+            }
             if any(not line.strip() for line in lines):
                 raise DatasetValidationError(
                     f"{path}: blank JSONL lines are not allowed"
@@ -317,7 +327,13 @@ def load_and_validate_catalogs(catalog_dir: Path) -> list[dict[str, Any]]:
             f"catalogs must contain exactly {expected_total} families, "
             f"found {len(records)}"
         )
-    return records
+    return records, catalog_hashes
+
+
+def load_and_validate_catalogs(catalog_dir: Path) -> list[dict[str, Any]]:
+    """Load all source catalogs and enforce the semantic-family-v1 contract."""
+
+    return _load_and_validate_catalogs_snapshot(catalog_dir)[0]
 
 
 def _family_order_key(record: dict[str, Any]) -> bytes:
@@ -561,25 +577,13 @@ def _jsonl_bytes(rows: Iterable[dict[str, Any]]) -> bytes:
     return text.encode("utf-8")
 
 
-def _catalog_hashes(catalog_dir: Path) -> dict[str, dict[str, Any]]:
-    hashes: dict[str, dict[str, Any]] = {}
-    for locale in LOCALES:
-        for filename in CATALOG_FILENAMES[locale]:
-            content = (catalog_dir / filename).read_bytes()
-            hashes[f"catalog/{filename}"] = {
-                "sha256": _sha256_bytes(content),
-                "families": len(content.splitlines()),
-            }
-    return hashes
-
-
 def build_dataset(
     catalog_dir: Path = DEFAULT_CATALOG_DIR,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
 ) -> dict[str, Any]:
     """Validate catalogs, render the dataset, and write its manifest."""
 
-    records = load_and_validate_catalogs(catalog_dir)
+    records, catalog_hashes = _load_and_validate_catalogs_snapshot(catalog_dir)
     assignments = assign_splits(records)
     rows = render_dataset_rows(records, assignments)
     dataset_bytes = _jsonl_bytes(rows)
@@ -619,7 +623,7 @@ def build_dataset(
                 "sha256": _sha256_bytes(dataset_bytes),
                 "rows": len(rows),
             },
-            **_catalog_hashes(catalog_dir),
+            **catalog_hashes,
         },
     }
     manifest_bytes = (
@@ -632,9 +636,13 @@ def build_dataset(
         + "\n"
     ).encode("utf-8")
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "dataset.jsonl").write_bytes(dataset_bytes)
-    (output_dir / "manifest.json").write_bytes(manifest_bytes)
+    publish_coupled_files(
+        {
+            output_dir / "dataset.jsonl": dataset_bytes,
+            output_dir / "manifest.json": manifest_bytes,
+        },
+        lock_name=".dataset.publish.lock",
+    )
     return manifest
 
 

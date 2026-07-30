@@ -11,6 +11,10 @@ import com.alarmcontrol.core.insights.DailyInsightRepository
 import com.alarmcontrol.core.insights.HourInsightCount
 import com.alarmcontrol.core.insights.RuleTriggerCount
 import com.alarmcontrol.core.insights.SemanticIntentCount
+import com.alarmcontrol.core.privacy.DailyInsightWriteFence
+import com.alarmcontrol.core.privacy.LocalDataResetWriteFence
+import com.alarmcontrol.core.privacy.ScopedDataWriteFence
+import com.alarmcontrol.core.privacy.StaleLocalDataWriteException
 import com.alarmcontrol.data.db.TransactionRunner
 import com.alarmcontrol.data.db.dao.ActionCountRow
 import com.alarmcontrol.data.db.dao.DailyInsightDao
@@ -27,6 +31,8 @@ class DailyInsightRepositoryImpl
     constructor(
         private val dao: DailyInsightDao,
         private val transactionRunner: TransactionRunner,
+        private val localDataResetWriteFence: LocalDataResetWriteFence = LocalDataResetWriteFence(),
+        private val dailyInsightWriteFence: DailyInsightWriteFence = DailyInsightWriteFence(),
     ) : DailyInsightRepository {
         override suspend fun aggregateAndStore(
             epochDay: Long,
@@ -35,86 +41,137 @@ class DailyInsightRepositoryImpl
             generatedAtMillis: Long,
             topRules: Int,
         ): DailyInsight {
+            val resetEpoch = localDataResetWriteFence.captureEpoch()
+            val dailyInsightEpoch = dailyInsightWriteFence.captureEpoch()
+            return aggregateAndStoreIfCurrent(
+                epochDay,
+                startMillis,
+                endMillis,
+                generatedAtMillis,
+                topRules,
+                dailyInsightEpoch,
+                resetEpoch,
+            )
+        }
+
+        override suspend fun aggregateAndStoreIfCurrent(
+            epochDay: Long,
+            startMillis: Long,
+            endMillis: Long,
+            generatedAtMillis: Long,
+            topRules: Int,
+            dailyInsightEpoch: ScopedDataWriteFence.Epoch,
+        ): DailyInsight =
+            aggregateAndStoreIfCurrent(
+                epochDay,
+                startMillis,
+                endMillis,
+                generatedAtMillis,
+                topRules,
+                dailyInsightEpoch,
+                localDataResetWriteFence.captureEpoch(),
+            )
+
+        @Suppress("LongMethod") // One transaction reads and persists every daily breakdown coherently.
+        private suspend fun aggregateAndStoreIfCurrent(
+            epochDay: Long,
+            startMillis: Long,
+            endMillis: Long,
+            generatedAtMillis: Long,
+            topRules: Int,
+            dailyInsightEpoch: ScopedDataWriteFence.Epoch,
+            resetEpoch: LocalDataResetWriteFence.Epoch,
+        ): DailyInsight {
             require(startMillis < endMillis) { "Daily insight window must not be empty or reversed" }
             require(topRules in 1..MAX_RULE_BREAKDOWN_LIMIT) { "Daily rule limit is out of range" }
-            return transactionRunner.run {
-                val actionBreakdown =
-                    dao.actionCountsBetween(epochDay, startMillis, endMillis).toActionBreakdown()
-                val monitoredActionBreakdown =
-                    dao.monitoredActionCountsBetween(epochDay, startMillis, endMillis).toActionBreakdown()
-                val ruleRows = dao.topRulesBetween(epochDay, startMillis, endMillis, topRules)
-                val monitorRuleRows =
-                    dao.topMonitoredRulesBetween(epochDay, startMillis, endMillis, topRules)
-                val channelRows =
-                    dao.channelBreakdownBetween(epochDay, startMillis, endMillis, BREAKDOWN_LIMIT)
-                val appRows =
-                    dao.appBreakdownBetween(
-                        epochDay,
-                        startMillis,
-                        endMillis,
-                        StoredRuleAction.CANCEL,
-                        StoredRuleAction.SNOOZE,
-                        BREAKDOWN_LIMIT,
-                    )
-                // Only actions with a real platform silencing side effect count as muted.
-                val insight =
-                    DailyInsight(
-                        epochDay = epochDay,
-                        windowStartMillis = startMillis,
-                        windowEndMillis = endMillis,
-                        totalNotifications = dao.countBetween(epochDay, startMillis, endMillis),
-                        mutedCount = actionBreakdown.silenced,
-                        topRules =
-                            ruleRows
-                                .map { RuleTriggerCount(it.ruleId.toString(), it.count) },
-                        topMonitoredRules =
-                            monitorRuleRows
-                                .map { RuleTriggerCount(it.ruleId.toString(), it.count) },
-                        categoryBreakdown =
-                            dao
-                                .categoryBreakdownBetween(epochDay, startMillis, endMillis)
-                                .map { CategoryCount(it.category, it.count) },
-                        generatedAtMillis = generatedAtMillis,
-                        actionBreakdown = actionBreakdown,
-                        monitoredActionBreakdown = monitoredActionBreakdown,
-                        channelBreakdown =
-                            channelRows
-                                .map { ChannelCount(it.packageName, it.channelId, it.count, it.channelName) },
-                        appBreakdown =
-                            appRows.map { AppInsightCount(it.packageName, it.totalCount, it.silencedCount) },
-                        hourBreakdown =
-                            dao
-                                .hourBreakdownBetween(
-                                    epochDay,
-                                    startMillis,
-                                    endMillis,
-                                    StoredRuleAction.CANCEL,
-                                    StoredRuleAction.SNOOZE,
-                                ).map { HourInsightCount(it.hour, it.totalCount, it.silencedCount) },
-                        semanticBreakdown =
-                            dao
-                                .semanticBreakdownBetween(epochDay, startMillis, endMillis)
-                                .map { SemanticIntentCount(SemanticIntent.valueOf(it.intent), it.count) },
-                        mlClassifiedCount = dao.countMlClassifiedBetween(epochDay, startMillis, endMillis),
-                        categoryCorrectionCount =
-                            dao.countCategoryCorrectionsBetween(epochDay, startMillis, endMillis),
-                        semanticCorrectionCount =
-                            dao.countSemanticCorrectionsBetween(epochDay, startMillis, endMillis),
-                        breakdownVersion = CURRENT_DAILY_INSIGHT_BREAKDOWN_VERSION,
-                        sourceComplete = !dao.hasSourceGap(epochDay),
-                        ruleBreakdownComplete =
-                            dao.countMatchedRulesBetween(epochDay, startMillis, endMillis) <= topRules,
-                        monitorRuleBreakdownComplete =
-                            dao.countMonitoredRulesBetween(epochDay, startMillis, endMillis) <= topRules,
-                        appBreakdownComplete =
-                            dao.countAppsBetween(epochDay, startMillis, endMillis) <= BREAKDOWN_LIMIT,
-                        channelBreakdownComplete =
-                            dao.countChannelsBetween(epochDay, startMillis, endMillis) <= BREAKDOWN_LIMIT,
-                    )
+            return localDataResetWriteFence.writeIfCurrent(resetEpoch) {
+                dailyInsightWriteFence.writeIfCurrent(dailyInsightEpoch) {
+                    transactionRunner.run {
+                        val actionBreakdown =
+                            dao.actionCountsBetween(epochDay, startMillis, endMillis).toActionBreakdown()
+                        val monitoredActionBreakdown =
+                            dao.monitoredActionCountsBetween(epochDay, startMillis, endMillis).toActionBreakdown()
+                        val ruleRows = dao.topRulesBetween(epochDay, startMillis, endMillis, topRules)
+                        val monitorRuleRows =
+                            dao.topMonitoredRulesBetween(epochDay, startMillis, endMillis, topRules)
+                        val channelRows =
+                            dao.channelBreakdownBetween(epochDay, startMillis, endMillis, BREAKDOWN_LIMIT)
+                        val appRows =
+                            dao.appBreakdownBetween(
+                                epochDay,
+                                startMillis,
+                                endMillis,
+                                StoredRuleAction.CANCEL,
+                                StoredRuleAction.SNOOZE,
+                                BREAKDOWN_LIMIT,
+                            )
+                        // Only actions with a real platform silencing side effect count as muted.
+                        val insight =
+                            DailyInsight(
+                                epochDay = epochDay,
+                                windowStartMillis = startMillis,
+                                windowEndMillis = endMillis,
+                                totalNotifications = dao.countBetween(epochDay, startMillis, endMillis),
+                                mutedCount = actionBreakdown.silenced,
+                                topRules =
+                                    ruleRows
+                                        .map { RuleTriggerCount(it.ruleId.toString(), it.count) },
+                                topMonitoredRules =
+                                    monitorRuleRows
+                                        .map { RuleTriggerCount(it.ruleId.toString(), it.count) },
+                                categoryBreakdown =
+                                    dao
+                                        .categoryBreakdownBetween(epochDay, startMillis, endMillis)
+                                        .map { CategoryCount(it.category, it.count) },
+                                generatedAtMillis = generatedAtMillis,
+                                actionBreakdown = actionBreakdown,
+                                monitoredActionBreakdown = monitoredActionBreakdown,
+                                channelBreakdown =
+                                    channelRows
+                                        .map { ChannelCount(it.packageName, it.channelId, it.count, it.channelName) },
+                                appBreakdown =
+                                    appRows.map { AppInsightCount(it.packageName, it.totalCount, it.silencedCount) },
+                                hourBreakdown =
+                                    dao
+                                        .hourBreakdownBetween(
+                                            epochDay,
+                                            startMillis,
+                                            endMillis,
+                                            StoredRuleAction.CANCEL,
+                                            StoredRuleAction.SNOOZE,
+                                        ).map { HourInsightCount(it.hour, it.totalCount, it.silencedCount) },
+                                semanticBreakdown =
+                                    dao
+                                        .semanticBreakdownBetween(epochDay, startMillis, endMillis)
+                                        .map { SemanticIntentCount(SemanticIntent.valueOf(it.intent), it.count) },
+                                mlClassifiedCount = dao.countMlClassifiedBetween(epochDay, startMillis, endMillis),
+                                categoryCorrectionCount =
+                                    dao.countCategoryCorrectionsBetween(epochDay, startMillis, endMillis),
+                                semanticCorrectionCount =
+                                    dao.countSemanticCorrectionsBetween(epochDay, startMillis, endMillis),
+                                breakdownVersion = CURRENT_DAILY_INSIGHT_BREAKDOWN_VERSION,
+                                sourceComplete =
+                                    !dao.hasSourceGap(epochDay) &&
+                                        dao.countMissingPostedMinuteBetween(
+                                            epochDay,
+                                            startMillis,
+                                            endMillis,
+                                        ) == 0,
+                                ruleBreakdownComplete =
+                                    dao.countMatchedRulesBetween(epochDay, startMillis, endMillis) <= topRules,
+                                monitorRuleBreakdownComplete =
+                                    dao.countMonitoredRulesBetween(epochDay, startMillis, endMillis) <= topRules,
+                                appBreakdownComplete =
+                                    dao.countAppsBetween(epochDay, startMillis, endMillis) <= BREAKDOWN_LIMIT,
+                                channelBreakdownComplete =
+                                    dao.countChannelsBetween(epochDay, startMillis, endMillis) <= BREAKDOWN_LIMIT,
+                            )
 
-                dao.store(insight.toWrite())
-                insight
-            }
+                        dao.store(insight.toWrite())
+                        insight
+                    }
+                } ?: throw StaleLocalDataWriteException()
+            } ?: throw StaleLocalDataWriteException()
         }
 
         override fun observeRecent(limit: Int): Flow<List<DailyInsight>> =

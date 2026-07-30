@@ -40,6 +40,7 @@ import com.alarmcontrol.core.insights.InsightsSummaryRepository
 import com.alarmcontrol.core.insights.InsightsTrendPoint
 import com.alarmcontrol.core.insights.RuleInsightCount
 import com.alarmcontrol.core.insights.RuleTriggerCount
+import com.alarmcontrol.core.privacy.DailyInsightWriteFence
 import com.alarmcontrol.ml.NotificationCategories
 import com.alarmcontrol.testsupport.MainDispatcherRule
 import com.alarmcontrol.testsupport.awaitUntil
@@ -65,6 +66,7 @@ import org.junit.Test
 import java.time.Clock
 import java.time.Instant
 import java.time.LocalDate
+import java.time.ZoneId
 import java.time.ZoneOffset
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
@@ -120,7 +122,10 @@ class InsightsViewModelTest {
     private val clock = Clock.fixed(Instant.parse("2026-06-22T10:00:00Z"), ZoneOffset.UTC)
     private val appIdentityResolver = AppIdentityResolver { AppIdentityUi("App: $it", null) }
 
-    private fun viewModel(): InsightsViewModel {
+    private fun viewModel(
+        dailyInsightWriteFence: DailyInsightWriteFence = DailyInsightWriteFence(),
+        testClock: Clock = clock,
+    ): InsightsViewModel {
         every { eventRepository.observeRecent(any()) } returns recent
         every { eventRepository.observeActionBreakdownSince(any()) } returns actionBreakdownFlow
         every {
@@ -144,7 +149,7 @@ class InsightsViewModelTest {
         every { insightsAnalyticsRepository.observe(any()) } returns analyticsFlow
         every { insightsAnalyticsRepository.observeAvailableRange() } returns availableRangeFlow
         every { ruleRepository.observeRules() } returns rulesFlow
-        every { ruleSuggestionRepository.observeSuggestions(any()) } returns suggestionsFlow
+        every { ruleSuggestionRepository.observeSuggestions(any(), any()) } returns suggestionsFlow
         return InsightsViewModel(
             eventRepository,
             feedbackRepository,
@@ -157,8 +162,9 @@ class InsightsViewModelTest {
             ruleSuggestionRepository,
             categories,
             appIdentityResolver,
-            clock,
+            testClock,
             mainDispatcherRule.dispatcher,
+            dailyInsightWriteFence,
         )
     }
 
@@ -303,7 +309,7 @@ class InsightsViewModelTest {
     @Test
     fun `undo delegates to the repository and confirms`() =
         runTest {
-            coEvery { eventRepository.undo(any()) } just Runs
+            coEvery { eventRepository.undo(any()) } returns true
             val vm = viewModel()
 
             vm.uiState.test {
@@ -336,9 +342,17 @@ class InsightsViewModelTest {
                 )
             coEvery { eventRepository.undo("5") } answers {
                 recent.value = emptyList()
+                true
             }
             coEvery {
-                dailyInsightRepository.aggregateAndStore(any(), any(), any(), any(), any())
+                dailyInsightRepository.aggregateAndStoreIfCurrent(
+                    any(),
+                    any(),
+                    any(),
+                    any(),
+                    any(),
+                    any(),
+                )
             } returns
                 DailyInsight(
                     epochDay = day.toEpochDay(),
@@ -364,7 +378,7 @@ class InsightsViewModelTest {
             }
 
             coVerify {
-                dailyInsightRepository.aggregateAndStore(
+                dailyInsightRepository.aggregateAndStoreIfCurrent(
                     epochDay = day.toEpochDay(),
                     startMillis = day.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli(),
                     endMillis =
@@ -375,6 +389,33 @@ class InsightsViewModelTest {
                             .toEpochMilli(),
                     generatedAtMillis = clock.millis(),
                     topRules = 50,
+                    dailyInsightEpoch = any(),
+                )
+            }
+        }
+
+    @Test
+    fun `missing undo target reports failure without recreating a daily rollup`() =
+        runTest {
+            coEvery { eventRepository.undo("missing") } returns false
+            val vm = viewModel()
+
+            vm.uiState.test {
+                awaitUntil { !it.isLoading }
+                vm.onUndo("missing")
+                val failed = awaitUntil { it.userMessage != null }
+                assertEquals(uiText(R.string.message_insights_update_failed), failed.userMessage)
+                cancelAndIgnoreRemainingEvents()
+            }
+
+            coVerify(exactly = 0) {
+                dailyInsightRepository.aggregateAndStoreIfCurrent(
+                    any(),
+                    any(),
+                    any(),
+                    any(),
+                    any(),
+                    any(),
                 )
             }
         }
@@ -408,6 +449,7 @@ class InsightsViewModelTest {
     @Test
     fun `LLM observation and explicit ad correction stay linked to one event`() =
         runTest {
+            coEvery { adFeedbackRepository.recordCorrection("7", false) } returns true
             recent.value =
                 listOf(
                     NotificationEvent(
@@ -453,7 +495,7 @@ class InsightsViewModelTest {
     @Test
     fun `semantic correction records one of the seven intents`() =
         runTest {
-            coEvery { adFeedbackRepository.recordCorrection("7", SemanticIntent.SECURITY) } just Runs
+            coEvery { adFeedbackRepository.recordCorrection("7", SemanticIntent.SECURITY) } returns true
             val vm = viewModel()
 
             vm.uiState.test {
@@ -512,6 +554,64 @@ class InsightsViewModelTest {
                     "channel:com.shop:offers",
                     Instant.parse("2026-06-22T10:00:00Z").toEpochMilli(),
                 )
+            }
+        }
+
+    @Test
+    fun `suggestion bounds advance with elapsed time new activity and screen resume`() =
+        runTest {
+            val testClock =
+                MutableTestClock(
+                    Instant.parse("2026-06-22T10:00:00Z"),
+                    ZoneOffset.UTC,
+                )
+            val observedBounds = mutableListOf<Pair<Long, Long>>()
+            val vm = viewModel(testClock = testClock)
+            every { ruleSuggestionRepository.observeSuggestions(any(), any()) } answers {
+                observedBounds += firstArg<Long>() to secondArg<Long>()
+                suggestionsFlow
+            }
+
+            vm.uiState.test {
+                awaitUntil { !it.isLoading }
+                mainDispatcherRule.dispatcher.scheduler.runCurrent()
+                val windowMillis = 7L * 24 * 60 * 60 * 1_000
+                val initialNow = testClock.millis()
+                assertEquals(listOf(initialNow - windowMillis to initialNow), observedBounds)
+
+                val refreshIntervalMillis = 60L * 60 * 1_000
+                testClock.advanceMillis(refreshIntervalMillis)
+                mainDispatcherRule.dispatcher.scheduler.advanceTimeBy(refreshIntervalMillis)
+                mainDispatcherRule.dispatcher.scheduler.runCurrent()
+                val elapsedNow = testClock.millis()
+                assertEquals(elapsedNow - windowMillis to elapsedNow, observedBounds.last())
+                assertEquals(2, observedBounds.size)
+
+                testClock.advanceMillis(60_000)
+                recent.value =
+                    listOf(
+                        NotificationEvent(
+                            packageName = "com.example.new",
+                            category = null,
+                            postedAtMillis = testClock.millis(),
+                            action = RuleAction.Keep,
+                            matchedRuleId = null,
+                            recordedAtMillis = testClock.millis(),
+                            id = "new",
+                        ),
+                    )
+                mainDispatcherRule.dispatcher.scheduler.runCurrent()
+                val activityNow = testClock.millis()
+                assertEquals(activityNow - windowMillis to activityNow, observedBounds.last())
+                assertEquals(3, observedBounds.size)
+
+                testClock.advanceMillis(60_000)
+                vm.refreshDayBoundary()
+                mainDispatcherRule.dispatcher.scheduler.runCurrent()
+                val resumedNow = testClock.millis()
+                assertEquals(resumedNow - windowMillis to resumedNow, observedBounds.last())
+                assertEquals(4, observedBounds.size)
+                cancelAndIgnoreRemainingEvents()
             }
         }
 
@@ -937,4 +1037,21 @@ class InsightsViewModelTest {
         )
 
     private fun InsightsDateRange.toUiRange(): AvailableRangeUi = AvailableRangeUi(startEpochDay, endEpochDay)
+}
+
+private class MutableTestClock(
+    initialInstant: Instant,
+    private val zoneId: ZoneId,
+) : Clock() {
+    private var currentInstant = initialInstant
+
+    override fun getZone(): ZoneId = zoneId
+
+    override fun withZone(zone: ZoneId): Clock = MutableTestClock(currentInstant, zone)
+
+    override fun instant(): Instant = currentInstant
+
+    fun advanceMillis(millis: Long) {
+        currentInstant = currentInstant.plusMillis(millis)
+    }
 }

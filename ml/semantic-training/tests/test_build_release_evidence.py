@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 TRAINING_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TRAINING_DIR))
@@ -618,6 +619,87 @@ class ReleaseEvidenceTest(unittest.TestCase):
             {"evidence.json", "MODEL_CARD.md"},
             {path.name for path in output.iterdir()},
         )
+
+    def test_evidence_publish_syncs_staging_and_parent_directories(self) -> None:
+        output = self.root / "durable-evidence"
+
+        with mock.patch.object(
+            evidence_builder,
+            "_fsync_directory",
+            wraps=evidence_builder._fsync_directory,
+        ) as sync_directory:
+            evidence_builder.write_release_evidence(
+                output,
+                {"status": "candidate"},
+                "model card\n",
+            )
+
+        self.assertEqual(2, sync_directory.call_count)
+        self.assertEqual(output.parent, sync_directory.call_args_list[-1].args[0])
+
+    def test_evidence_publish_failure_restores_previous_directory(self) -> None:
+        output = self.root / "recoverable-evidence"
+        evidence_builder.write_release_evidence(
+            output,
+            {"status": "previous"},
+            "previous card\n",
+        )
+        previous_json = (output / "evidence.json").read_bytes()
+        previous_card = (output / "MODEL_CARD.md").read_bytes()
+        real_replace = evidence_builder.os.replace
+
+        def fail_new_publish(source: object, destination: object) -> None:
+            source_path = Path(source)
+            if (
+                Path(destination) == output
+                and source_path.name.endswith(".tmp")
+            ):
+                raise OSError("simulated publish interruption")
+            real_replace(source, destination)
+
+        with mock.patch.object(
+            evidence_builder.os,
+            "replace",
+            side_effect=fail_new_publish,
+        ):
+            with self.assertRaises(OSError):
+                evidence_builder.write_release_evidence(
+                    output,
+                    {"status": "replacement"},
+                    "replacement card\n",
+                )
+
+        self.assertEqual(previous_json, (output / "evidence.json").read_bytes())
+        self.assertEqual(previous_card, (output / "MODEL_CARD.md").read_bytes())
+        self.assertFalse(
+            output.with_name(f".{output.name}.previous").exists()
+        )
+
+    def test_evidence_publish_recovers_stale_complete_backup(self) -> None:
+        output = self.root / "interrupted-evidence"
+        backup = output.with_name(f".{output.name}.previous")
+        evidence_builder.write_release_evidence(
+            output,
+            {"status": "previous"},
+            "previous card\n",
+        )
+        evidence_builder.os.replace(output, backup)
+
+        evidence_builder.write_release_evidence(
+            output,
+            {"status": "replacement"},
+            "replacement card\n",
+        )
+
+        self.assertEqual(
+            {"status": "replacement"},
+            json.loads((output / "evidence.json").read_text(encoding="utf-8")),
+        )
+        self.assertEqual(
+            "replacement card\n",
+            (output / "MODEL_CARD.md").read_text(encoding="utf-8"),
+        )
+        self.assertFalse(backup.exists())
 
     def test_rejects_old_partial_or_mismatched_threshold_chain(self) -> None:
         def legacy_selection(value: dict[str, object]) -> None:

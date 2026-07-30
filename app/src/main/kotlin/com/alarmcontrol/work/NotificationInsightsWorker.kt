@@ -6,6 +6,7 @@ import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.alarmcontrol.core.coroutines.AppDispatcher
 import com.alarmcontrol.core.coroutines.Dispatcher
+import com.alarmcontrol.core.privacy.StaleLocalDataWriteException
 import com.alarmcontrol.core.result.DataResult
 import com.alarmcontrol.data.insights.InsightsHousekeeper
 import dagger.assisted.Assisted
@@ -53,7 +54,14 @@ internal fun insightWorkOutcome(
 ): InsightWorkOutcome =
     when (result) {
         is DataResult.Success -> InsightWorkOutcome.SUCCESS
-        is DataResult.Failure,
+        is DataResult.Failure ->
+            if (result.throwable is StaleLocalDataWriteException) {
+                InsightWorkOutcome.SUCCESS
+            } else if (runAttemptCount < MAX_RETRY_ATTEMPTS) {
+                InsightWorkOutcome.RETRY
+            } else {
+                InsightWorkOutcome.FAILURE
+            }
         DataResult.Loading,
         -> {
             if (runAttemptCount < MAX_RETRY_ATTEMPTS) {

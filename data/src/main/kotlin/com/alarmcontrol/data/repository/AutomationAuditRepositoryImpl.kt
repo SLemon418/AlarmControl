@@ -6,6 +6,8 @@ import com.alarmcontrol.core.automation.AutomationOperation
 import com.alarmcontrol.core.automation.AutomationOutcome
 import com.alarmcontrol.core.automation.AutomationSource
 import com.alarmcontrol.core.automation.AutomationTarget
+import com.alarmcontrol.core.privacy.LocalDataResetWriteFence
+import com.alarmcontrol.core.privacy.StaleLocalDataWriteException
 import com.alarmcontrol.data.db.dao.AutomationAuditDao
 import com.alarmcontrol.data.db.entity.AutomationAuditEntity
 import kotlinx.coroutines.flow.Flow
@@ -16,9 +18,20 @@ class AutomationAuditRepositoryImpl
     @Inject
     constructor(
         private val dao: AutomationAuditDao,
+        private val localDataResetWriteFence: LocalDataResetWriteFence = LocalDataResetWriteFence(),
     ) : AutomationAuditRepository {
         override suspend fun record(entry: AutomationAuditEntry) {
-            dao.recordBounded(entry.toEntity(), MAX_ROWS)
+            recordIfCurrent(entry, localDataResetWriteFence.captureEpoch())
+        }
+
+        override suspend fun recordIfCurrent(
+            entry: AutomationAuditEntry,
+            resetEpoch: LocalDataResetWriteFence.Epoch,
+        ) {
+            localDataResetWriteFence.writeIfCurrent(resetEpoch) {
+                dao.recordBounded(entry.toEntity(), MAX_ROWS)
+                Unit
+            } ?: throw StaleLocalDataWriteException()
         }
 
         override fun observeRecent(limit: Int): Flow<List<AutomationAuditEntry>> {

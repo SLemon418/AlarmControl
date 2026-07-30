@@ -8,7 +8,9 @@ app's runtime, which declares **no `INTERNET` permission** and loads everything 
 
 ## What it produces
 
-`train.py` writes three assets into `../src/main/assets/` (committed to the repo):
+`train.py` writes a complete immutable generation under
+`../src/main/assets/classifier_generations/` and atomically selects it with
+`classifier_current.txt` (all committed to the repo):
 
 | Asset | Contract |
 |-------|----------|
@@ -16,9 +18,10 @@ app's runtime, which declares **no `INTERNET` permission** and loads everything 
 | `vocab.txt` | one token per line — defines feature order (`V` rows) |
 | `labels.txt` | one label per line — defines output order (`L` rows) |
 
-These three are the **single source of truth** for vocab + labels. The Kotlin runtime loads
-`vocab.txt`/`labels.txt` from assets (see `MlModule`), so the model and its feature/label order can
-never drift from the code.
+These three are the **single source of truth** for vocab + labels. The Kotlin runtime resolves the
+single committed generation before loading its model, vocab, and labels (see `ModelAssets` and
+`MlModule`), so a killed or concurrent publisher cannot expose a mixed set. Repositories produced
+before generation publishing retain the root asset names as a compatibility fallback.
 
 ## Feature contract
 
@@ -38,7 +41,16 @@ python3 -m venv .venv
 
 The run is deterministic (fixed seeds + op determinism, alphabetically sorted vocab) and **fails**
 if any held-out fixture regresses — this is the "assert exact labels" check from CLAUDE.md §5,
-performed here because the Android instrumented test cannot run in this environment.
+performed here because the Android instrumented test cannot run in this environment. New outputs
+are written to a same-filesystem immutable generation, fsynced, and verified before a single pointer
+replacement publishes the set. A process lock serializes concurrent publishers; a crash before the
+pointer replacement leaves the last-known-good generation selected.
+
+The publisher regression tests use only the Python standard library:
+
+```sh
+python3 -m unittest discover -s . -p 'test_*.py'
+```
 
 ## Editing the dataset
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -15,14 +16,22 @@ import time
 from pathlib import Path
 from typing import Any, Sequence
 
+from atomic_generation import _fsync_directory
+from coupled_artifact_publisher import (
+    CoupledArtifactError,
+    json_bytes,
+    jsonl_bytes,
+    normalize_publication_path,
+    publish_coupled_files,
+)
 from semantic_contract import (
     ContractError,
     LABELS,
     MAX_SEQUENCE_LENGTH,
-    load_jsonl,
-    model_bundle_hashes as contract_model_bundle_hashes,
+    load_jsonl_snapshot,
+    model_bundle_evidence as contract_model_bundle_evidence,
     notification_text,
-    sha256_file,
+    resolve_training_model_bundle,
 )
 
 PREDICTION_SCHEMA_VERSION = "alarmcontrol-semantic-prediction-v1"
@@ -122,6 +131,7 @@ def _atomic_jsonl(path: Path, records: Sequence[dict[str, Any]]) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        _fsync_directory(path.parent)
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
@@ -142,9 +152,17 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        _fsync_directory(path.parent)
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
+
+
+def _resolve_output_path(path: Path) -> Path:
+    try:
+        return normalize_publication_path(path)
+    except CoupledArtifactError as error:
+        raise PredictionInputError(str(error)) from error
 
 
 def _require_nonempty_string(value: Any, context: str) -> str:
@@ -190,9 +208,20 @@ def select_source_records(
     input_path: Path,
     selected_split: str | None,
 ) -> list[dict[str, Any]]:
+    """Compatibility view returning only the selected source rows."""
+
+    return select_source_records_snapshot(input_path, selected_split)[0]
+
+
+def select_source_records_snapshot(
+    input_path: Path,
+    selected_split: str | None,
+) -> tuple[list[dict[str, Any]], str]:
+    """Select and validate records plus the hash of their source byte snapshot."""
+
     try:
-        records = load_jsonl(input_path)
-    except (ContractError, OSError) as error:
+        records, input_sha256 = load_jsonl_snapshot(input_path)
+    except (ContractError, OSError, UnicodeError) as error:
         raise PredictionInputError(str(error)) from error
     if selected_split is not None:
         records = [
@@ -211,7 +240,7 @@ def select_source_records(
                 f"{input_path}:{index}: duplicate id {identifier!r}"
             )
         seen_ids.add(identifier)
-    return records
+    return records, input_sha256
 
 
 def _require_local_model_bundle(path: Path) -> Path:
@@ -220,11 +249,17 @@ def _require_local_model_bundle(path: Path) -> Path:
         raise PredictionInputError(
             f"--model-dir must not be a symlink: {expanded}"
         )
-    if not expanded.is_dir():
+    try:
+        selected = resolve_training_model_bundle(expanded)
+    except (OSError, ValueError) as error:
+        raise PredictionInputError(
+            f"--model-dir has no valid committed generation: {expanded}"
+        ) from error
+    if selected.is_symlink() or not selected.is_dir():
         raise PredictionInputError(
             f"--model-dir must be an existing local directory: {expanded}"
         )
-    resolved = expanded.resolve()
+    resolved = selected.resolve()
     if not (resolved / "config.json").is_file():
         raise PredictionInputError(
             f"local model bundle is missing config.json: {resolved}"
@@ -239,10 +274,37 @@ def _require_local_model_bundle(path: Path) -> Path:
 def model_bundle_hashes(model_dir: Path) -> tuple[dict[str, str], str]:
     """Hash all regular bundle files and derive one stable bundle digest."""
 
+    file_hashes, digest, _ = model_bundle_evidence(model_dir)
+    return file_hashes, digest
+
+
+def model_bundle_evidence(
+    model_dir: Path,
+) -> tuple[
+    dict[str, str],
+    str,
+    dict[str, tuple[int, int, int, int, int]],
+]:
+    """Capture hashes and stable identities for one local model bundle."""
+
     try:
-        return contract_model_bundle_hashes(model_dir)
+        return contract_model_bundle_evidence(model_dir)
     except ContractError as error:
         raise PredictionInputError(str(error)) from error
+
+
+def _require_unchanged_model_bundle(
+    model_dir: Path,
+    expected: tuple[
+        dict[str, str],
+        str,
+        dict[str, tuple[int, int, int, int, int]],
+    ],
+) -> None:
+    if model_bundle_evidence(model_dir) != expected:
+        raise PredictionInputError(
+            "model bundle changed while predictions were being produced"
+        )
 
 
 def _validate_model_labels(model: Any) -> None:
@@ -305,7 +367,7 @@ def _validate_arguments(
             f"input does not exist: {arguments.input}"
         )
     arguments.input = arguments.input.resolve()
-    arguments.output = arguments.output.expanduser().resolve()
+    arguments.output = _resolve_output_path(arguments.output)
     return arguments
 
 
@@ -313,7 +375,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     configure_offline_cpu_environment()
     try:
         arguments = _validate_arguments(build_parser().parse_args(argv))
-        source_records = select_source_records(
+        source_records, input_sha256 = select_source_records_snapshot(
             arguments.input,
             arguments.split,
         )
@@ -321,9 +383,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             arguments.max_rss_bytes,
             "before model bundle hash",
         )
-        bundle_hashes, bundle_digest = model_bundle_hashes(
-            arguments.model_dir
-        )
+        bundle_evidence = model_bundle_evidence(arguments.model_dir)
+        bundle_hashes, bundle_digest, _ = bundle_evidence
         enforce_memory_ceiling(
             arguments.max_rss_bytes,
             "before model load",
@@ -444,15 +505,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
 
         output_path = arguments.output
-        _atomic_jsonl(output_path, predictions)
+        prediction_bytes = jsonl_bytes(predictions)
+        _require_unchanged_model_bundle(
+            arguments.model_dir,
+            bundle_evidence,
+        )
         manifest = {
             "schema_version": MANIFEST_SCHEMA_VERSION,
             "prediction_schema_version": PREDICTION_SCHEMA_VERSION,
             "backend": "pytorch-koelectra",
             "input": str(arguments.input),
-            "input_sha256": sha256_file(arguments.input),
+            "input_sha256": input_sha256,
             "output": str(output_path),
-            "output_sha256": sha256_file(output_path),
+            "output_sha256": hashlib.sha256(prediction_bytes).hexdigest(),
             "model_artifact_sha256": bundle_digest,
             "selected_split": arguments.split,
             "row_count": len(predictions),
@@ -488,7 +553,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         manifest_path = output_path.with_suffix(
             f"{output_path.suffix}.manifest.json"
         )
-        _atomic_json(manifest_path, manifest)
+        publish_coupled_files(
+            {
+                output_path: prediction_bytes,
+                manifest_path: json_bytes(manifest),
+            },
+            lock_name=f".{output_path.name}.publish.lock",
+        )
         print(json.dumps(manifest, ensure_ascii=False, sort_keys=True))
         return 0
     except (PredictionInputError, ResourceLimitExceeded) as error:

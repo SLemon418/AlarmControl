@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import math
 import os
@@ -30,6 +31,7 @@ from semantic_contract import (
     RUNTIME_TEXT_FORMAT_VERSION,
     ContractError,
     model_bundle_hashes,
+    resolve_training_model_bundle,
     sha256_file,
 )
 
@@ -429,7 +431,15 @@ def _selected_checkpoint(
     training: Mapping[str, Any],
     expected_bundle_sha256: str,
 ) -> dict[str, Any]:
-    directory = model_dir.expanduser()
+    selector = model_dir.expanduser()
+    if selector.is_symlink():
+        raise EvidenceError("selected model must be a non-symlink directory")
+    try:
+        directory = resolve_training_model_bundle(selector)
+    except (OSError, ValueError) as error:
+        raise EvidenceError(
+            "selected model has no valid committed generation"
+        ) from error
     if directory.is_symlink() or not directory.is_dir():
         raise EvidenceError("selected model must be a non-symlink directory")
     directory = directory.resolve(strict=True)
@@ -1368,19 +1378,33 @@ def write_release_evidence(
     evidence: Mapping[str, Any],
     model_card: str,
 ) -> None:
-    """Atomically replace only an exact two-file evidence directory."""
+    """Durably replace only an exact two-file evidence directory."""
 
     output = output_dir.expanduser()
     if output.is_symlink():
         raise EvidenceError("output directory must not be a symlink")
-    if output.exists():
-        entries = list(output.iterdir()) if output.is_dir() else []
-        if (
-            {entry.name for entry in entries} != OUTPUT_FILES
-            or any(entry.is_symlink() or not entry.is_file() for entry in entries)
-        ):
-            raise EvidenceError("existing output is not an evidence directory")
     output.parent.mkdir(parents=True, exist_ok=True)
+    backup = output.with_name(f".{output.name}.previous")
+    lock = output.with_name(f".{output.name}.lock")
+    if lock.is_symlink():
+        raise EvidenceError("evidence output lock must not be a symlink")
+    with lock.open("a+b") as lock_stream:
+        fcntl.flock(lock_stream.fileno(), fcntl.LOCK_EX)
+        try:
+            _write_release_evidence_locked(output, backup, evidence, model_card)
+        finally:
+            fcntl.flock(lock_stream.fileno(), fcntl.LOCK_UN)
+
+
+def _write_release_evidence_locked(
+    output: Path,
+    backup: Path,
+    evidence: Mapping[str, Any],
+    model_card: str,
+) -> None:
+    _recover_interrupted_evidence_publish(output, backup)
+    if output.exists():
+        _require_evidence_directory(output, complete=True)
     temporary = Path(
         tempfile.mkdtemp(
             prefix=f".{output.name}.",
@@ -1388,35 +1412,108 @@ def write_release_evidence(
             dir=output.parent,
         )
     )
-    backup = output.with_name(f".{output.name}.previous")
+    old_moved = False
+    new_published = False
     try:
-        (temporary / "evidence.json").write_text(
-            json.dumps(
-                evidence,
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-                allow_nan=False,
-            )
-            + "\n",
-            encoding="utf-8",
+        _write_synced(
+            temporary / "evidence.json",
+            (
+                json.dumps(
+                    evidence,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                    allow_nan=False,
+                )
+                + "\n"
+            ).encode("utf-8"),
         )
-        (temporary / "MODEL_CARD.md").write_text(
-            model_card,
-            encoding="utf-8",
+        _write_synced(
+            temporary / "MODEL_CARD.md",
+            model_card.encode("utf-8"),
         )
-        if backup.exists():
-            raise EvidenceError("stale evidence backup exists")
+        _fsync_directory(temporary)
         if output.exists():
             os.replace(output, backup)
+            old_moved = True
+            _fsync_directory(output.parent)
         os.replace(temporary, output)
+        new_published = True
+        _fsync_directory(output.parent)
         if backup.exists():
-            shutil.rmtree(backup)
-    except BaseException:
-        if backup.exists() and not output.exists():
-            os.replace(backup, output)
-        shutil.rmtree(temporary, ignore_errors=True)
+            _remove_evidence_directory(backup)
+    except BaseException as error:
+        try:
+            if old_moved and not new_published and backup.exists() and not output.exists():
+                os.replace(backup, output)
+                _fsync_directory(output.parent)
+        except BaseException as recovery_error:
+            raise recovery_error from error
+        finally:
+            shutil.rmtree(temporary, ignore_errors=True)
         raise
+
+
+def _recover_interrupted_evidence_publish(
+    output: Path,
+    backup: Path,
+) -> None:
+    if backup.is_symlink():
+        raise EvidenceError("evidence backup must not be a symlink")
+    if not backup.exists():
+        return
+    if not output.exists():
+        _require_evidence_directory(backup, complete=True)
+        os.replace(backup, output)
+        _fsync_directory(output.parent)
+        return
+    _require_evidence_directory(output, complete=True)
+    _require_evidence_directory(backup, complete=False)
+    _remove_evidence_directory(backup)
+
+
+def _require_evidence_directory(
+    directory: Path,
+    *,
+    complete: bool,
+) -> list[Path]:
+    if directory.is_symlink() or not directory.is_dir():
+        raise EvidenceError(f"invalid evidence directory: {directory}")
+    entries = list(directory.iterdir())
+    names = {entry.name for entry in entries}
+    if (
+        (complete and names != OUTPUT_FILES)
+        or (not complete and not names.issubset(OUTPUT_FILES))
+        or any(entry.is_symlink() or not entry.is_file() for entry in entries)
+    ):
+        raise EvidenceError(f"invalid evidence directory contents: {directory}")
+    return entries
+
+
+def _remove_evidence_directory(directory: Path) -> None:
+    for entry in _require_evidence_directory(directory, complete=False):
+        entry.unlink()
+    _fsync_directory(directory)
+    directory.rmdir()
+    _fsync_directory(directory.parent)
+
+
+def _write_synced(
+    path: Path,
+    content: bytes,
+) -> None:
+    with path.open("xb") as stream:
+        stream.write(content)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def _fsync_directory(directory: Path) -> None:
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def build_parser() -> argparse.ArgumentParser:

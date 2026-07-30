@@ -357,10 +357,19 @@ internal fun NotificationDetailDialog(
     detail: NotificationDetailUi,
     onDismiss: () -> Unit,
 ) {
+    val appName = insightsAppName(detail.appName, detail.appNameIsPackageFallback)
     AlertDialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(securePolicy = SecureFlagPolicy.SecureOn),
-        title = { Text(detail.appName) },
+        title = {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AppIdentityIcon(appName, detail.appIcon, Modifier.size(32.dp))
+                Text(appName)
+            }
+        },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(detail.packageName, style = MaterialTheme.typography.labelSmall)
@@ -586,6 +595,7 @@ private fun TrendBars(
 private fun AppBreakdown(apps: List<AppAnalysisUi>) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         apps.take(DISPLAY_LIMIT).forEach { app ->
+            val appName = insightsAppName(app.appName, app.appNameIsPackageFallback)
             val percent =
                 if (app.totalCount <= 0) {
                     0
@@ -594,17 +604,23 @@ private fun AppBreakdown(apps: List<AppAnalysisUi>) {
                         .coerceIn(0, 100)
                         .toInt()
                 }
-            Column {
-                Text(app.appName, style = MaterialTheme.typography.bodyMedium)
-                Text(
-                    stringResource(
-                        R.string.insights_app_analysis_count,
-                        app.totalCount,
-                        app.silencedCount,
-                        percent,
-                    ),
-                    style = MaterialTheme.typography.labelSmall,
-                )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AppIdentityIcon(appName, app.appIcon, Modifier.size(32.dp))
+                Column {
+                    Text(appName, style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        stringResource(
+                            R.string.insights_app_analysis_count,
+                            app.totalCount,
+                            app.silencedCount,
+                            percent,
+                        ),
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
             }
         }
     }
@@ -767,12 +783,18 @@ private fun ChannelBreakdown(
 ) {
     Column {
         channels.take(DISPLAY_LIMIT).forEach { channel ->
+            val appName =
+                insightsAppName(
+                    channel.appName,
+                    channel.appNameIsPackageFallback,
+                )
             TextButton(
                 onClick = { onOpenNotificationSettings(channel.packageName, channel.channelId) },
                 modifier = Modifier.fillMaxWidth(),
             ) {
+                AppIdentityIcon(appName, channel.appIcon, Modifier.padding(end = 8.dp).size(32.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(channel.appName, style = MaterialTheme.typography.bodyMedium)
+                    Text(appName, style = MaterialTheme.typography.bodyMedium)
                     Text(
                         channel.channelName ?: channel.channelId,
                         style = MaterialTheme.typography.labelSmall,
@@ -868,6 +890,14 @@ private fun HistorySourceSelector(
             onClick = { expanded = true },
             modifier = Modifier.fillMaxWidth(),
         ) {
+            selectedSource?.let { source ->
+                val appName =
+                    insightsAppName(
+                        source.appName,
+                        source.appNameIsPackageFallback,
+                    )
+                AppIdentityIcon(appName, source.appIcon, Modifier.padding(end = 8.dp).size(28.dp))
+            }
             Text(
                 text = selectedLabel,
                 maxLines = 1,
@@ -891,11 +921,22 @@ private fun HistorySourceSelector(
             sources.forEach { source ->
                 DropdownMenuItem(
                     text = {
-                        Text(
-                            source.displayLabel(),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            val appName =
+                                insightsAppName(
+                                    source.appName,
+                                    source.appNameIsPackageFallback,
+                                )
+                            AppIdentityIcon(appName, source.appIcon, Modifier.size(28.dp))
+                            Text(
+                                source.displayLabel(),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                     },
                     onClick = {
                         expanded = false
@@ -907,7 +948,11 @@ private fun HistorySourceSelector(
     }
 }
 
-private fun HistorySourceUi.displayLabel(): String = channelName?.let { "$appName · $it" } ?: appName
+@Composable
+private fun HistorySourceUi.displayLabel(): String {
+    val displayName = insightsAppName(appName, appNameIsPackageFallback)
+    return channelName?.let { "$displayName · $it" } ?: displayName
+}
 
 private val InsightsTab.labelRes: Int
     get() =

@@ -121,6 +121,31 @@ internal class NotificationProcessingCoordinator(
         job?.cancel()
     }
 
+    /**
+     * Invalidates same-key work only when a callback rejected before [submit] is not older.
+     *
+     * The synthetic token id preserves [submit]'s equal-post-time ordering, while the per-key action
+     * gate keeps this comparison atomic with a platform commit.
+     */
+    fun invalidateIfAtLeastAsFresh(
+        key: String,
+        freshness: Long,
+    ) {
+        val tokenId = tokenSource.incrementAndGet()
+        val job =
+            synchronized(actionGate(key)) {
+                synchronized(lock) {
+                    entries[key]
+                        ?.takeIf { current -> compareFreshness(freshness, tokenId, current) >= 0 }
+                        ?.let {
+                            entries.remove(key)
+                            it.job
+                        }
+                }
+            }
+        job?.cancel()
+    }
+
     fun invalidateAll() {
         invalidateAllAndUpdate {}
     }

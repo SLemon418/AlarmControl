@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 TRAINING_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TRAINING_DIR))
@@ -255,6 +256,90 @@ class BackendParityTest(unittest.TestCase):
         self.assertNotIn("pair_id", serialized)
         self.assertNotIn("title", serialized)
         self.assertNotIn("body", serialized)
+
+    def test_report_reuses_validated_prediction_snapshot_hashes(self) -> None:
+        pytorch_sha256 = sha256_file(self.pytorch_predictions)
+        tflite_sha256 = sha256_file(self.tflite_predictions)
+        real_loader = parity.load_bound_prediction_set
+        completed_loads = 0
+
+        def load_then_replace(paths, source_manifest):
+            nonlocal completed_loads
+            bound = real_loader(paths, source_manifest)
+            completed_loads += 1
+            if completed_loads == 2:
+                self.pytorch_predictions.write_bytes(b"later-pytorch\n")
+                self.tflite_predictions.write_bytes(b"later-tflite\n")
+            return bound
+
+        with mock.patch.object(
+            parity,
+            "load_bound_prediction_set",
+            side_effect=load_then_replace,
+        ):
+            report = self._build()
+
+        self.assertEqual(
+            pytorch_sha256,
+            report["provenance"]["pytorch_predictions_sha256"],
+        )
+        self.assertEqual(
+            tflite_sha256,
+            report["provenance"]["tflite_predictions_sha256"],
+        )
+
+    def test_manifest_switch_during_snapshot_load_is_rejected(self) -> None:
+        real_loader = parity.load_bound_prediction_set
+        switched = False
+
+        def switch_then_load(paths, source_manifest):
+            nonlocal switched
+            if not switched:
+                manifest_path = self.pytorch_predictions.with_suffix(
+                    f"{self.pytorch_predictions.suffix}.manifest.json"
+                )
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest["model_bundle"] = str(self.root / "switched-bundle")
+                manifest_path.write_text(
+                    json.dumps(manifest, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                switched = True
+            return real_loader(paths, source_manifest)
+
+        with mock.patch.object(
+            parity,
+            "load_bound_prediction_set",
+            side_effect=switch_then_load,
+        ):
+            with self.assertRaisesRegex(
+                parity.ParityError,
+                "changed while its prediction snapshot was loaded",
+            ):
+                self._build()
+
+    def test_conversion_hashes_use_the_parsed_manifest_snapshot(self) -> None:
+        original = self.conversion_manifest.read_bytes()
+        real_loads = parity.json.loads
+        switched = False
+
+        def parse_then_switch(*args, **kwargs):
+            nonlocal switched
+            value = real_loads(*args, **kwargs)
+            if not switched:
+                self._write_conversion_manifest(bundle_sha256="a" * 64)
+                switched = True
+            return value
+
+        with mock.patch.object(
+            parity.json,
+            "loads",
+            side_effect=parse_then_switch,
+        ):
+            hashes = parity._conversion_hashes(self.conversion_manifest)
+
+        self.assertEqual(hashlib.sha256(original).hexdigest(), hashes["manifest"])
+        self.assertEqual(self.bundle_sha256, hashes["bundle"])
 
     def test_cli_output_is_byte_deterministic(self) -> None:
         output = self.root / "report" / "parity.json"

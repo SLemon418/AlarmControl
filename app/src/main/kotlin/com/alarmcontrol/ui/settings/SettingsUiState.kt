@@ -1,5 +1,6 @@
 package com.alarmcontrol.ui.settings
 
+import com.alarmcontrol.core.settings.RetentionDefaults
 import com.alarmcontrol.core.settings.SemanticAnalysisScope
 import com.alarmcontrol.ui.NotificationAccessUiState
 import com.alarmcontrol.ui.UiText
@@ -17,7 +18,8 @@ data class SettingsUiState(
     val eventRetentionDays: Int = 30,
     val dailyInsightRetentionDays: Int = 365,
     val dynamicColorEnabled: Boolean = false,
-    val notificationContentStorageEnabled: Boolean = false,
+    val notificationContentStorageEnabled: Boolean = true,
+    val notificationContentRetentionDays: Int = RetentionDefaults.ENCRYPTED_CONTENT_DAYS,
     val contentExcludedPackages: Set<String> = emptySet(),
     val contentSourceApps: List<ContentSourceAppUi> = emptyList(),
     val llmModelStatus: LlmModelUiStatus = LlmModelUiStatus.NOT_LOADED,

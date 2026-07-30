@@ -16,7 +16,8 @@ import java.io.IOException
 /**
  * Instrumented Room migration test (CLAUDE.md §9). Runs on a device/emulator via
  * `./gradlew :data:connectedDebugAndroidTest`. It seeds realistic user data in the v3 schema, then
- * upgrades sequentially v3 -> ... -> v10 -> v11 -> v12 -> v13 -> v14 -> v15 with the real migrations.
+ * upgrades sequentially v3 -> ... -> v10 -> v11 -> v12 -> v13 -> v14 -> v15 -> v16 with the real
+ * migrations.
  * It asserts old data survives while insight, feedback, profile, and audit tables remain usable.
  *
  * Schemas are read from the test APK assets (wired via `room.schemaLocation` + the androidTest assets
@@ -33,7 +34,7 @@ class MigrationTest {
 
     @Test
     @Throws(IOException::class)
-    fun migratesFromV3ToV15PreservingDataAndSemanticFeedback() {
+    fun migratesFromV3ToV16PreservingDataAndSemanticFeedback() {
         helper.createDatabase(TEST_DB, version = 3).use(::seedVersion3)
 
         helper
@@ -54,13 +55,14 @@ class MigrationTest {
         val db =
             helper.runMigrationsAndValidate(
                 TEST_DB,
-                15,
+                16,
                 true,
                 AppDatabase.MIGRATION_10_11,
                 AppDatabase.MIGRATION_11_12,
                 AppDatabase.MIGRATION_12_13,
                 AppDatabase.MIGRATION_13_14,
                 AppDatabase.MIGRATION_14_15,
+                AppDatabase.MIGRATION_15_16,
             )
 
         assertVersion3DataSurvived(db)
@@ -77,7 +79,7 @@ class MigrationTest {
 
     @Test
     @Throws(IOException::class)
-    fun migratesFromV1ToV15PreservingRulesAndEvents() {
+    fun migratesFromV1ToV16PreservingRulesAndEvents() {
         helper.createDatabase(V1_TEST_DB, version = 1).use { db ->
             seedLegacyCore(db, includeUndone = false)
         }
@@ -85,7 +87,7 @@ class MigrationTest {
         helper
             .runMigrationsAndValidate(
                 V1_TEST_DB,
-                15,
+                16,
                 true,
                 *migrationsFrom(1),
             ).use { db ->
@@ -95,7 +97,7 @@ class MigrationTest {
 
     @Test
     @Throws(IOException::class)
-    fun migratesFromV2ToV15PreservingExcludedStatisticsState() {
+    fun migratesFromV2ToV16PreservingExcludedStatisticsState() {
         helper.createDatabase(V2_TEST_DB, version = 2).use { db ->
             seedLegacyCore(db, includeUndone = true)
         }
@@ -103,7 +105,7 @@ class MigrationTest {
         helper
             .runMigrationsAndValidate(
                 V2_TEST_DB,
-                15,
+                16,
                 true,
                 *migrationsFrom(2),
             ).use { db ->
@@ -113,7 +115,7 @@ class MigrationTest {
 
     @Test
     @Throws(IOException::class)
-    fun migratesFromV10ToV15ConvertingBinaryAdFeedback() {
+    fun migratesFromV10ToV16ConvertingBinaryAdFeedback() {
         helper.createDatabase(V10_TEST_DB, version = 10).use { db ->
             seedVersion10CoreAndBinaryFeedback(db)
         }
@@ -121,7 +123,7 @@ class MigrationTest {
         helper
             .runMigrationsAndValidate(
                 V10_TEST_DB,
-                15,
+                16,
                 true,
                 *migrationsFrom(10),
             ).use { db ->
@@ -132,7 +134,7 @@ class MigrationTest {
 
     @Test
     @Throws(IOException::class)
-    fun migratesFromV12ToV15PreservingDailyHistoryAndSemanticPrior() {
+    fun migratesFromV12ToV16PreservingDailyHistoryAndSemanticPrior() {
         helper.createDatabase(V12_TEST_DB, version = 12).use { db ->
             db.execSQL(
                 "INSERT INTO daily_insights " +
@@ -149,11 +151,12 @@ class MigrationTest {
         helper
             .runMigrationsAndValidate(
                 V12_TEST_DB,
-                15,
+                16,
                 true,
                 AppDatabase.MIGRATION_12_13,
                 AppDatabase.MIGRATION_13_14,
                 AppDatabase.MIGRATION_14_15,
+                AppDatabase.MIGRATION_15_16,
             ).use { db ->
                 db
                     .query(
@@ -241,6 +244,56 @@ class MigrationTest {
                         // v14 did not retain source-loss provenance, so completeness is unknowable.
                         assertEquals(0, cursor.getInt(0))
                     }
+            }
+    }
+
+    @Test
+    @Throws(IOException::class)
+    fun migratesFromV15PreservingEventsAndCreatingDurableActionOutbox() {
+        helper.createDatabase(V15_TEST_DB, version = 15).use { db ->
+            db.execSQL(
+                "INSERT INTO notification_events " +
+                    "(id, package_name, posted_at_millis, action, recorded_at_millis, undone) " +
+                    "VALUES (1, 'com.example.clock', 100, 'CANCEL', 101, 0)",
+            )
+        }
+
+        helper
+            .runMigrationsAndValidate(
+                V15_TEST_DB,
+                16,
+                true,
+                AppDatabase.MIGRATION_15_16,
+            ).use { db ->
+                db.query("SELECT package_name FROM notification_events WHERE id = 1").use { cursor ->
+                    assertTrue(cursor.moveToFirst())
+                    assertEquals("com.example.clock", cursor.getString(0))
+                }
+                db.execSQL(
+                    "INSERT INTO pending_notification_actions " +
+                        "(token, armed, package_name, category, posted_at_millis, action, " +
+                        "recorded_at_millis, created_at_millis) " +
+                        "VALUES ('token', 1, 'com.example.clock', 'alarm', 100, 'CANCEL', 101, 102)",
+                )
+                db.execSQL(
+                    "INSERT INTO pending_notification_action_traces " +
+                        "(outbox_token, sequence, lane, position, depth, condition_kind, result) " +
+                        "VALUES ('token', 0, 'ACTIVE', 0, 0, 'PACKAGE', 'MATCH')",
+                )
+                db.execSQL(
+                    "INSERT INTO pending_notification_action_contents " +
+                        "(outbox_token, format_version, aad_id, nonce, ciphertext, created_at_millis) " +
+                        "VALUES ('token', 1, 'aad', ?, ?, 102)",
+                    arrayOf(ByteArray(12), byteArrayOf(1, 2, 3)),
+                )
+                db.query("SELECT COUNT(*) FROM pending_notification_action_traces").use { cursor ->
+                    assertTrue(cursor.moveToFirst())
+                    assertEquals(1, cursor.getInt(0))
+                }
+                db.query("SELECT COUNT(*) FROM pending_notification_action_contents").use { cursor ->
+                    assertTrue(cursor.moveToFirst())
+                    assertEquals(1, cursor.getInt(0))
+                }
             }
     }
 
@@ -612,6 +665,14 @@ class MigrationTest {
                 repeat(6) { index -> assertTrue(cursor.isNull(index)) }
                 assertEquals(0, cursor.getInt(6))
             }
+        db
+            .query(
+                "SELECT COUNT(*) FROM notification_events " +
+                    "WHERE posted_minute_of_day IS NULL",
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(1, cursor.getInt(0))
+            }
         db.execSQL(
             "INSERT INTO encrypted_notification_contents " +
                 "(event_id, format_version, aad_id, nonce, ciphertext, created_at_millis) " +
@@ -757,6 +818,7 @@ class MigrationTest {
         const val V13_EMPTY_TEST_DB = "migration-v13-empty-test"
         const val V13_FUTURE_TEST_DB = "migration-v13-future-test"
         const val V14_TEST_DB = "migration-v14-test"
+        const val V15_TEST_DB = "migration-v15-test"
         const val RATE_WINDOW_PLUS_ONE = MAX_RATE_WINDOW_MILLIS + 1L
 
         fun migrationsFrom(version: Int): Array<Migration> =
@@ -775,6 +837,7 @@ class MigrationTest {
                 AppDatabase.MIGRATION_12_13,
                 AppDatabase.MIGRATION_13_14,
                 AppDatabase.MIGRATION_14_15,
+                AppDatabase.MIGRATION_15_16,
             ).filter { migration -> migration.startVersion >= version }
                 .toTypedArray()
     }

@@ -20,8 +20,10 @@ import com.alarmcontrol.core.insights.InsightsSummary
 import com.alarmcontrol.core.insights.InsightsSummaryRepository
 import com.alarmcontrol.core.privacy.ClearedDataCounts
 import com.alarmcontrol.core.privacy.LocalDataRepository
+import com.alarmcontrol.core.privacy.LocalDataResetWriteFence
 import com.alarmcontrol.core.result.DataResult
 import com.alarmcontrol.core.settings.MaintenanceSettingsSnapshot
+import com.alarmcontrol.core.settings.RetentionDefaults
 import com.alarmcontrol.core.settings.SettingsRepository
 import com.alarmcontrol.core.settings.SettingsSnapshot
 import com.alarmcontrol.data.security.MaintenancePolicyAccessGuard
@@ -57,14 +59,19 @@ class InsightsHousekeeperTest {
         eventDays: Int = 30,
         insightDays: Int = 365,
         contentEnabled: Boolean = false,
+        contentDays: Int = RetentionDefaults.ENCRYPTED_CONTENT_DAYS,
         excludedPackages: Set<String> = emptySet(),
+        maintenancePolicyAccessGuard: MaintenancePolicyAccessGuard = MaintenancePolicyAccessGuard(),
+        localDataResetWriteFence: LocalDataResetWriteFence = LocalDataResetWriteFence(),
     ) = InsightsHousekeeper(
         events,
         summary,
         daily,
-        RetentionSettings(eventDays, insightDays, contentEnabled, excludedPackages),
+        RetentionSettings(eventDays, insightDays, contentEnabled, excludedPackages, contentDays),
         localData,
         rateOccurrences,
+        maintenancePolicyAccessGuard,
+        localDataResetWriteFence,
     )
 
     @Test
@@ -112,13 +119,13 @@ class InsightsHousekeeperTest {
         }
 
     @Test
-    fun `purges encrypted content after seven days while retaining event metadata`() =
+    fun `purges encrypted content after the configured period while retaining event metadata`() =
         runTest {
             val events = RecordingEventRepository()
 
-            housekeeper(events = events).run(now)
+            housekeeper(events = events, contentDays = 14).run(now)
 
-            assertEquals(now - 7 * DAY, events.encryptedContentPurgeCutoff)
+            assertEquals(now - 14 * DAY, events.encryptedContentPurgeCutoff)
             assertEquals(now - 30 * DAY, events.purgeCutoff)
         }
 
@@ -470,6 +477,80 @@ class InsightsHousekeeperTest {
             assertTrue(second.await() is DataResult.Success)
             assertEquals(2, cleanupCalls)
         }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `clear cannot finish before a stale housekeeping summary is saved`() =
+        runTest {
+            val maintenanceGuard = MaintenancePolicyAccessGuard()
+            val summary = BlockingSummaryRepository()
+            val events =
+                RecordingEventRepository(
+                    recent = mapOf("com.example.pre-clear" to 10),
+                    recentStart = now - 7 * DAY,
+                    recentEnd = now,
+                )
+            val target =
+                housekeeper(
+                    events = events,
+                    summary = summary,
+                    maintenancePolicyAccessGuard = maintenanceGuard,
+                )
+            val housekeeping = async { target.run(now) }
+            summary.saveStarted.await()
+
+            val clear =
+                async {
+                    maintenanceGuard.withLock {
+                        summary.clear()
+                    }
+                }
+            runCurrent()
+
+            assertFalse(clear.isCompleted)
+
+            summary.releaseSave.complete(Unit)
+            advanceUntilIdle()
+            assertTrue(housekeeping.await() is DataResult.Success)
+            clear.await()
+            assertEquals(null, summary.summary.first())
+        }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `housekeeping queued before reset exits without recreating local data`() =
+        runTest {
+            val maintenanceGuard = MaintenancePolicyAccessGuard()
+            val resetFence = LocalDataResetWriteFence()
+            val guardHeld = CompletableDeferred<Unit>()
+            val releaseGuard = CompletableDeferred<Unit>()
+            val events = RecordingEventRepository()
+            val holder =
+                async {
+                    maintenanceGuard.withLock {
+                        guardHeld.complete(Unit)
+                        releaseGuard.await()
+                    }
+                }
+            guardHeld.await()
+            val queued =
+                async {
+                    housekeeper(
+                        events = events,
+                        maintenancePolicyAccessGuard = maintenanceGuard,
+                        localDataResetWriteFence = resetFence,
+                    ).run(now)
+                }
+            runCurrent()
+
+            resetFence.resetAndAdvanceOnCommit { onCommitted -> onCommitted() }
+            releaseGuard.complete(Unit)
+
+            assertTrue(queued.await() is DataResult.Failure)
+            holder.await()
+            assertEquals(null, events.purgeCutoff)
+            assertEquals(null, events.trimMax)
+        }
 }
 
 private class RecordingRateOccurrenceRepository(
@@ -590,7 +671,7 @@ private class RecordingEventRepository(
         legacyEndMillis: Long,
     ): Flow<ActionBreakdown> = flowOf(ActionBreakdown())
 
-    override suspend fun undo(eventId: String) = Unit
+    override suspend fun undo(eventId: String): Boolean = false
 
     override suspend fun postedAtBounds(): NotificationEventTimeBounds? =
         oldestPostedAtMillis?.let {
@@ -664,6 +745,7 @@ private class RetentionSettings(
     private val insightDays: Int,
     contentEnabled: Boolean,
     excludedPackages: Set<String>,
+    private val contentDays: Int = RetentionDefaults.ENCRYPTED_CONTENT_DAYS,
 ) : SettingsRepository {
     override val filteringEnabled: Flow<Boolean> = flowOf(true)
     override val semanticClassifierEnabled: Flow<Boolean> = flowOf(true)
@@ -675,6 +757,7 @@ private class RetentionSettings(
     override val dailyInsightRetentionDays: Flow<Int> = flowOf(insightDays)
     override val dynamicColorEnabled: Flow<Boolean> = flowOf(false)
     override val notificationContentStorageEnabled: Flow<Boolean> = flowOf(contentEnabled)
+    override val notificationContentRetentionDays: Flow<Int> = flowOf(contentDays)
     override val contentExcludedPackages: Flow<Set<String>> = flowOf(excludedPackages)
 
     override suspend fun setFilteringEnabled(enabled: Boolean) = Unit
@@ -707,13 +790,18 @@ private class RetentionSettings(
     ) = Unit
 
     override suspend fun snapshot(): SettingsSnapshot =
-        SettingsSnapshot(eventRetentionDays = eventDays, dailyInsightRetentionDays = insightDays)
+        SettingsSnapshot(
+            eventRetentionDays = eventDays,
+            dailyInsightRetentionDays = insightDays,
+            notificationContentRetentionDays = contentDays,
+        )
 
     override suspend fun maintenanceSnapshot(): MaintenanceSettingsSnapshot =
         MaintenanceSettingsSnapshot(
             eventRetentionDays = eventDays,
             dailyInsightRetentionDays = insightDays,
             notificationContentStorageEnabled = notificationContentStorageEnabled.first(),
+            notificationContentRetentionDays = contentDays,
             contentExcludedPackages = contentExcludedPackages.first(),
         )
 
@@ -759,5 +847,22 @@ private class RecordingSummaryRepository : InsightsSummaryRepository {
     override suspend fun save(summary: InsightsSummary) {
         saved = summary
         state.value = summary
+    }
+}
+
+private class BlockingSummaryRepository : InsightsSummaryRepository {
+    val saveStarted = CompletableDeferred<Unit>()
+    val releaseSave = CompletableDeferred<Unit>()
+    private val state = MutableStateFlow<InsightsSummary?>(null)
+    override val summary: Flow<InsightsSummary?> = state
+
+    override suspend fun save(summary: InsightsSummary) {
+        saveStarted.complete(Unit)
+        releaseSave.await()
+        state.value = summary
+    }
+
+    fun clear() {
+        state.value = null
     }
 }

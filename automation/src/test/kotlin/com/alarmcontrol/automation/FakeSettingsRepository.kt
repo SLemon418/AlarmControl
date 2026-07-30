@@ -1,7 +1,10 @@
 package com.alarmcontrol.automation
 
+import com.alarmcontrol.core.privacy.LocalDataResetWriteFence
+import com.alarmcontrol.core.settings.ExternalAutomationAuthorizationFence
 import com.alarmcontrol.core.settings.MaintenanceSettingsSnapshot
 import com.alarmcontrol.core.settings.RetentionDefaults
+import com.alarmcontrol.core.settings.SettingsMutationFence
 import com.alarmcontrol.core.settings.SettingsRepository
 import com.alarmcontrol.core.settings.SettingsSnapshot
 import kotlinx.coroutines.flow.Flow
@@ -13,6 +16,9 @@ class FakeSettingsRepository(
     filtering: Boolean = true,
     semanticClassifier: Boolean = true,
     llmEnabled: Boolean = false,
+    private val externalAutomationAuthorizationFence: ExternalAutomationAuthorizationFence =
+        ExternalAutomationAuthorizationFence(),
+    private val settingsMutationFence: SettingsMutationFence = SettingsMutationFence(),
 ) : SettingsRepository {
     private val state = MutableStateFlow(enabled)
     private val filteringState = MutableStateFlow(filtering)
@@ -45,6 +51,15 @@ class FakeSettingsRepository(
     override val contentExcludedPackages: Flow<Set<String>> = excludedPackagesState
 
     override suspend fun setFilteringEnabled(enabled: Boolean) {
+        settingsMutationFence.withLock {
+            filteringState.value = enabled
+        }
+    }
+
+    override suspend fun setFilteringEnabledIfCurrentWhileMutationLocked(
+        enabled: Boolean,
+        resetEpoch: LocalDataResetWriteFence.Epoch,
+    ) {
         filteringState.value = enabled
     }
 
@@ -53,12 +68,18 @@ class FakeSettingsRepository(
     }
 
     override suspend fun setExternalAutomationEnabled(enabled: Boolean) {
-        state.value = enabled
+        externalAutomationAuthorizationFence.withLock {
+            state.value = enabled
+        }
     }
 
-    override suspend fun ensureExternalAutomationToken(): String = tokenState.value
+    override suspend fun ensureExternalAutomationToken(): String =
+        externalAutomationAuthorizationFence.withLock { tokenState.value }
 
-    override suspend fun rotateExternalAutomationToken(): String = "rotated-token".also { tokenState.value = it }
+    override suspend fun rotateExternalAutomationToken(): String =
+        externalAutomationAuthorizationFence.withLock {
+            "rotated-token".also { tokenState.value = it }
+        }
 
     override suspend fun setLlmAnalysisEnabled(enabled: Boolean) {
         llmState.value = enabled
@@ -120,28 +141,34 @@ class FakeSettingsRepository(
         )
 
     override suspend fun restore(snapshot: SettingsSnapshot) {
-        filteringState.value = snapshot.filteringEnabled
-        semanticClassifierState.value = snapshot.semanticClassifierEnabled
-        state.value = snapshot.externalAutomationEnabled
-        llmState.value = snapshot.llmAnalysisEnabled
-        llmAutoActionsState.value = snapshot.llmAutoActionsEnabled
-        eventRetentionState.value = snapshot.eventRetentionDays
-        insightRetentionState.value = snapshot.dailyInsightRetentionDays
+        externalAutomationAuthorizationFence.withLock {
+            filteringState.value = snapshot.filteringEnabled
+            semanticClassifierState.value = snapshot.semanticClassifierEnabled
+            state.value = snapshot.externalAutomationEnabled
+            llmState.value = snapshot.llmAnalysisEnabled
+            llmAutoActionsState.value = snapshot.llmAutoActionsEnabled
+            eventRetentionState.value = snapshot.eventRetentionDays
+            insightRetentionState.value = snapshot.dailyInsightRetentionDays
+        }
     }
 
     override suspend fun reset() {
-        state.value = false
-        filteringState.value = false
-        semanticClassifierState.value = true
-        llmState.value = false
-        llmAutoActionsState.value = false
-        eventRetentionState.value = RetentionDefaults.EVENT_DAYS
-        insightRetentionState.value = RetentionDefaults.DAILY_INSIGHT_DAYS
-        tokenState.value = ""
-        dynamicColorState.value = false
-        contentStorageState.value = false
-        excludedPackagesState.value = emptySet()
+        externalAutomationAuthorizationFence.withLock {
+            state.value = false
+            filteringState.value = false
+            semanticClassifierState.value = true
+            llmState.value = false
+            llmAutoActionsState.value = false
+            eventRetentionState.value = RetentionDefaults.EVENT_DAYS
+            insightRetentionState.value = RetentionDefaults.DAILY_INSIGHT_DAYS
+            tokenState.value = ""
+            dynamicColorState.value = false
+            contentStorageState.value = false
+            excludedPackagesState.value = emptySet()
+        }
     }
 
     fun isFilteringEnabled(): Boolean = filteringState.value
+
+    fun currentAutomationToken(): String = tokenState.value
 }

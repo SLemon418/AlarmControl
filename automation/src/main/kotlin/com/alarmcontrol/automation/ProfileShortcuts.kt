@@ -40,12 +40,13 @@ object ProfileShortcuts {
 
     /**
      * Builds and publishes the dynamic shortcuts. `ShortcutManagerCompat` no-ops below API 25, so this
-     * is safe on any supported device. Does light disk I/O — call off the main thread.
+     * is safe on any supported device. Does light disk I/O — call off the main thread. Returns
+     * `false` when the platform rejects the update, commonly because of rate limiting.
      */
     fun publish(
         context: Context,
         profiles: List<FilteringProfile> = emptyList(),
-    ) {
+    ): Boolean {
         val reportedMax = ShortcutManagerCompat.getMaxShortcutCountPerActivity(context)
         val maxCount = if (reportedMax > 0) reportedMax else DEFAULT_MAX_SHORTCUT_COUNT
         val shortcuts =
@@ -76,7 +77,7 @@ object ProfileShortcuts {
                     .take((maxCount - MASTER_SHORTCUT_COUNT).coerceAtLeast(0))
                     .forEach { profile -> add(profileShortcut(context, profile)) }
             }.take(maxCount)
-        ShortcutManagerCompat.setDynamicShortcuts(
+        return ShortcutManagerCompat.setDynamicShortcuts(
             context,
             shortcuts,
         )

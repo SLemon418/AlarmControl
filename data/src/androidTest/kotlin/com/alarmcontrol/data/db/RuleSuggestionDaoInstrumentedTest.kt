@@ -35,6 +35,15 @@ class RuleSuggestionDaoInstrumentedTest {
             repeat(10) { index ->
                 insertEvent(sql, id = index + 1, action = if (index < 8) "CANCEL" else "KEEP")
             }
+            repeat(10) { index ->
+                insertEvent(
+                    sql,
+                    id = 20 + index,
+                    action = "CANCEL",
+                    packageName = "com.future",
+                    recordedAtMillis = 300,
+                )
+            }
             repeat(4) { index ->
                 sql.execSQL(
                     "INSERT INTO category_feedback " +
@@ -51,6 +60,13 @@ class RuleSuggestionDaoInstrumentedTest {
                     arrayOf(100 + index),
                 )
             }
+            repeat(3) {
+                sql.execSQL(
+                    "INSERT INTO category_feedback " +
+                        "(package_name, predicted_label, corrected_label, recorded_at_millis) " +
+                        "VALUES ('com.future', NULL, 'promotion', 300)",
+                )
+            }
             sql.execSQL(
                 "INSERT INTO semantic_feedback_priors (package_name, intent, count) " +
                     "VALUES ('com.imported', 'MARKETING', 100)",
@@ -61,12 +77,13 @@ class RuleSuggestionDaoInstrumentedTest {
                 dao
                     .observeChannelCandidates(
                         0,
+                        200,
                         10,
                         80,
                         StoredRuleAction.CANCEL,
                         StoredRuleAction.SNOOZE,
                     ).first()
-            val marketing = dao.observeMarketingCandidates(0, 3, 75).first()
+            val marketing = dao.observeMarketingCandidates(0, 200, 3, 75).first()
 
             assertEquals(1, channels.size)
             assertEquals(8, channels.single().silencedCount)
@@ -78,12 +95,14 @@ class RuleSuggestionDaoInstrumentedTest {
         db: androidx.sqlite.db.SupportSQLiteDatabase,
         id: Int,
         action: String,
+        packageName: String = "com.shop",
+        recordedAtMillis: Long = 100,
     ) {
         db.execSQL(
             "INSERT INTO notification_events " +
                 "(id, package_name, channel_id, category, posted_at_millis, action, matched_rule_id, " +
-                "recorded_at_millis, undone) VALUES (?, 'com.shop', 'offers', NULL, 100, ?, NULL, 100, 0)",
-            arrayOf<Any>(id, action),
+                "recorded_at_millis, undone) VALUES (?, ?, 'offers', NULL, 100, ?, NULL, ?, 0)",
+            arrayOf<Any>(id, packageName, action, recordedAtMillis),
         )
     }
 }
