@@ -70,17 +70,136 @@ class NotificationActionOutboxRetryTest {
         }
 
     @Test
-    fun `arm failure never invokes platform action`() {
+    fun `arm failure never enters rate commit or platform action`() {
         val outbox = mockk<NotificationActionOutbox>()
         val staged = StagedNotificationAction("token")
         every { outbox.arm(staged) } returns false
+        var rateCommits = 0
         var platformActions = 0
 
-        val armed = armStagedActionAndRun(outbox, staged) { platformActions += 1 }
+        val committed =
+            armStagedActionThenCommit(
+                outbox = outbox,
+                staged = staged,
+                rateCommit = { tokenCommit ->
+                    rateCommits += 1
+                    tokenCommit()
+                },
+                tokenCommit = { action ->
+                    action()
+                    true
+                },
+            ) {
+                platformActions += 1
+            }
 
-        assertTrue(!armed)
+        assertFalse(committed)
+        assertEquals(0, rateCommits)
         assertEquals(0, platformActions)
     }
+
+    @Test
+    fun `durable arm completes before rate validation immediately gates platform action`() {
+        val outbox = mockk<NotificationActionOutbox>()
+        val staged = StagedNotificationAction("token")
+        val order = mutableListOf<String>()
+        every { outbox.arm(staged) } answers {
+            order += "arm"
+            true
+        }
+
+        val committed =
+            armStagedActionThenCommit(
+                outbox = outbox,
+                staged = staged,
+                rateCommit = { tokenCommit ->
+                    order += "rate-validation"
+                    tokenCommit()
+                },
+                tokenCommit = { action ->
+                    order += "token-claim"
+                    action()
+                    true
+                },
+                onActionStart = { order += "action-start" },
+            ) {
+                order += "binder"
+            }
+
+        assertTrue(committed)
+        assertEquals(
+            listOf("arm", "rate-validation", "token-claim", "action-start", "binder"),
+            order,
+        )
+    }
+
+    @Test
+    fun `stale rate validation after arm skips action and discards the staged row`() =
+        runTest {
+            val outbox = InMemoryActionOutbox()
+            val staged = StagedNotificationAction("token")
+            var actionStarted = false
+            var tokenClaims = 0
+            var platformActions = 0
+
+            val committed =
+                armStagedActionThenCommit(
+                    outbox = outbox,
+                    staged = staged,
+                    rateCommit = { false },
+                    tokenCommit = { action ->
+                        tokenClaims += 1
+                        action()
+                        true
+                    },
+                    onActionStart = { actionStarted = true },
+                ) {
+                    platformActions += 1
+                }
+            discardStagedActionUnlessPreserved(
+                outbox = outbox,
+                staged = staged,
+                preserveForRecovery = actionStarted,
+            )
+
+            assertFalse(committed)
+            assertFalse(actionStarted)
+            assertEquals(0, tokenClaims)
+            assertEquals(0, platformActions)
+            assertFalse(outbox.armed)
+            assertEquals(0, outbox.recover())
+        }
+
+    @Test
+    fun `stale token after rate validation skips action and discards the staged row`() =
+        runTest {
+            val outbox = InMemoryActionOutbox()
+            val staged = StagedNotificationAction("token")
+            var actionStarted = false
+            var platformActions = 0
+
+            val committed =
+                armStagedActionThenCommit(
+                    outbox = outbox,
+                    staged = staged,
+                    rateCommit = { tokenCommit -> tokenCommit() },
+                    tokenCommit = { false },
+                    onActionStart = { actionStarted = true },
+                ) {
+                    platformActions += 1
+                }
+            discardStagedActionUnlessPreserved(
+                outbox = outbox,
+                staged = staged,
+                preserveForRecovery = actionStarted,
+            )
+
+            assertFalse(committed)
+            assertFalse(actionStarted)
+            assertEquals(0, platformActions)
+            assertFalse(outbox.armed)
+            assertEquals(0, outbox.recover())
+        }
 
     @Test
     fun `cancelled token cleanup discards unarmed stage in non cancellable context`() =
@@ -95,7 +214,11 @@ class NotificationActionOutboxRetryTest {
                     try {
                         awaitCancellation()
                     } finally {
-                        discardUnarmedStagedAction(outbox, staged, armed = false)
+                        discardStagedActionUnlessPreserved(
+                            outbox = outbox,
+                            staged = staged,
+                            preserveForRecovery = false,
+                        )
                     }
                 }
             runCurrent()
@@ -110,19 +233,28 @@ class NotificationActionOutboxRetryTest {
         runTest {
             val outbox = InMemoryActionOutbox()
             val staged = StagedNotificationAction("token")
-            var armed = false
+            var preserveForRecovery = false
 
             runCatching {
                 try {
-                    armStagedActionAndRun(
+                    armStagedActionThenCommit(
                         outbox = outbox,
                         staged = staged,
-                        onArmed = { armed = true },
+                        rateCommit = { tokenCommit -> tokenCommit() },
+                        tokenCommit = { action ->
+                            action()
+                            true
+                        },
+                        onActionStart = { preserveForRecovery = true },
                     ) {
                         throw IOException("Binder failure")
                     }
                 } finally {
-                    discardUnarmedStagedAction(outbox, staged, armed)
+                    discardStagedActionUnlessPreserved(
+                        outbox = outbox,
+                        staged = staged,
+                        preserveForRecovery = preserveForRecovery,
+                    )
                 }
             }
 

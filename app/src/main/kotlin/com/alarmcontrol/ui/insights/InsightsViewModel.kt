@@ -37,6 +37,7 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -47,9 +48,11 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.time.Clock
@@ -102,6 +105,7 @@ class InsightsViewModel
             MutableStateFlow(InsightsDateRange(initialAnalysisEnd - DEFAULT_ANALYSIS_DAYS + 1, initialAnalysisEnd))
 
         private val todayWindow = MutableStateFlow(clock.todayWindow())
+        private val suggestionRefreshGeneration = MutableStateFlow(0L)
 
         private val rules =
             ruleRepository
@@ -197,12 +201,21 @@ class InsightsViewModel
                     if (tab != InsightsTab.OVERVIEW) {
                         flowOf(emptyList())
                     } else {
-                        val nowMillis = clock.millis()
-                        ruleSuggestionRepository
-                            .observeSuggestions(
-                                sinceMillis = nowMillis - SUGGESTION_WINDOW_MILLIS,
-                                nowMillis = nowMillis,
-                            ).map { rows ->
+                        merge(
+                            combine(
+                                eventRepository.observeRecent(SUGGESTION_ACTIVITY_LIMIT),
+                                feedbackRepository.observeEventCorrections(),
+                                adFeedbackRepository.observeByEvent(),
+                                suggestionRefreshGeneration,
+                            ) { _, _, _, _ -> Unit },
+                            suggestionBoundRefreshes(),
+                        ).map { clock.millis() }
+                            .flatMapLatest { nowMillis ->
+                                ruleSuggestionRepository.observeSuggestions(
+                                    sinceMillis = nowMillis - SUGGESTION_WINDOW_MILLIS,
+                                    nowMillis = nowMillis,
+                                )
+                            }.map { rows ->
                                 rows.map { suggestion ->
                                     suggestion.toUiModel(
                                         appIdentityResolver.resolve(suggestion.packageName()),
@@ -211,6 +224,14 @@ class InsightsViewModel
                             }
                     }
                 }.flowOn(dispatcher)
+
+        private fun suggestionBoundRefreshes(): Flow<Unit> =
+            flow {
+                while (true) {
+                    delay(SUGGESTION_BOUND_REFRESH_INTERVAL_MILLIS)
+                    emit(Unit)
+                }
+            }
 
         private val overviewSourceComplete: Flow<Boolean> =
             selectedTab
@@ -710,9 +731,10 @@ class InsightsViewModel
             }
         }
 
-        /** Re-subscribes today's SQL counters when the screen resumes after a date boundary. */
+        /** Refreshes wall-clock-bounded overview queries when the screen resumes. */
         fun refreshDayBoundary() {
             todayWindow.value = clock.todayWindow()
+            suggestionRefreshGeneration.value += 1
         }
 
         fun onUserMessageShown() {
@@ -771,6 +793,8 @@ class InsightsViewModel
             const val STOP_TIMEOUT_MS = 5_000L
             const val MAX_QUERY_CHARS = MAX_NOTIFICATION_HISTORY_QUERY_CHARS
             const val SUGGESTION_WINDOW_MILLIS = 7L * 24 * 60 * 60 * 1_000
+            const val SUGGESTION_ACTIVITY_LIMIT = 1
+            const val SUGGESTION_BOUND_REFRESH_INTERVAL_MILLIS = 60L * 60 * 1_000
             const val LAST_7_DAYS_OFFSET = 6L
             const val LAST_30_DAYS_OFFSET = 29L
             const val LAST_90_DAYS_OFFSET = 89L

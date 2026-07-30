@@ -480,7 +480,7 @@ class NotificationFilterService : NotificationListenerService() {
         val prepared = prepareBasePersistedEvaluation(evaluated, runtime)
         if (!token.isCurrent()) return
         var stagedAction: StagedNotificationAction? = null
-        var armed = false
+        var preserveArmedActionForRecovery = false
         var committed = false
         try {
             stagedAction =
@@ -500,36 +500,35 @@ class NotificationFilterService : NotificationListenerService() {
                     token = token,
                     filteringActionGate = filteringActionGate,
                     tokenCommit = { action ->
-                        rateLifecycleActor.commitIfRateCountsCurrent(
-                            snapshot = evaluated.common,
-                            expectation = evaluated.rateCountExpectation,
-                        ) {
-                            token.commit {
-                                armed =
-                                    armStagedActionAndRun(
-                                        outbox = notificationActionOutbox,
-                                        staged = durableStage,
-                                        onArmed = { armed = true },
-                                        action = action,
-                                    )
-                            } &&
-                                armed
-                        }
+                        armStagedActionThenCommit(
+                            outbox = notificationActionOutbox,
+                            staged = durableStage,
+                            rateCommit = { tokenCommit ->
+                                rateLifecycleActor.commitIfRateCountsCurrent(
+                                    snapshot = evaluated.common,
+                                    expectation = evaluated.rateCountExpectation,
+                                    commit = tokenCommit,
+                                )
+                            },
+                            tokenCommit = token::commit,
+                            onActionStart = { preserveArmedActionForRecovery = true },
+                            action = action,
+                        )
                     },
                 ) {
                     applyAction(key, evaluated.action)
                 }
         } catch (error: Throwable) {
-            if (armed) {
+            if (preserveArmedActionForRecovery) {
                 processingCoordinator.invalidateAll()
                 startActionOutboxRecovery(discardUnarmed = false)
             }
             throw error
         } finally {
-            discardUnarmedStagedAction(
+            discardStagedActionUnlessPreserved(
                 outbox = notificationActionOutbox,
                 staged = stagedAction,
-                armed = armed,
+                preserveForRecovery = preserveArmedActionForRecovery,
                 onFailure = {
                     Log.w(TAG, "Uncommitted notification action cleanup failed")
                 },
@@ -1138,27 +1137,34 @@ private const val INITIAL_ACTION_OUTBOX_RECOVERY_DELAY_MILLIS = 100L
 private const val MAX_ACTION_OUTBOX_RECOVERY_DELAY_MILLIS = 5_000L
 private const val MAX_ACTION_OUTBOX_RECOVERY_BACKOFF_EXPONENT = 6
 
-internal fun armStagedActionAndRun(
+/**
+ * Arms before entering callback-visible locks, then preserves rate-to-token order before Binder.
+ */
+internal fun armStagedActionThenCommit(
     outbox: NotificationActionOutbox,
-    staged: StagedNotificationAction?,
-    onArmed: () -> Unit = {},
+    staged: StagedNotificationAction,
+    rateCommit: (tokenCommit: () -> Boolean) -> Boolean,
+    tokenCommit: (action: () -> Unit) -> Boolean,
+    onActionStart: () -> Unit = {},
     action: () -> Unit,
 ): Boolean {
-    val armed = staged == null || runCatching { outbox.arm(staged) }.getOrDefault(false)
-    if (armed) {
-        onArmed()
-        action()
+    val armed = runCatching { outbox.arm(staged) }.getOrDefault(false)
+    if (!armed) return false
+    return rateCommit {
+        tokenCommit {
+            onActionStart()
+            action()
+        }
     }
-    return armed
 }
 
-internal suspend fun discardUnarmedStagedAction(
+internal suspend fun discardStagedActionUnlessPreserved(
     outbox: NotificationActionOutbox,
     staged: StagedNotificationAction?,
-    armed: Boolean,
+    preserveForRecovery: Boolean,
     onFailure: (Throwable) -> Unit = {},
 ) {
-    if (staged == null || armed) return
+    if (staged == null || preserveForRecovery) return
     withContext(NonCancellable) {
         runCatchingPreservingCancellation {
             outbox.discard(staged)

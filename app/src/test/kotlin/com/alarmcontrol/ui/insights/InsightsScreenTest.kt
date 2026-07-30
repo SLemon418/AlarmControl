@@ -190,6 +190,33 @@ class InsightsScreenTest {
     }
 
     @Test
+    fun summaryCard_showsInstalledAppLabelWhenItEqualsPackageName() {
+        composeRule.setContent {
+            InsightsScreen(
+                state =
+                    InsightsUiState(
+                        isLoading = false,
+                        summary =
+                            InsightsSummaryUi(
+                                mostMutedPackage = "com.example.same",
+                                mostMutedAppName = "com.example.same",
+                                mostMutedCount = 3,
+                                anomalyCount = 0,
+                                generatedAtMillis = System.currentTimeMillis(),
+                                mostMutedAppNameIsPackageFallback = false,
+                            ),
+                    ),
+                onUndo = {},
+                onRecategorize = { _, _, _, _ -> },
+                onUserMessageShown = {},
+            )
+        }
+
+        composeRule.onNodeWithText("Most muted: com.example.same (3)").assertIsDisplayed()
+        composeRule.onNodeWithText("Most muted: Unknown or removed app (3)").assertDoesNotExist()
+    }
+
+    @Test
     fun summaryCard_showsPlaceholderWhenNoSummary() {
         composeRule.setContent {
             InsightsScreen(

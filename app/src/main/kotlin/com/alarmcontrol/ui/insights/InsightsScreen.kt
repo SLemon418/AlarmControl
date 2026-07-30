@@ -347,7 +347,6 @@ private fun SuggestionCard(
     val appName =
         insightsAppName(
             suggestion.appName,
-            suggestion.packageName,
             suggestion.appNameIsPackageFallback,
         )
     Card(
@@ -562,7 +561,6 @@ private fun InsightsSummaryCard(
                 val appName =
                     insightsAppName(
                         summary.mostMutedAppName.orEmpty(),
-                        mostMutedPackage,
                         summary.mostMutedAppNameIsPackageFallback,
                     )
                 Row(
@@ -741,7 +739,7 @@ private fun DailyInsightSignalDetails(day: DailyInsightUi) {
     if (day.apps.isNotEmpty()) {
         Text(stringResource(R.string.insights_analysis_apps), style = MaterialTheme.typography.labelLarge)
         day.apps.take(DAILY_APP_DISPLAY_LIMIT).forEach { app ->
-            val appName = insightsAppName(app.appName, app.packageName, app.appNameIsPackageFallback)
+            val appName = insightsAppName(app.appName, app.appNameIsPackageFallback)
             Row(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -780,7 +778,6 @@ private fun DailyInsightChannelDetails(
         val appName =
             insightsAppName(
                 channel.appName,
-                channel.packageName,
                 channel.appNameIsPackageFallback,
             )
         TextButton(
@@ -1017,7 +1014,7 @@ internal fun EventRow(
 
 @Composable
 private fun EventIdentity(event: EventListItem) {
-    val appName = insightsAppName(event.appName, event.packageName, event.appNameIsPackageFallback)
+    val appName = insightsAppName(event.appName, event.appNameIsPackageFallback)
     AppIdentityIcon(
         appName = appName,
         appIcon = event.appIcon,
@@ -1030,7 +1027,7 @@ private fun EventDetails(
     event: EventListItem,
     modifier: Modifier = Modifier,
 ) {
-    val appName = insightsAppName(event.appName, event.packageName, event.appNameIsPackageFallback)
+    val appName = insightsAppName(event.appName, event.appNameIsPackageFallback)
     Column(modifier) {
         Text(
             text = appName,
@@ -1060,10 +1057,9 @@ private fun EventDetails(
 @Composable
 internal fun insightsAppName(
     appName: String,
-    packageName: String,
     isPackageFallback: Boolean,
 ): String =
-    if (isPackageFallback || appName.isBlank() || appName == packageName) {
+    if (isPackageFallback || appName.isBlank()) {
         stringResource(R.string.insights_unknown_app)
     } else {
         appName

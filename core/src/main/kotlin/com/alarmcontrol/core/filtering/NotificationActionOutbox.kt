@@ -3,8 +3,8 @@ package com.alarmcontrol.core.filtering
 /**
  * Durable two-phase boundary for every committed notification decision.
  *
- * A caller stages the complete privacy-safe record before claiming a listener token, arms it inside
- * that token's non-suspending commit callback, and only then performs cancel/snooze. Promotion is
+ * A caller stages the complete privacy-safe record, arms it without holding callback-visible
+ * freshness locks, then revalidates freshness immediately before cancel/snooze. Promotion is
  * idempotent: an armed row survives process death until it becomes the ordinary event record.
  */
 interface NotificationActionOutbox {
@@ -15,15 +15,15 @@ interface NotificationActionOutbox {
     ): StagedNotificationAction
 
     /**
-     * Durably authorizes a staged decision. This deliberately does not suspend so it can run inside
-     * the listener's atomic freshness callback immediately before the Binder action.
+     * Durably authorizes a staged decision. This deliberately does not suspend so the caller can
+     * finish the Room write before entering callback-visible freshness locks.
      */
     fun arm(staged: StagedNotificationAction): Boolean
 
     /** Atomically promotes an armed decision into history, returning the event id. */
     suspend fun promote(staged: StagedNotificationAction): String?
 
-    /** Removes an uncommitted staged decision after its listener token was rejected. */
+    /** Removes a staged decision after rate or listener freshness rejected its platform commit. */
     suspend fun discard(staged: StagedNotificationAction)
 
     /**

@@ -66,6 +66,7 @@ import org.junit.Test
 import java.time.Clock
 import java.time.Instant
 import java.time.LocalDate
+import java.time.ZoneId
 import java.time.ZoneOffset
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
@@ -123,6 +124,7 @@ class InsightsViewModelTest {
 
     private fun viewModel(
         dailyInsightWriteFence: DailyInsightWriteFence = DailyInsightWriteFence(),
+        testClock: Clock = clock,
     ): InsightsViewModel {
         every { eventRepository.observeRecent(any()) } returns recent
         every { eventRepository.observeActionBreakdownSince(any()) } returns actionBreakdownFlow
@@ -160,7 +162,7 @@ class InsightsViewModelTest {
             ruleSuggestionRepository,
             categories,
             appIdentityResolver,
-            clock,
+            testClock,
             mainDispatcherRule.dispatcher,
             dailyInsightWriteFence,
         )
@@ -552,6 +554,64 @@ class InsightsViewModelTest {
                     "channel:com.shop:offers",
                     Instant.parse("2026-06-22T10:00:00Z").toEpochMilli(),
                 )
+            }
+        }
+
+    @Test
+    fun `suggestion bounds advance with elapsed time new activity and screen resume`() =
+        runTest {
+            val testClock =
+                MutableTestClock(
+                    Instant.parse("2026-06-22T10:00:00Z"),
+                    ZoneOffset.UTC,
+                )
+            val observedBounds = mutableListOf<Pair<Long, Long>>()
+            val vm = viewModel(testClock = testClock)
+            every { ruleSuggestionRepository.observeSuggestions(any(), any()) } answers {
+                observedBounds += firstArg<Long>() to secondArg<Long>()
+                suggestionsFlow
+            }
+
+            vm.uiState.test {
+                awaitUntil { !it.isLoading }
+                mainDispatcherRule.dispatcher.scheduler.runCurrent()
+                val windowMillis = 7L * 24 * 60 * 60 * 1_000
+                val initialNow = testClock.millis()
+                assertEquals(listOf(initialNow - windowMillis to initialNow), observedBounds)
+
+                val refreshIntervalMillis = 60L * 60 * 1_000
+                testClock.advanceMillis(refreshIntervalMillis)
+                mainDispatcherRule.dispatcher.scheduler.advanceTimeBy(refreshIntervalMillis)
+                mainDispatcherRule.dispatcher.scheduler.runCurrent()
+                val elapsedNow = testClock.millis()
+                assertEquals(elapsedNow - windowMillis to elapsedNow, observedBounds.last())
+                assertEquals(2, observedBounds.size)
+
+                testClock.advanceMillis(60_000)
+                recent.value =
+                    listOf(
+                        NotificationEvent(
+                            packageName = "com.example.new",
+                            category = null,
+                            postedAtMillis = testClock.millis(),
+                            action = RuleAction.Keep,
+                            matchedRuleId = null,
+                            recordedAtMillis = testClock.millis(),
+                            id = "new",
+                        ),
+                    )
+                mainDispatcherRule.dispatcher.scheduler.runCurrent()
+                val activityNow = testClock.millis()
+                assertEquals(activityNow - windowMillis to activityNow, observedBounds.last())
+                assertEquals(3, observedBounds.size)
+
+                testClock.advanceMillis(60_000)
+                vm.refreshDayBoundary()
+                mainDispatcherRule.dispatcher.scheduler.runCurrent()
+                val resumedNow = testClock.millis()
+                assertEquals(resumedNow - windowMillis to resumedNow, observedBounds.last())
+                assertEquals(4, observedBounds.size)
+                cancelAndIgnoreRemainingEvents()
             }
         }
 
@@ -977,4 +1037,21 @@ class InsightsViewModelTest {
         )
 
     private fun InsightsDateRange.toUiRange(): AvailableRangeUi = AvailableRangeUi(startEpochDay, endEpochDay)
+}
+
+private class MutableTestClock(
+    initialInstant: Instant,
+    private val zoneId: ZoneId,
+) : Clock() {
+    private var currentInstant = initialInstant
+
+    override fun getZone(): ZoneId = zoneId
+
+    override fun withZone(zone: ZoneId): Clock = MutableTestClock(currentInstant, zone)
+
+    override fun instant(): Instant = currentInstant
+
+    fun advanceMillis(millis: Long) {
+        currentInstant = currentInstant.plusMillis(millis)
+    }
 }

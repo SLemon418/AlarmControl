@@ -357,7 +357,7 @@ internal fun NotificationDetailDialog(
     detail: NotificationDetailUi,
     onDismiss: () -> Unit,
 ) {
-    val appName = insightsAppName(detail.appName, detail.packageName, detail.appNameIsPackageFallback)
+    val appName = insightsAppName(detail.appName, detail.appNameIsPackageFallback)
     AlertDialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(securePolicy = SecureFlagPolicy.SecureOn),
@@ -595,7 +595,7 @@ private fun TrendBars(
 private fun AppBreakdown(apps: List<AppAnalysisUi>) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         apps.take(DISPLAY_LIMIT).forEach { app ->
-            val appName = insightsAppName(app.appName, app.packageName, app.appNameIsPackageFallback)
+            val appName = insightsAppName(app.appName, app.appNameIsPackageFallback)
             val percent =
                 if (app.totalCount <= 0) {
                     0
@@ -786,7 +786,6 @@ private fun ChannelBreakdown(
             val appName =
                 insightsAppName(
                     channel.appName,
-                    channel.packageName,
                     channel.appNameIsPackageFallback,
                 )
             TextButton(
@@ -895,7 +894,6 @@ private fun HistorySourceSelector(
                 val appName =
                     insightsAppName(
                         source.appName,
-                        source.packageName,
                         source.appNameIsPackageFallback,
                     )
                 AppIdentityIcon(appName, source.appIcon, Modifier.padding(end = 8.dp).size(28.dp))
@@ -930,7 +928,6 @@ private fun HistorySourceSelector(
                             val appName =
                                 insightsAppName(
                                     source.appName,
-                                    source.packageName,
                                     source.appNameIsPackageFallback,
                                 )
                             AppIdentityIcon(appName, source.appIcon, Modifier.size(28.dp))
@@ -953,7 +950,7 @@ private fun HistorySourceSelector(
 
 @Composable
 private fun HistorySourceUi.displayLabel(): String {
-    val displayName = insightsAppName(appName, packageName, appNameIsPackageFallback)
+    val displayName = insightsAppName(appName, appNameIsPackageFallback)
     return channelName?.let { "$displayName · $it" } ?: displayName
 }
 
