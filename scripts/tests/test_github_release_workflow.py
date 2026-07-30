@@ -103,6 +103,14 @@ class GitHubReleaseWorkflowTest(unittest.TestCase):
             self.assertIn(label, self.workflow)
         self.assertIn("GitHub does not select an ABI automatically", self.workflow)
 
+    def test_release_notes_report_release_commit_gates(self) -> None:
+        for result in (
+            "API 34 managed-device suites passed",
+            "`releaseCandidate` passed JVM, quality, offline",
+            "for this tag commit",
+        ):
+            self.assertIn(result, self.workflow)
+
     def test_remote_actions_are_immutably_pinned(self) -> None:
         uses_pattern = re.compile(r"^\s*(?:-\s*)?uses:\s+([^\s#]+)", re.MULTILINE)
         immutable_action = re.compile(r"[^@\s]+@[0-9a-fA-F]{40}")

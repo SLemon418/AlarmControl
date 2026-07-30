@@ -207,7 +207,7 @@ jobs:
             "${assets[@]}" \
             --draft \
             --generate-notes \
-            --notes $'### Which APK should I download?\n\n- **arm64-v8a:** most current Android phones and tablets\n- **armeabi-v7a:** older 32-bit ARM devices\n- **x86_64 / x86:** mainly emulators or Intel-based devices\n- **universal:** use this if you are unsure\n\nDownload the `.sha256` file with the same name as your APK. GitHub does not select an ABI automatically.' \
+            --notes $'### Release verification\n\n- API 34 managed-device suites passed for Room migrations and SQL, bundled TFLite runtime and assets, and app runtime smoke coverage.\n- `releaseCandidate` passed JVM, quality, offline, test-APK, Baseline Profile, payload, ABI, and signer-certificate gates for this tag commit.\n\n### Which APK should I download?\n\n- **arm64-v8a:** most current Android phones and tablets\n- **armeabi-v7a:** older 32-bit ARM devices\n- **x86_64 / x86:** mainly emulators or Intel-based devices\n- **universal:** use this if you are unsure\n\nDownload the `.sha256` file with the same name as your APK. GitHub does not select an ABI automatically.' \
             --title "AlarmControl $GITHUB_REF_NAME" \
             --verify-tag
           gh release edit "$GITHUB_REF_NAME" --draft=false
